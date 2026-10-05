@@ -34,6 +34,8 @@ type Monitor struct {
 	StateDir string
 	Log      *slog.Logger
 
+	// Every is how often rates, disk and memory are checked (default a minute).
+	Every time.Duration
 	// Thresholds (defaults in Run).
 	HealthEvery     time.Duration
 	HealthFailures  int
@@ -60,6 +62,9 @@ type rate struct{ total, bad int }
 func (m *Monitor) Init() { m.once.Do(m.defaults) }
 
 func (m *Monitor) defaults() {
+	if m.Every == 0 {
+		m.Every = time.Minute
+	}
 	if m.HealthEvery == 0 {
 		m.HealthEvery = 30 * time.Second
 	}
@@ -152,7 +157,7 @@ func accessFields(s string) (host string, status int) {
 }
 
 func (m *Monitor) watchRates(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(m.Every)
 	defer t.Stop()
 	for {
 		select {
@@ -357,10 +362,9 @@ func (m *Monitor) probe(ctx context.Context, v store.Service, container string) 
 	}
 }
 
-// watchResources checks disk and memory once a minute. On low disk the oldest log segments
-// go first.
+// watchResources checks disk and memory every minute.
 func (m *Monitor) watchResources(ctx context.Context) {
-	t := time.NewTicker(time.Minute)
+	t := time.NewTicker(m.Every)
 	defer t.Stop()
 	for {
 		select {
@@ -368,23 +372,39 @@ func (m *Monitor) watchResources(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		threshold := m.Platform().Limits.DiskFreeAlert
-		if free, total, ok := diskFree(m.StateDir); ok && total > 0 {
-			pct := int(free * 100 / total)
-			if pct < threshold {
-				freed := int64(0)
-				if m.Logs != nil {
-					want := int64(threshold)*total/100 - free
-					freed = m.Logs.TrimOldest(want)
-				}
-				m.Events.Emit(ctx, Event{Kind: "disk", Severity: Warn,
-					Message: fmt.Sprintf("only %d%% disk free (%s of %s); removed %s of old logs", pct, config.FormatBytes(free&^(1<<20-1)), config.FormatBytes(total&^(1<<20-1)), config.FormatBytes(freed&^(1<<10-1)))}, "")
-			}
+		if free, total, ok := diskFree(m.StateDir); ok {
+			m.checkDisk(ctx, free, total)
 		}
-		if avail, total, ok := memAvailable(); ok && total > 0 && avail*10 < total {
-			m.Events.Emit(ctx, Event{Kind: "memory", Severity: Warn,
-				Message: fmt.Sprintf("only %d MB of %d MB memory available", avail>>20, total>>20)}, "")
+		if avail, total, ok := memAvailable(); ok {
+			m.checkMemory(ctx, avail, total)
 		}
+	}
+}
+
+// checkDisk alerts below the platform's free-disk threshold; the oldest log segments go first
+// to get back above it.
+func (m *Monitor) checkDisk(ctx context.Context, free, total int64) {
+	threshold := m.Platform().Limits.DiskFreeAlert
+	if total <= 0 {
+		return
+	}
+	pct := int(free * 100 / total)
+	if pct >= threshold {
+		return
+	}
+	freed := int64(0)
+	if m.Logs != nil {
+		freed = m.Logs.TrimOldest(int64(threshold)*total/100 - free)
+	}
+	m.Events.Emit(ctx, Event{Kind: "disk", Severity: Warn,
+		Message: fmt.Sprintf("only %d%% disk free (%s of %s); removed %s of old logs", pct, config.FormatBytes(free&^(1<<20-1)), config.FormatBytes(total&^(1<<20-1)), config.FormatBytes(freed&^(1<<10-1)))}, "")
+}
+
+// checkMemory alerts when less than 10% of the memory is available.
+func (m *Monitor) checkMemory(ctx context.Context, avail, total int64) {
+	if total > 0 && avail*10 < total {
+		m.Events.Emit(ctx, Event{Kind: "memory", Severity: Warn,
+			Message: fmt.Sprintf("only %d MB of %d MB memory available", avail>>20, total>>20)}, "")
 	}
 }
 

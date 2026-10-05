@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -230,4 +231,79 @@ func TestAccessFields(t *testing.T) {
 	if h != "a.example.com" || s != 503 {
 		t.Fatal(h, s)
 	}
+}
+
+// waitAlert waits until an alert containing s was sent.
+func (f *fixture) waitAlert(t *testing.T, s string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, a := range f.sent() {
+			if strings.Contains(a, s) {
+				return
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("no alert with %q, got %q", s, f.sent())
+}
+
+func TestRunWatchers(t *testing.T) {
+	f := newFixture(t)
+	f.m.Every, f.m.HealthEvery = 20*time.Millisecond, 20*time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { f.m.Run(ctx); close(done) }()
+
+	f.d.events <- ev("die", "shop-api-r1-1", 1, "exitCode", "1")
+	f.waitAlert(t, "exited with code 1")
+
+	f.p.mu.Lock()
+	f.p.down = true
+	f.p.mu.Unlock()
+	f.waitAlert(t, "does not answer /health")
+
+	for i := 0; i < 25; i++ {
+		f.m.OnLine(logs.Key{Project: "shop", Kind: logs.KindAccess, Name: "_"}, logs.Line{L: `{"host":"api.example.com","status":503}`})
+	}
+	f.waitAlert(t, "25 of 25 requests failed")
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Run did not stop")
+	}
+}
+
+func TestDiskAndMemory(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	const mb = 1 << 20
+	f.m.Platform().Limits.DiskFreeAlert = 10
+
+	// Old log segments are trimmed to get back above the threshold.
+	k := logs.Key{Project: "shop", Kind: logs.KindApp, Name: "api"}
+	dir := filepath.Join(f.m.Logs.DataDir, "shop", logs.KindApp, "api")
+	os.MkdirAll(dir, 0o755)
+	old := time.Now().Add(-72 * time.Hour).UTC().Truncate(time.Hour)
+	for i := range 3 {
+		os.WriteFile(filepath.Join(dir, old.Add(time.Duration(i)*time.Hour).Format("2006010215")+".zst"), make([]byte, 4096), 0o644)
+	}
+	before := f.m.Logs.DiskUsage(k)
+
+	f.m.checkDisk(ctx, 50*mb, 1000*mb) // 5% free
+	f.waitAlert(t, "only 5% disk free")
+	if f.m.Logs.DiskUsage(k) >= before {
+		t.Fatal("no old logs were removed on low disk")
+	}
+	n := len(f.sent())
+	f.m.checkDisk(ctx, 500*mb, 1000*mb)
+	f.m.checkDisk(ctx, 0, 0) // unknown
+	f.m.checkMemory(ctx, 500*mb, 1000*mb)
+	if len(f.sent()) != n {
+		t.Fatalf("alerts without a reason: %q", f.sent()[n:])
+	}
+	f.m.checkMemory(ctx, 50*mb, 1000*mb)
+	f.waitAlert(t, "only 50 MB of 1000 MB memory available")
 }
