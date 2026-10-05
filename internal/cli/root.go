@@ -41,7 +41,10 @@ type target struct {
 }
 
 func NewRoot(version string) *cobra.Command {
-	a := &app{version: version, out: os.Stdout, err: os.Stderr}
+	return newRoot(&app{version: version, out: os.Stdout, err: os.Stderr})
+}
+
+func newRoot(a *app) *cobra.Command {
 	root := &cobra.Command{
 		Use:           "clowctl",
 		Short:         "Deploy locally built images to a clowdr server",

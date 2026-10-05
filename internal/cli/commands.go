@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	goruntime "runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -379,12 +381,15 @@ func (a *app) logsCmd() *cobra.Command {
 				q.Set("release", release)
 			}
 			errc := make(chan error, len(names))
+			var mu sync.Mutex // one stream per service, one writer
 			for _, n := range names {
 				go func() {
 					path := api.Path("projects", t.project, "services", n, "logs") + "?" + q.Encode()
 					errc <- t.client.Logs(cmd.Context(), path, func(l api.LogLine) {
+						mu.Lock()
+						defer mu.Unlock()
 						prefix := replicaOf(l.Container)
-						if len(names) > 1 {
+						if all {
 							prefix = n + prefix
 						}
 						switch {
@@ -584,7 +589,7 @@ func (a *app) contextCmd() *cobra.Command {
 				return fmt.Errorf("cannot reach %s: %w", server, err)
 			}
 			if c.Fingerprint != "" {
-				if err := trustForDocker(server, a.err); err != nil {
+				if err := trustForDocker(server, c.Fingerprint, a.err); err != nil {
 					fmt.Fprintf(a.err, "warning: %v\n", err)
 				}
 			}
@@ -656,8 +661,9 @@ func fetchFingerprint(server string) (string, error) {
 }
 
 // trustForDocker installs the server's self-signed certificate for docker push:
-// ~/.docker/certs.d (Docker Desktop, OrbStack) or /etc/docker/certs.d (Linux engine).
-func trustForDocker(server string, log interface{ Write([]byte) (int, error) }) error {
+// ~/.docker/certs.d (Docker Desktop, OrbStack) or /etc/docker/certs.d (Linux engine). The
+// certificate must match the pinned fingerprint.
+func trustForDocker(server, fingerprint string, log io.Writer) error {
 	u, _ := url.Parse(server)
 	conn, err := tls.Dial("tcp", u.Host, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
@@ -665,13 +671,17 @@ func trustForDocker(server string, log interface{ Write([]byte) (int, error) }) 
 	}
 	cert := conn.ConnectionState().PeerCertificates[0]
 	conn.Close()
+	if !strings.EqualFold(api.CertFingerprint(cert), fingerprint) {
+		return fmt.Errorf("%s presented a certificate that does not match the pinned fingerprint", u.Host)
+	}
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
+	dir := certsDirName(u.Host)
 	var dirs []string
 	if home, err := os.UserHomeDir(); err == nil {
-		dirs = append(dirs, filepath.Join(home, ".docker", "certs.d", u.Host))
+		dirs = append(dirs, filepath.Join(home, ".docker", "certs.d", dir))
 	}
 	if goruntime.GOOS == "linux" {
-		dirs = append(dirs, filepath.Join("/etc/docker/certs.d", u.Host))
+		dirs = append(dirs, filepath.Join("/etc/docker/certs.d", dir))
 	}
 	var lastErr error
 	for _, d := range dirs {
@@ -685,10 +695,24 @@ func trustForDocker(server string, log interface{ Write([]byte) (int, error) }) 
 		}
 		fmt.Fprintf(log, "docker trusts %s via %s\n", u.Host, filepath.Join(d, "ca.crt"))
 	}
-	if lastErr != nil && goruntime.GOOS == "linux" {
-		return fmt.Errorf("%v; run: sudo mkdir -p /etc/docker/certs.d/%s && sudo cp ~/.docker/certs.d/%s/ca.crt /etc/docker/certs.d/%s/", lastErr, u.Host, u.Host, u.Host)
+	switch {
+	case lastErr != nil && goruntime.GOOS == "linux":
+		return fmt.Errorf("%v; run: sudo mkdir -p /etc/docker/certs.d/%s && sudo cp ~/.docker/certs.d/%s/ca.crt /etc/docker/certs.d/%s/", lastErr, dir, dir, dir)
+	case lastErr != nil:
+		return lastErr
+	case goruntime.GOOS == "windows":
+		fmt.Fprintf(log, "if docker push still fails with an x509 error, trust it in Windows: certutil -user -addstore Root %s\n", filepath.Join(dirs[0], "ca.crt"))
 	}
 	return nil
+}
+
+// certsDirName is the certs.d directory docker looks up for a registry host: host:port, or
+// hostport on Windows where ':' cannot be in a file name (moby's cleanPath).
+func certsDirName(host string) string {
+	if goruntime.GOOS == "windows" {
+		return strings.ReplaceAll(host, ":", "")
+	}
+	return host
 }
 
 // Admin
