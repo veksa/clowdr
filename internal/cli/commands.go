@@ -333,7 +333,8 @@ func (a *app) routesCmd() *cobra.Command {
 
 func (a *app) logsCmd() *cobra.Command {
 	var follow, all bool
-	var since, grep, release string
+	var since, until, grep, release string
+	var download, timestamps bool
 	var tail int
 	cmd := &cobra.Command{
 		Use:   "logs [service]",
@@ -364,6 +365,12 @@ func (a *app) logsCmd() *cobra.Command {
 			}
 			if since != "" {
 				q.Set("since", since)
+			}
+			if until != "" {
+				q.Set("until", until)
+			}
+			if download && !cmd.Flags().Changed("tail") {
+				q.Set("tail", "0")
 			}
 			if grep != "" {
 				q.Set("grep", grep)
@@ -397,8 +404,11 @@ func (a *app) logsCmd() *cobra.Command {
 	f.BoolVarP(&follow, "follow", "f", false, "stream new lines")
 	f.BoolVar(&all, "all", false, "all services of the project")
 	f.IntVar(&tail, "tail", 100, "lines from the end")
-	f.StringVar(&since, "since", "", "only newer than, e.g. 2h")
-	f.StringVar(&grep, "grep", "", "only lines containing this (filtered on the server)")
+	f.StringVar(&since, "since", "", "only newer than, e.g. 2h, 7d or an RFC 3339 time")
+	f.StringVar(&until, "until", "", "only older than, e.g. 1h")
+	f.BoolVar(&download, "download", false, "plain output of the whole range (with --since), for saving to a file")
+	f.BoolVarP(&timestamps, "timestamps", "t", false, "show times")
+	f.StringVar(&grep, "grep", "", "regular expression, filtered on the server (ERROR|timeout)")
 	f.StringVar(&release, "release", "", "logs of a release (e.g. a failed one), like r12")
 	return cmd
 }
@@ -897,4 +907,12 @@ func firstLine(s string) string {
 		s = s[:77] + "..."
 	}
 	return s
+}
+
+func shortTime(rfc string) string {
+	t, err := time.Parse(time.RFC3339Nano, rfc)
+	if err != nil {
+		return rfc
+	}
+	return t.Local().Format("01-02 15:04:05.000")
 }

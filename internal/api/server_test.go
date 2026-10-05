@@ -28,6 +28,7 @@ import (
 
 type env struct {
 	srv   *httptest.Server
+	api   *Server
 	admin *Client
 	st    *store.Store
 	d     *fake.Docker
@@ -62,7 +63,7 @@ func newEnv(t *testing.T) *env {
 	if err := st.PutToken(tok); err != nil {
 		t.Fatal(err)
 	}
-	return &env{srv: srv, admin: NewClient(srv.URL, secret, ""), st: st, d: d, dir: dir}
+	return &env{srv: srv, api: s, admin: NewClient(srv.URL, secret, ""), st: st, d: d, dir: dir}
 }
 
 func (e *env) projectClient(t *testing.T, project string, domains ...string) *Client {

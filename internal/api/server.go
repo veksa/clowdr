@@ -20,6 +20,7 @@ import (
 	"github.com/veksa/clowdr/internal/auth"
 	"github.com/veksa/clowdr/internal/deploy"
 	"github.com/veksa/clowdr/internal/ingress"
+	"github.com/veksa/clowdr/internal/logs"
 	"github.com/veksa/clowdr/internal/registry"
 	"github.com/veksa/clowdr/internal/runtime"
 	"github.com/veksa/clowdr/internal/spec"
@@ -34,6 +35,8 @@ type Server struct {
 	Version  string
 	// RegistryKind is shown in `clowctl version` ("containerd" or "fs").
 	RegistryKind string
+	// Logs is the log store; nil falls back to docker logs.
+	Logs *logs.Store
 }
 
 type ctxKey struct{}
@@ -74,6 +77,7 @@ func (s *Server) Handler() http.Handler {
 	a("GET /v1/projects/{project}/services/{service}/logs", s.logs)
 	a("GET /v1/projects/{project}/services/{service}/env", s.getEnv)
 	a("PATCH /v1/projects/{project}/services/{service}/env", s.patchEnv)
+	a("GET /v1/projects/{project}/access", s.access)
 
 	if s.Registry != nil {
 		mux.Handle("/v2/", s.Registry)
@@ -675,9 +679,8 @@ func (s *Server) patchEnv(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(204)
 }
 
-// Logs
-
-func (s *Server) logs(w http.ResponseWriter, r *http.Request) {
+// dockerLogs reads `docker logs` (json-file driver; development and tests).
+func (s *Server) dockerLogs(w http.ResponseWriter, r *http.Request) {
 	project, service := r.PathValue("project"), r.PathValue("service")
 	q := r.URL.Query()
 	v, err := s.Store.Service(project, service)

@@ -175,3 +175,12 @@ func Path(parts ...string) string {
 	}
 	return "/v1/" + strings.Join(parts, "/")
 }
+
+// Raw returns the response body of a GET for streaming.
+func (c *Client) Raw(ctx context.Context, method, path string) (io.ReadCloser, error) {
+	resp, err := c.req(ctx, method, path, nil)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}

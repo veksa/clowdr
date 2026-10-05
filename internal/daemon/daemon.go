@@ -91,6 +91,17 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 	current := plat
 	ing := &ingress.Controller{Dir: ingress.ConfDir, Nginx: deploy.NginxExec{Docker: docker}}
 	eng := deploy.New(docker, st, func() *config.Platform { return current }, ing, log)
+
+	// Logs: containers -> fluentd protocol, nginx -> syslog socket; buffered in tmpfs, flushed
+	// to disk in compressed batches.
+	logStore, stopLogs, err := startLogs(ctx, o, st, func() *config.Platform { return current }, log)
+	if err != nil {
+		return err
+	}
+	defer stopLogs()
+	eng.Syslog = true
+	eng.LogTail = logStore.Tail
+	eng.LogConfig = fluentdLogConfig
 	if tg := plat.Notify.Telegram; tg.Token != "" && tg.ChatID != "" {
 		bot := &notify.Telegram{Token: tg.Token, ChatID: tg.ChatID, Log: log}
 		eng.Notify = bot.Send
@@ -108,7 +119,7 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 		return err
 	}
 
-	srv := &api.Server{Store: st, Engine: eng, Log: log, Version: o.Version, RegistryKind: regKind}
+	srv := &api.Server{Store: st, Engine: eng, Log: log, Version: o.Version, RegistryKind: regKind, Logs: logStore}
 	reg := &registry.Handler{Store: regStore, Owners: st, Authorize: srv.RegistryAuthorize, Log: log}
 	srv.Registry = reg
 	handler := srv.Handler()

@@ -80,6 +80,13 @@ type Engine struct {
 	Notify func(ctx context.Context, text string)
 	// RoutesChanged is called after a project's nginx config changed (ACME picks up new domains).
 	RoutesChanged func()
+	// LogConfig sets the docker log driver of service containers (fluentd into clowdrd);
+	// nil keeps json-file.
+	LogConfig func(project, service string, release uint64, replica int) *runtime.LogConfig
+	// LogTail reads the last lines of a container from the log store; nil uses docker logs.
+	LogTail func(project, service string, release uint64, replica, n int) []string
+	// Syslog makes nginx send access and error logs to clowdrd.
+	Syslog bool
 
 	locks   sync.Map // project/service -> *sync.Mutex
 	renderM sync.Mutex
@@ -278,9 +285,9 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 	rel.Containers = started
 	e.Store.PutRelease(rel)
 
-	for _, c := range started {
+	for i, c := range started {
 		if err := e.waitHealthy(ctx, req.Project, s, c, progress); err != nil {
-			tail := e.tail(ctx, c, 30)
+			tail := e.tail(ctx, req.Project, s.Name, rel.ID, i+1, c, 20)
 			if tail != "" {
 				progress("last log lines of %s:\n%s", c, tail)
 			}
@@ -517,7 +524,7 @@ func (e *Engine) startContainer(ctx context.Context, project string, s spec.Serv
 		Network: NetworkName(project),
 		Aliases: []string{s.Name},
 		Mounts:  mounts,
-		Log:     &runtime.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "10m", "max-file": "3"}},
+		Log:     e.logConfig(project, s.Name, release, replica),
 	})
 	if err != nil {
 		return "", err
@@ -590,7 +597,16 @@ func (e *Engine) waitHealthy(ctx context.Context, project string, s spec.Service
 	}
 }
 
-func (e *Engine) tail(ctx context.Context, container string, n int) string {
+func (e *Engine) tail(ctx context.Context, project, service string, release uint64, replica int, container string, n int) string {
+	if e.LogTail != nil {
+		// The log driver delivers asynchronously; give the last lines a moment to arrive.
+		time.Sleep(500 * time.Millisecond)
+		var b strings.Builder
+		for _, l := range e.LogTail(project, service, release, replica, n) {
+			b.WriteString("  " + l + "\n")
+		}
+		return strings.TrimRight(b.String(), "\n")
+	}
 	rc, err := e.Docker.ContainerLogs(context.WithoutCancel(ctx), container, false, fmt.Sprint(n), time.Time{})
 	if err != nil {
 		return ""
@@ -835,7 +851,7 @@ func (e *Engine) renderProject(project string) (string, error) {
 func (e *Engine) IngressOptions() ingress.Options {
 	p := e.Platform()
 	return ingress.Options{
-		Syslog:                false,
+		Syslog:                e.Syslog,
 		TrustedProxies:        p.TrustedProxies,
 		WorkerShutdownTimeout: p.Nginx.WorkerShutdownTimeout.D(),
 		ClientMaxBody:         int64(p.Nginx.ClientMaxBodySize),
@@ -899,4 +915,11 @@ func (e *Engine) CertDomains() []string {
 		}
 	}
 	return out
+}
+
+func (e *Engine) logConfig(project, service string, release uint64, replica int) *runtime.LogConfig {
+	if e.LogConfig != nil {
+		return e.LogConfig(project, service, release, replica)
+	}
+	return &runtime.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "10m", "max-file": "3"}}
 }
