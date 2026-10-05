@@ -24,6 +24,8 @@ type Platform struct {
 	Listen string `yaml:"listen"`
 	// ACMEEmail is used for Let's Encrypt registration.
 	ACMEEmail string `yaml:"acme_email"`
+	// ACMEDirectory overrides the ACME server (Let's Encrypt staging, Pebble in tests).
+	ACMEDirectory string `yaml:"acme_directory"`
 
 	Nginx          NginxConf               `yaml:"nginx"`
 	TrustedProxies []string                `yaml:"trusted_proxies"` // "cloudflare" or CIDRs

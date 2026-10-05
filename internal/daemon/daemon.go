@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/veksa/clowdr/internal/acme"
 	"github.com/veksa/clowdr/internal/api"
 	"github.com/veksa/clowdr/internal/auth"
 	"github.com/veksa/clowdr/internal/config"
@@ -155,6 +156,41 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 		log.Info("no domain configured: API and registry use a self-signed certificate", "fingerprint", fp)
 		os.WriteFile(filepath.Join(o.StateDir, "tls", "fingerprint"), []byte(fp+"\n"), 0o644)
 	}
+
+	// Certificates: deploy.<domain> and `tls: direct` domains. Checked on start, after route
+	// changes and twice a day; nginx reloads when a certificate was issued.
+	certs := &acme.Manager{
+		Directory: plat.ACMEDirectory, Email: plat.ACMEEmail, StateDir: o.StateDir,
+		CertDir: ingress.CertDir, ChallengeDir: api.ACMEDir, Log: log,
+	}
+	kick := make(chan struct{}, 1)
+	eng.RoutesChanged = func() {
+		select {
+		case kick <- struct{}{}:
+		default:
+		}
+	}
+	go func() {
+		t := time.NewTicker(12 * time.Hour)
+		defer t.Stop()
+		for {
+			issued, err := certs.Ensure(ctx, eng.CertDomains())
+			if err != nil {
+				log.Error("acme", "err", err)
+			}
+			if len(issued) > 0 {
+				if err := eng.RenderAll(ctx); err != nil {
+					log.Error("nginx after new certificates", "err", err)
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+			case <-kick:
+			}
+		}
+	}()
 
 	// Housekeeping.
 	go func() {

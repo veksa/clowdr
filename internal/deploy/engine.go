@@ -78,6 +78,8 @@ type Engine struct {
 	CertExists func(domain string) bool
 	// Notify is called on deploy results (Telegram etc). Optional.
 	Notify func(ctx context.Context, text string)
+	// RoutesChanged is called after a project's nginx config changed (ACME picks up new domains).
+	RoutesChanged func()
 
 	locks   sync.Map // project/service -> *sync.Mutex
 	renderM sync.Mutex
@@ -794,7 +796,13 @@ func (e *Engine) RenderProject(ctx context.Context, project string) error {
 	if err != nil {
 		return err
 	}
-	return e.Ingress.Apply(ctx, ingress.File{Path: ingress.ProjectFile(project), Content: content})
+	if err := e.Ingress.Apply(ctx, ingress.File{Path: ingress.ProjectFile(project), Content: content}); err != nil {
+		return err
+	}
+	if e.RoutesChanged != nil {
+		e.RoutesChanged()
+	}
+	return nil
 }
 
 func (e *Engine) renderProject(project string) (string, error) {
@@ -872,4 +880,20 @@ func contains(list []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// CertDomains lists domains clowdr must hold certificates for: deploy.<domain> and every
+// domain of a service with `tls: direct`.
+func (e *Engine) CertDomains() []string {
+	var out []string
+	if d := e.Platform().DeployHost(); d != "" {
+		out = append(out, d)
+	}
+	svcs, _ := e.Store.Services("")
+	for _, v := range svcs {
+		if v.Spec.TLS == spec.TLSDirect {
+			out = append(out, v.Spec.Domains...)
+		}
+	}
+	return out
 }
