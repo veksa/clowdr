@@ -91,6 +91,7 @@ type Engine struct {
 	Syslog bool
 
 	locks   sync.Map // project/service -> *sync.Mutex
+	pushed  sync.Map // image -> time.Time of the last push
 	renderM sync.Mutex
 	drains  sync.WaitGroup
 }

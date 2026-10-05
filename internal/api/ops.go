@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/veksa/clowdr/internal/deploy"
 	"github.com/veksa/clowdr/internal/monitor"
@@ -147,4 +148,16 @@ func (s *Server) removeAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(204)
+}
+
+func (s *Server) gc(w http.ResponseWriter, r *http.Request) {
+	res, err := s.Engine.GC(r.Context())
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if s.Registry != nil {
+		s.Registry.ExpireUploads(r.Context(), time.Hour)
+	}
+	writeJSON(w, 200, res)
 }

@@ -123,8 +123,10 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 	if err := bootstrapNginx(ctx, eng, ing, st); err != nil {
 		return err
 	}
-	if err := cleanupOrphans(ctx, docker, st, log); err != nil {
-		log.Warn("orphan cleanup", "err", err)
+	if res, err := eng.GC(ctx); err != nil {
+		log.Warn("gc", "err", err)
+	} else if len(res.Containers)+len(res.Images) > 0 {
+		log.Info("gc", "containers", res.Containers, "images", res.Images)
 	}
 
 	if err := bootstrapAdmin(st, o.StateDir, log); err != nil {
@@ -132,7 +134,10 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 	}
 
 	srv := &api.Server{Store: st, Engine: eng, Log: log, Version: o.Version, RegistryKind: regKind, Logs: logStore, Events: events, StateDir: o.StateDir}
-	reg := &registry.Handler{Store: regStore, Owners: st, Authorize: srv.RegistryAuthorize, Log: log}
+	reg := &registry.Handler{Store: regStore, Owners: st, Authorize: srv.RegistryAuthorize, Log: log,
+		OnTag: func(_ context.Context, repo, tag string, _ registry.Descriptor) {
+			eng.Pushed(registry.ImagePrefix + repo + ":" + tag)
+		}}
 	srv.Registry = reg
 	handler := srv.Handler()
 
@@ -225,6 +230,9 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 				return
 			case <-t.C:
 				reg.ExpireUploads(ctx, time.Hour)
+				if _, err := eng.GC(ctx); err != nil {
+					log.Warn("gc", "err", err)
+				}
 				if err := eng.EnsureNginx(ctx); err != nil {
 					log.Error("nginx", "err", err)
 				}
@@ -302,35 +310,6 @@ func bootstrapNginx(ctx context.Context, eng *deploy.Engine, ing *ingress.Contro
 	}
 	if err := eng.RenderAll(ctx); err != nil {
 		return fmt.Errorf("nginx config: %w", err)
-	}
-	return nil
-}
-
-// cleanupOrphans removes service containers that no release references any more (e.g. a
-// clowdrd crash in the middle of a deploy).
-func cleanupOrphans(ctx context.Context, d *runtime.Docker, st *store.Store, log *slog.Logger) error {
-	cs, err := d.Containers(ctx, runtime.LabelManaged, runtime.LabelRole+"=service")
-	if err != nil {
-		return err
-	}
-	svcs, err := st.Services("")
-	if err != nil {
-		return err
-	}
-	keep := map[string]bool{}
-	for _, v := range svcs {
-		if r, err := st.Release(v.Project, v.Name, v.Current); err == nil && v.Current != 0 {
-			for _, c := range r.Containers {
-				keep[c] = true
-			}
-		}
-	}
-	for _, c := range cs {
-		if keep[c.Name()] {
-			continue
-		}
-		log.Info("removing orphan container", "name", c.Name())
-		d.ContainerRemove(ctx, c.ID)
 	}
 	return nil
 }

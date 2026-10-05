@@ -66,6 +66,7 @@ func (s *Server) Handler() http.Handler {
 	admin("POST /v1/tokens", s.createToken)
 	admin("DELETE /v1/tokens/{id}", s.deleteToken)
 	admin("POST /v1/platform/reconcile", s.reconcile)
+	admin("POST /v1/gc", s.gc)
 
 	a("GET /v1/projects/{project}", s.getProject)
 	a("GET /v1/projects/{project}/services", s.listServices)

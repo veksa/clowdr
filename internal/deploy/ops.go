@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/veksa/clowdr/internal/config"
 	"github.com/veksa/clowdr/internal/runtime"
@@ -172,4 +173,77 @@ func (e *Engine) RemoveAddon(ctx context.Context, project, addon string, volumes
 		}
 	}
 	return nil
+}
+
+// GCResult is what `clowctl gc` removed.
+type GCResult struct {
+	Containers []string `json:"containers"`
+	Images     []string `json:"images"`
+}
+
+// GC removes service containers no release needs any more, old images of every service
+// and pushed images that were never deployed.
+func (e *Engine) GC(ctx context.Context) (GCResult, error) {
+	var res GCResult
+	svcs, err := e.Store.Services("")
+	if err != nil {
+		return res, err
+	}
+	keepC := map[string]bool{}
+	keepI := map[string]bool{}
+	for _, v := range svcs {
+		e.gc(ctx, v.Project, v.Name)
+		rels, _ := e.Store.Releases(v.Project, v.Name)
+		for _, r := range rels {
+			if r.ID == v.Current || r.ID == v.Previous {
+				keepI[r.Image] = true
+			}
+			if r.ID == v.Current || r.ID == v.Previous || r.Status == store.StatusDeploying {
+				for _, c := range r.Containers {
+					keepC[c] = true
+				}
+			}
+		}
+	}
+	cs, err := e.Docker.Containers(ctx, runtime.LabelManaged, runtime.LabelRole+"=service")
+	if err != nil {
+		return res, err
+	}
+	for _, c := range cs {
+		if !keepC[c.Name()] {
+			if err := e.Docker.ContainerRemove(ctx, c.ID); err == nil {
+				res.Containers = append(res.Containers, c.Name())
+			}
+		}
+	}
+	if lister, ok := e.Docker.(interface {
+		Images(ctx context.Context, reference string) ([]runtime.ImageSummary, error)
+	}); ok {
+		imgs, err := lister.Images(ctx, "clowdr.local/*/*")
+		if err == nil {
+			for _, img := range imgs {
+				for _, tag := range img.RepoTags {
+					if strings.HasPrefix(tag, "clowdr.local/") && !keepI[tag] && e.unused(tag) {
+						if err := e.Docker.ImageRemove(ctx, tag); err == nil {
+							res.Images = append(res.Images, tag)
+						}
+					}
+				}
+			}
+		}
+	}
+	return res, nil
+}
+
+// Pushed records that the registry received an image; GC leaves it alone for an hour, as a
+// deploy usually follows the push.
+func (e *Engine) Pushed(image string) {
+	e.pushed.Store(image, time.Now())
+}
+
+func (e *Engine) unused(image string) bool {
+	if t, ok := e.pushed.Load(image); ok && time.Since(t.(time.Time)) < time.Hour {
+		return false
+	}
+	return true
 }

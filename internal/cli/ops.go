@@ -8,6 +8,8 @@ import (
 	"strings"
 	"time"
 
+	"os/exec"
+
 	"github.com/spf13/cobra"
 
 	"github.com/veksa/clowdr/internal/api"
@@ -242,5 +244,62 @@ func (a *app) addonCmd() *cobra.Command {
 			return nil
 		},
 	}, rm)
+	return cmd
+}
+
+func (a *app) gcCmd() *cobra.Command {
+	var local bool
+	var keepCache string
+	cmd := &cobra.Command{
+		Use:   "gc",
+		Short: "Clean up: on the server (admin) or --local (old images of this project, build cache)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			t, err := a.target(local)
+			if err != nil {
+				return err
+			}
+			if !local {
+				var res deploy.GCResult
+				if err := t.client.Do(cmd.Context(), "POST", "/v1/gc", nil, &res); err != nil {
+					return err
+				}
+				fmt.Fprintf(a.out, "removed %d containers, %d images\n", len(res.Containers), len(res.Images))
+				for _, x := range append(res.Containers, res.Images...) {
+					fmt.Fprintln(a.out, "  "+x)
+				}
+				return nil
+			}
+			d, err := a.needDeploy()
+			if err != nil {
+				return err
+			}
+			removed := 0
+			for _, name := range d.ServiceNames() {
+				repo := fmt.Sprintf("%s/%s/%s", t.client.Host(), t.project, name)
+				out, err := exec.CommandContext(cmd.Context(), "docker", "image", "ls", "--filter", "reference="+repo, "--format", "{{.Repository}}:{{.Tag}}").Output()
+				if err != nil {
+					return err
+				}
+				// docker lists newest first: keep current and previous.
+				refs := strings.Fields(string(out))
+				for i, ref := range refs {
+					if i < 2 || strings.HasSuffix(ref, ":<none>") {
+						continue
+					}
+					if exec.CommandContext(cmd.Context(), "docker", "image", "rm", ref).Run() == nil {
+						removed++
+						fmt.Fprintln(a.out, "  removed "+ref)
+					}
+				}
+			}
+			fmt.Fprintf(a.out, "removed %d local images\n", removed)
+			if keepCache != "" {
+				return run(cmd.Context(), nil, "docker", "builder", "prune", "-f", "--keep-storage", keepCache)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&local, "local", false, "clean this machine instead of the server")
+	cmd.Flags().StringVar(&keepCache, "keep-cache", "5GB", "with --local: build cache to keep (empty: do not touch)")
 	return cmd
 }
