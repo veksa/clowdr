@@ -6,203 +6,26 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/veksa/clowdr/internal/config"
+	"github.com/veksa/clowdr/internal/deploy/fake"
 	"github.com/veksa/clowdr/internal/ingress"
-	"github.com/veksa/clowdr/internal/runtime"
 	"github.com/veksa/clowdr/internal/spec"
 	"github.com/veksa/clowdr/internal/store"
 )
 
-type fakeContainer struct {
-	cfg     runtime.ContainerConfig
-	running bool
-	exit    int
-}
-
-type fakeDocker struct {
-	mu         sync.Mutex
-	containers map[string]*fakeContainer
-	images     map[string]bool
-	removed    []string
-	memTotal   int64
-	// crash makes containers of these images exit right after start.
-	crash map[string]bool
-}
-
-func newFakeDocker() *fakeDocker {
-	return &fakeDocker{containers: map[string]*fakeContainer{}, images: map[string]bool{}, crash: map[string]bool{}}
-}
-
-func (f *fakeDocker) Info(context.Context) (runtime.Info, error) {
-	return runtime.Info{MemTotal: f.memTotal}, nil
-}
-
-func (f *fakeDocker) ImageInspect(_ context.Context, ref string) (runtime.ImageInspect, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if !f.images[ref] {
-		return runtime.ImageInspect{}, &runtime.APIError{Status: 404}
-	}
-	return runtime.ImageInspect{ID: ref}, nil
-}
-
-func (f *fakeDocker) ImagePull(_ context.Context, ref string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.images[ref] = true
-	return nil
-}
-
-func (f *fakeDocker) ImageRemove(_ context.Context, ref string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.images, ref)
-	f.removed = append(f.removed, ref)
-	return nil
-}
-
-func (f *fakeDocker) ContainerCreate(_ context.Context, c runtime.ContainerConfig) (string, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, ok := f.containers[c.Name]; ok {
-		return "", &runtime.APIError{Status: 409, Message: "name in use"}
-	}
-	f.containers[c.Name] = &fakeContainer{cfg: c}
-	return c.Name, nil
-}
-
-func (f *fakeDocker) ContainerStart(_ context.Context, id string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	c, ok := f.containers[id]
-	if !ok {
-		return &runtime.APIError{Status: 404}
-	}
-	c.running = !f.crash[c.cfg.Image]
-	if !c.running {
-		c.exit = 1
-	}
-	return nil
-}
-
-func (f *fakeDocker) ContainerStop(_ context.Context, id string, _ time.Duration) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if c, ok := f.containers[id]; ok {
-		c.running = false
-	}
-	return nil
-}
-
-func (f *fakeDocker) ContainerRemove(_ context.Context, id string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	delete(f.containers, id)
-	return nil
-}
-
-func (f *fakeDocker) ContainerInspect(_ context.Context, id string) (runtime.ContainerInspect, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	c, ok := f.containers[id]
-	if !ok {
-		return runtime.ContainerInspect{}, &runtime.APIError{Status: 404, Message: "no such container"}
-	}
-	var ci runtime.ContainerInspect
-	ci.Name = "/" + id
-	ci.Config.Image = c.cfg.Image
-	ci.Config.Labels = c.cfg.Labels
-	ci.State.Running = c.running
-	ci.State.ExitCode = c.exit
-	ci.NetworkSettings.Networks = map[string]struct {
-		IPAddress string
-		Aliases   []string
-	}{c.cfg.Network: {IPAddress: id}}
-	return ci, nil
-}
-
-func (f *fakeDocker) ContainerLogs(context.Context, string, bool, string, time.Time) (io.ReadCloser, error) {
-	return io.NopCloser(strings.NewReader("")), nil
-}
-
-func (f *fakeDocker) Containers(_ context.Context, labels ...string) ([]runtime.ContainerSummary, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []runtime.ContainerSummary
-	for name, c := range f.containers {
-		match := true
-		for _, l := range labels {
-			k, v, hasV := strings.Cut(l, "=")
-			if got, ok := c.cfg.Labels[k]; !ok || hasV && got != v {
-				match = false
-			}
-		}
-		if match {
-			state := "exited"
-			if c.running {
-				state = "running"
-			}
-			out = append(out, runtime.ContainerSummary{ID: name, Names: []string{"/" + name}, State: state, Labels: c.cfg.Labels})
-		}
-	}
-	return out, nil
-}
-
-func (f *fakeDocker) NetworkEnsure(context.Context, string, map[string]string) error { return nil }
-func (f *fakeDocker) NetworkConnect(context.Context, string, string, []string) error { return nil }
-func (f *fakeDocker) VolumeEnsure(context.Context, string, map[string]string) error  { return nil }
-func (f *fakeDocker) Exec(context.Context, string, []string) (string, int, error)    { return "", 0, nil }
-
-func (f *fakeDocker) running(prefix string) []string {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	var out []string
-	for n, c := range f.containers {
-		if strings.HasPrefix(n, prefix) && c.running {
-			out = append(out, n)
-		}
-	}
-	return out
-}
-
-// fakeProber: a container is healthy unless its image is in sick.
-type fakeProber struct {
-	d    *fakeDocker
-	sick map[string]bool
-}
-
-func (p fakeProber) Probe(_ context.Context, u string) error {
-	pu, _ := url.Parse(u)
-	name := pu.Hostname()
-	p.d.mu.Lock()
-	defer p.d.mu.Unlock()
-	c := p.d.containers[name]
-	if c == nil || p.sick[c.cfg.Image] {
-		return errors.New("connection refused")
-	}
-	return nil
-}
-
-type okNginx struct{ reloads int }
-
-func (n *okNginx) Test(context.Context) (string, error) { return "", nil }
-func (n *okNginx) Reload(context.Context) error         { n.reloads++; return nil }
-
 type fixture struct {
 	e     *Engine
-	d     *fakeDocker
+	d     *fake.Docker
 	st    *store.Store
 	sick  map[string]bool
 	dir   string
-	nginx *okNginx
+	nginx *fake.Nginx
 }
 
 func newFixture(t *testing.T) *fixture {
@@ -215,11 +38,11 @@ func newFixture(t *testing.T) *fixture {
 	t.Cleanup(func() { st.Close() })
 	plat, _ := config.ParsePlatform([]byte(config.DefaultPlatform))
 	plat.Addons["redis"] = config.AddonConf{Image: "redis:7-alpine", Port: 6379, Allow: []string{"shop"}}
-	d := newFakeDocker()
-	ng := &okNginx{}
+	d := fake.NewDocker()
+	ng := &fake.Nginx{}
 	e := New(d, st, func() *config.Platform { return plat }, &ingress.Controller{Dir: dir, Nginx: ng}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	sick := map[string]bool{}
-	e.Prober = fakeProber{d: d, sick: sick}
+	e.Prober = fake.Prober{D: d, Sick: sick}
 	e.CertExists = func(string) bool { return false }
 	if err := st.PutProject(store.Project{Name: "shop", Domains: []string{"example.com", "*.example.com"}}); err != nil {
 		t.Fatal(err)
@@ -229,7 +52,7 @@ func newFixture(t *testing.T) *fixture {
 
 func (f *fixture) push(img string) string {
 	ref := "clowdr.local/shop/server:" + img
-	f.d.images[ref] = true
+	f.d.Images[ref] = true
 	return ref
 }
 
@@ -280,7 +103,7 @@ func TestDeploySwitchAndRollback(t *testing.T) {
 	if !strings.Contains(conf, fmt.Sprintf("shop-server-r%d-1:3000", r2.ID)) || strings.Contains(conf, "r1-1") {
 		t.Fatalf("not switched:\n%s", conf)
 	}
-	if got := f.d.running("shop-server"); len(got) != 1 {
+	if got := f.d.RunningWith("shop-server"); len(got) != 1 {
 		t.Fatalf("old not drained: %v", got)
 	}
 	svc, _ := f.st.Service("shop", "server")
@@ -297,12 +120,12 @@ func TestDeploySwitchAndRollback(t *testing.T) {
 	if !strings.Contains(f.conf(t), fmt.Sprintf("r%d-1", r2.ID)) {
 		t.Fatal("config changed by a failed deploy")
 	}
-	if got := f.d.running("shop-server"); len(got) != 1 || !strings.Contains(got[0], fmt.Sprintf("r%d", r2.ID)) {
+	if got := f.d.RunningWith("shop-server"); len(got) != 1 || !strings.Contains(got[0], fmt.Sprintf("r%d", r2.ID)) {
 		t.Fatalf("running: %v", got)
 	}
 
 	// Crashing release.
-	f.d.crash["clowdr.local/shop/server:v4"] = true
+	f.d.Crash["clowdr.local/shop/server:v4"] = true
 	if _, err := f.deploy(t, "v4", serverSpec()); !errors.Is(err, ErrHealth) {
 		t.Fatal(err)
 	}
@@ -328,10 +151,10 @@ func TestGC(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if strings.Join(f.d.removed, ",") != "clowdr.local/shop/server:v1,clowdr.local/shop/server:v2" {
-		t.Fatalf("removed %v", f.d.removed)
+	if strings.Join(f.d.Removed, ",") != "clowdr.local/shop/server:v1,clowdr.local/shop/server:v2" {
+		t.Fatalf("removed %v", f.d.Removed)
 	}
-	if !f.d.images["clowdr.local/shop/server:v3"] || !f.d.images["clowdr.local/shop/server:v4"] {
+	if !f.d.Images["clowdr.local/shop/server:v3"] || !f.d.Images["clowdr.local/shop/server:v4"] {
 		t.Fatal("current or previous image removed")
 	}
 }
@@ -395,7 +218,7 @@ func TestQuotaAndStopFirst(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Old release was stopped and started again after the failure.
-	if got := f.d.running("shop-server-r1"); len(got) != 1 {
+	if got := f.d.RunningWith("shop-server-r1"); len(got) != 1 {
 		t.Fatalf("old not restored: %v", got)
 	}
 	big := serverSpec()
@@ -413,18 +236,18 @@ func TestAddonAndStopStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := f.d.containers[r.Containers[0]]
-	if !strings.Contains(strings.Join(c.cfg.Env, " "), "REDIS_URL=redis://redis:6379") {
-		t.Fatal(c.cfg.Env)
+	c := f.d.ByName[r.Containers[0]]
+	if !strings.Contains(strings.Join(c.Config.Env, " "), "REDIS_URL=redis://redis:6379") {
+		t.Fatal(c.Config.Env)
 	}
-	if rc := f.d.containers["shop-redis"]; rc == nil || !rc.running || rc.cfg.Aliases[0] != "redis" {
+	if rc := f.d.ByName["shop-redis"]; rc == nil || !rc.Running || rc.Config.Aliases[0] != "redis" {
 		t.Fatal("redis addon not running")
 	}
 	ctx := context.Background()
 	if err := f.e.Stop(ctx, "shop", "server"); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(f.conf(t), "127.0.0.1:1 down") || len(f.d.running("shop-server")) != 0 {
+	if !strings.Contains(f.conf(t), "127.0.0.1:1 down") || len(f.d.RunningWith("shop-server")) != 0 {
 		t.Fatal("not stopped")
 	}
 	if err := f.e.Start(ctx, "shop", "server", func(string, ...any) {}); err != nil {
@@ -436,7 +259,7 @@ func TestAddonAndStopStart(t *testing.T) {
 	if err := f.e.Remove(ctx, "shop", "server"); err != nil {
 		t.Fatal(err)
 	}
-	if f.conf(t) != "" || len(f.d.running("shop-server")) != 0 {
+	if f.conf(t) != "" || len(f.d.RunningWith("shop-server")) != 0 {
 		t.Fatal("not removed")
 	}
 }
