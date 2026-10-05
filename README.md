@@ -74,6 +74,25 @@ clowctl logs api -f -e prod
 clowctl rollback api -e prod
 ```
 
+### deploy.yml fields
+
+| Field | Meaning |
+|---|---|
+| `path`, `build`, `dockerfile`, `build_args` | local build: `build` runs in `path` (`${ENV}` is replaced), then `docker build` with `path` as context |
+| `image` | prebuilt image pulled by the server instead of building |
+| `port`, `health` | container port; `health: /health` or `{path, interval, timeout, successes}` gates the switch |
+| `memory`, `replicas` | container memory limit; number of copies behind one upstream |
+| `drain`, `stop_grace`, `switch` | how long old copies keep serving; SIGTERM grace; `stop-first` for services that must not run twice |
+| `domains` | per env: `{prod: [api.example.com]}`; must be allowed for the project on the server |
+| `routes` | `{path, service, timeout, buffering, max_body}`; `service` routes a path to another service |
+| `tls: direct` | domain not behind Cloudflare: clowdr gets a Let's Encrypt certificate |
+| `max_body`, `timeout`, `nginx_extra` | nginx limits; raw snippet (only if the admin allowed it) |
+| `volumes` | named volumes `name:/path[:ro]`, never removed automatically |
+| `env` | names whose values are set with `clowctl env set` |
+| `uses`, `expose_to` | addons the service sees; projects that may reach it internally |
+
+All commands: `clowctl --help`.
+
 ## How a deploy works
 
 1. `build` and `docker build --platform linux/amd64` run on your machine.
