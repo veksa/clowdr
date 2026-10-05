@@ -48,11 +48,11 @@ type Docker struct {
 	base string
 }
 
-// New connects to DOCKER_HOST or /var/run/docker.sock.
+// New connects to DOCKER_HOST, else /var/run/docker.sock (Docker Desktop's pipe on Windows).
 func New() (*Docker, error) {
 	host := os.Getenv("DOCKER_HOST")
 	if host == "" {
-		host = "unix:///var/run/docker.sock"
+		host = defaultHost
 	}
 	u, err := url.Parse(host)
 	if err != nil {
@@ -67,6 +67,9 @@ func New() (*Docker, error) {
 			var d net.Dialer
 			return d.DialContext(ctx, "unix", path)
 		}
+	case "npipe":
+		path := u.Path
+		tr.DialContext = func(ctx context.Context, _, _ string) (net.Conn, error) { return dialPipe(ctx, path) }
 	case "tcp", "http":
 		base = "http://" + u.Host + "/" + apiVersion
 	default:

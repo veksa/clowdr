@@ -57,3 +57,7 @@ jobs:
           go-version-file: go.mod
       - run: CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=e2e" -o clowdrd ./cmd/clowdr
       - run: sudo CLOWDR_BINARY=$PWD/clowdrd test/e2e/run.sh
+      # The registry against docker's containerd content store (root-only socket).
+      - run: |
+          go test -c -o registry.test ./internal/registry
+          sudo CLOWDR_CONTAINERD=/run/containerd/containerd.sock ./registry.test -test.run Containerd -test.v
