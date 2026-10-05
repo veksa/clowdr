@@ -59,7 +59,7 @@ func NewRoot(version string) *cobra.Command {
 
 	root.AddCommand(
 		a.deployCmd(), a.applyCmd(), a.rollbackCmd(), a.releasesCmd(),
-		a.psCmd(), a.statusCmd(), a.routesCmd(), a.logsCmd(), a.accessCmd(),
+		a.psCmd(), a.statusCmd(), a.routesCmd(), a.logsCmd(), a.accessCmd(), a.eventsCmd(),
 		a.restartCmd(), a.stopCmd(), a.startCmd(), a.rmCmd(), a.envCmd(),
 		a.contextCmd(), a.projectCmd(), a.tokenCmd(), a.platformCmd(), a.versionCmd(),
 	)

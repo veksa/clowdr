@@ -522,3 +522,31 @@ func (s *Store) Close() error {
 	}
 	return nil
 }
+
+// TrimOldest deletes the oldest segments across all streams until want bytes are freed
+// (low disk). Segments of the current hour are kept. Returns the bytes freed.
+func (s *Store) TrimOldest(want int64) int64 {
+	var all []segment
+	projects, _ := os.ReadDir(s.DataDir)
+	for _, p := range projects {
+		kinds, _ := os.ReadDir(filepath.Join(s.DataDir, p.Name()))
+		for _, kd := range kinds {
+			names, _ := os.ReadDir(filepath.Join(s.DataDir, p.Name(), kd.Name()))
+			for _, n := range names {
+				all = append(all, s.segments(Key{Project: p.Name(), Kind: kd.Name(), Name: n.Name()})...)
+			}
+		}
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].hour.Before(all[j].hour) })
+	current := time.Now().UTC().Truncate(time.Hour)
+	var freed int64
+	for _, seg := range all {
+		if freed >= want || !seg.hour.Before(current) {
+			break
+		}
+		if os.Remove(seg.path) == nil {
+			freed += seg.size
+		}
+	}
+	return freed
+}

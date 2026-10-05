@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/veksa/clowdr/internal/logs"
+	"github.com/veksa/clowdr/internal/monitor"
 )
 
 // AccessEntry is one nginx access log line (json_combined).
@@ -333,5 +334,50 @@ func Combined(e AccessEntry) string {
 func (n *ndjson) flush() {
 	if n.flusher != nil {
 		n.flusher.Flush()
+	}
+}
+
+// events serves the events journal of a project (admins: project "_platform" for the host).
+func (s *Server) events(w http.ResponseWriter, r *http.Request) {
+	if s.Events == nil {
+		writeErr(w, 501, "events are not enabled")
+		return
+	}
+	project := r.PathValue("project")
+	since, until, err := timeParams(r)
+	if err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	tail := 50
+	if v := r.URL.Query().Get("tail"); v != "" {
+		tail, _ = strconv.Atoi(v)
+	} else if !since.IsZero() {
+		tail = 0
+	}
+	follow := r.URL.Query().Get("follow") == "1"
+	var live <-chan monitor.Event
+	if follow {
+		ch, cancel, err := s.Events.Subscribe(project)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		defer cancel()
+		live = ch
+	}
+	out := newNDJSON(w, follow)
+	s.Events.Read(project, logs.Query{Since: since, Until: until, Tail: tail}, func(e monitor.Event) { out.send(e) })
+	if !follow {
+		return
+	}
+	out.flush()
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case e := <-live:
+			out.send(e)
+		}
 	}
 }

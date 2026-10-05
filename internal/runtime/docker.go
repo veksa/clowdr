@@ -593,3 +593,45 @@ func (d *Docker) Stats(ctx context.Context, id string) (Stats, error) {
 	}
 	return out, nil
 }
+
+// Event is a docker engine event.
+type Event struct {
+	Type   string `json:"Type"`
+	Action string `json:"Action"`
+	Actor  struct {
+		ID         string            `json:"ID"`
+		Attributes map[string]string `json:"Attributes"`
+	} `json:"Actor"`
+	TimeNano int64 `json:"timeNano"`
+}
+
+// Events streams container events matching labels until ctx ends or the stream breaks.
+func (d *Docker) Events(ctx context.Context, actions []string, labels ...string) (<-chan Event, <-chan error) {
+	out := make(chan Event, 64)
+	errc := make(chan error, 1)
+	f, _ := json.Marshal(map[string][]string{"type": {"container"}, "event": actions, "label": labels})
+	go func() {
+		defer close(out)
+		resp, err := d.do(ctx, "GET", "/events", url.Values{"filters": {string(f)}}, nil)
+		if err != nil {
+			errc <- err
+			return
+		}
+		defer resp.Body.Close()
+		dec := json.NewDecoder(resp.Body)
+		for {
+			var ev Event
+			if err := dec.Decode(&ev); err != nil {
+				errc <- err
+				return
+			}
+			select {
+			case out <- ev:
+			case <-ctx.Done():
+				errc <- ctx.Err()
+				return
+			}
+		}
+	}()
+	return out, errc
+}

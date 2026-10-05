@@ -76,8 +76,8 @@ type Engine struct {
 	Log      *slog.Logger
 	// CertExists reports whether a certificate for domain is installed.
 	CertExists func(domain string) bool
-	// Notify is called on deploy results (Telegram etc). Optional.
-	Notify func(ctx context.Context, text string)
+	// OnEvent records deploy results (events journal, alerts). Optional.
+	OnEvent func(ctx context.Context, project, service, kind string, failed bool, msg string)
 	// RoutesChanged is called after a project's nginx config changed (ACME picks up new domains).
 	RoutesChanged func()
 	// LogConfig sets the docker log driver of service containers (fluentd into clowdrd);
@@ -225,7 +225,7 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 		rel.Error = err.Error()
 		rel.Finished = time.Now().UTC()
 		e.Store.PutRelease(rel)
-		e.notify(ctx, fmt.Sprintf("❌ %s/%s %s deploy failed: %v", req.Project, s.Name, short(req.Version), err))
+		e.event(ctx, req.Project, s.Name, "deploy", true, fmt.Sprintf("r%d %s failed: %v", rel.ID, short(req.Version), err))
 		return rel, err
 	}
 	progress("release r%d: %s", rel.ID, req.Image)
@@ -333,7 +333,11 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 		e.drain(*old, stopFirst, progress)
 	}
 	e.gc(context.WithoutCancel(ctx), req.Project, s.Name)
-	e.notify(ctx, fmt.Sprintf("✅ %s/%s %s deployed by %s in %s", req.Project, s.Name, short(req.Version), req.Author, time.Since(start).Round(time.Second)))
+	verb := "deployed"
+	if req.Rollback {
+		verb = "rolled back"
+	}
+	e.event(ctx, req.Project, s.Name, "deploy", false, fmt.Sprintf("r%d %s %s by %s in %s", rel.ID, short(req.Version), verb, req.Author, time.Since(start).Round(time.Second)))
 	return rel, nil
 }
 
@@ -344,9 +348,9 @@ func short(v string) string {
 	return v
 }
 
-func (e *Engine) notify(ctx context.Context, text string) {
-	if e.Notify != nil {
-		e.Notify(context.WithoutCancel(ctx), text)
+func (e *Engine) event(ctx context.Context, project, service, kind string, failed bool, msg string) {
+	if e.OnEvent != nil {
+		e.OnEvent(context.WithoutCancel(ctx), project, service, kind, failed, msg)
 	}
 }
 

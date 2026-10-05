@@ -21,6 +21,7 @@ import (
 	"github.com/veksa/clowdr/internal/config"
 	"github.com/veksa/clowdr/internal/deploy"
 	"github.com/veksa/clowdr/internal/ingress"
+	"github.com/veksa/clowdr/internal/monitor"
 	"github.com/veksa/clowdr/internal/notify"
 	"github.com/veksa/clowdr/internal/registry"
 	"github.com/veksa/clowdr/internal/runtime"
@@ -94,7 +95,9 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 
 	// Logs: containers -> fluentd protocol, nginx -> syslog socket; buffered in tmpfs, flushed
 	// to disk in compressed batches.
-	logStore, stopLogs, err := startLogs(ctx, o, st, func() *config.Platform { return current }, log)
+	mon := &monitor.Monitor{Docker: docker, Store: st, Prober: eng.Prober, Platform: func() *config.Platform { return current }, StateDir: o.StateDir, Log: log}
+	mon.Init()
+	logStore, stopLogs, err := startLogs(ctx, o, st, func() *config.Platform { return current }, mon.OnLine, log)
 	if err != nil {
 		return err
 	}
@@ -102,10 +105,19 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 	eng.Syslog = true
 	eng.LogTail = logStore.Tail
 	eng.LogConfig = fluentdLogConfig
+	events := &monitor.Events{Logs: logStore}
 	if tg := plat.Notify.Telegram; tg.Token != "" && tg.ChatID != "" {
-		bot := &notify.Telegram{Token: tg.Token, ChatID: tg.ChatID, Log: log}
-		eng.Notify = bot.Send
+		events.Alert = (&notify.Telegram{Token: tg.Token, ChatID: tg.ChatID, Log: log}).Send
 	}
+	eng.OnEvent = func(ctx context.Context, project, service, kind string, failed bool, msg string) {
+		sev := monitor.Info
+		if failed {
+			sev = monitor.Error
+		}
+		events.Emit(ctx, monitor.Event{Project: project, Service: service, Kind: kind, Severity: sev, Message: msg}, "")
+	}
+	mon.Logs, mon.Events = logStore, events
+	go mon.Run(ctx)
 
 	// nginx: write config, make sure the container runs, then a checked reload.
 	if err := bootstrapNginx(ctx, eng, ing, st); err != nil {
@@ -119,7 +131,7 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 		return err
 	}
 
-	srv := &api.Server{Store: st, Engine: eng, Log: log, Version: o.Version, RegistryKind: regKind, Logs: logStore}
+	srv := &api.Server{Store: st, Engine: eng, Log: log, Version: o.Version, RegistryKind: regKind, Logs: logStore, Events: events}
 	reg := &registry.Handler{Store: regStore, Owners: st, Authorize: srv.RegistryAuthorize, Log: log}
 	srv.Registry = reg
 	handler := srv.Handler()

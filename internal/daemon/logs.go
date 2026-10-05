@@ -32,7 +32,7 @@ func fluentdLogConfig(project, service string, release uint64, replica int) *run
 	}}
 }
 
-func startLogs(ctx context.Context, o Options, st *store.Store, plat func() *config.Platform, log *slog.Logger) (*logs.Store, func(), error) {
+func startLogs(ctx context.Context, o Options, st *store.Store, plat func() *config.Platform, onLine func(logs.Key, logs.Line), log *slog.Logger) (*logs.Store, func(), error) {
 	ls := &logs.Store{
 		BufDir:  filepath.Join(ingress.RunDir, "buf"),
 		DataDir: filepath.Join(o.StateDir, "logs"),
@@ -49,7 +49,7 @@ func startLogs(ctx context.Context, o Options, st *store.Store, plat func() *con
 	if err := ls.Open(); err != nil {
 		return nil, nil, err
 	}
-	col := &logs.Collector{Store: ls, Projects: func() []string {
+	col := &logs.Collector{Store: ls, OnLine: onLine, Projects: func() []string {
 		ps, _ := st.Projects()
 		names := make([]string, len(ps))
 		for i, p := range ps {
