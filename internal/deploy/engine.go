@@ -325,7 +325,11 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 		cleanup()
 		return fail(err)
 	}
-	progress("traffic switched to r%d", rel.ID)
+	if s.Port != 0 {
+		progress("traffic switched to r%d", rel.ID)
+	} else {
+		progress("r%d is live", rel.ID)
+	}
 
 	rel.Status = store.StatusActive
 	rel.Finished = time.Now().UTC()

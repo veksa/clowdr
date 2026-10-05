@@ -156,6 +156,14 @@ func TestCrashAlerts(t *testing.T) {
 	if got := f.sent(); len(got) != 3 || !strings.Contains(got[2], "restarted 3 times") {
 		t.Fatalf("restart loop: %q", got)
 	}
+	// Further crashes and restarts of the looping container are not reported again.
+	for i := 0; i < 5; i++ {
+		f.m.handle(ctx, ev("die", "shop-api-r1-1", 1, "exitCode", "2"))
+		f.m.handle(ctx, ev("start", "shop-api-r1-1", 1))
+	}
+	if got := f.sent(); len(got) != 3 {
+		t.Fatalf("loop noise: %q", got[3:])
+	}
 	// Recorded in the events journal.
 	var kinds []string
 	f.m.Events.Read("shop", logs.Query{}, func(e Event) { kinds = append(kinds, e.Kind) })

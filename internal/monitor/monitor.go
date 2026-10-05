@@ -46,7 +46,8 @@ type Monitor struct {
 	mu       sync.Mutex
 	starts   map[string][]time.Time // container -> start times
 	oom      map[string]bool
-	failures map[string]int // container -> consecutive failed probes
+	looping  map[string]time.Time // container -> when its restart loop was reported
+	failures map[string]int       // container -> consecutive failed probes
 	rates    map[rateKey]*rate
 	once     sync.Once
 }
@@ -82,6 +83,7 @@ func (m *Monitor) defaults() {
 	}
 	m.starts = map[string][]time.Time{}
 	m.oom = map[string]bool{}
+	m.looping = map[string]time.Time{}
 	m.failures = map[string]int{}
 	m.rates = map[rateKey]*rate{}
 }
@@ -231,13 +233,23 @@ func (m *Monitor) handle(ctx context.Context, ev runtime.Event) {
 		m.starts[name] = recent
 		n := len(recent)
 		m.mu.Unlock()
-		if n > m.RestartLoop {
+		if n > m.RestartLoop && !m.inLoop(name) {
+			m.mu.Lock()
+			m.looping[name] = now
+			m.mu.Unlock()
 			m.Events.Emit(ctx, Event{Project: project, Service: service, Kind: "restart-loop", Severity: Error,
-				Message: fmt.Sprintf("%s restarted %d times in %s", name, n-1, m.RestartWindow)}, m.tail(project, service, a))
+				Message: fmt.Sprintf("%s keeps crashing: restarted %d times in %s", name, n-1, m.RestartWindow)}, m.tail(project, service, a))
 		}
 	case "die":
 		if role == "service" && !m.isCurrent(project, service, name) {
 			return // drained, replaced, failed deploy or stopped on purpose
+		}
+		if m.inLoop(name) {
+			// Already reported as a restart loop; keep the logs, skip the noise.
+			if role == "service" && m.Logs != nil {
+				m.Logs.Flush(logs.Key{Project: project, Kind: logs.KindApp, Name: service})
+			}
+			return
 		}
 		m.mu.Lock()
 		oom := m.oom[name]
@@ -374,4 +386,16 @@ func (m *Monitor) watchResources(ctx context.Context) {
 				Message: fmt.Sprintf("only %d MB of %d MB memory available", avail>>20, total>>20)}, "")
 		}
 	}
+}
+
+// inLoop reports whether a restart loop of the container was reported within the window.
+func (m *Monitor) inLoop(name string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	t, ok := m.looping[name]
+	if ok && time.Since(t) > m.RestartWindow {
+		delete(m.looping, name)
+		return false
+	}
+	return ok
 }
