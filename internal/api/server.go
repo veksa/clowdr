@@ -448,6 +448,10 @@ func (s *Server) releases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rs == nil {
+		if _, err := s.Store.Service(r.PathValue("project"), r.PathValue("service")); err != nil {
+			writeErr(w, errStatus(err), "service "+r.PathValue("service")+": "+err.Error())
+			return
+		}
 		rs = []store.Release{}
 	}
 	writeJSON(w, 200, rs)
