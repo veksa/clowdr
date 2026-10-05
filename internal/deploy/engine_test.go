@@ -157,6 +157,17 @@ func TestGC(t *testing.T) {
 	if !f.d.Images["clowdr.local/shop/server:v3"] || !f.d.Images["clowdr.local/shop/server:v4"] {
 		t.Fatal("current or previous image removed")
 	}
+
+	// A failed release loses its image but keeps its status.
+	f.sick["clowdr.local/shop/server:bad"] = true
+	bad, _ := f.deploy(t, "bad", serverSpec())
+	if _, err := f.deploy(t, "v5", serverSpec()); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := f.st.Release("shop", "server", bad.ID)
+	if r.Status != store.StatusFailed || !r.ImageRemoved || f.d.Images["clowdr.local/shop/server:bad"] {
+		t.Fatalf("failed release after gc: %+v", r)
+	}
 }
 
 func TestReplicas(t *testing.T) {

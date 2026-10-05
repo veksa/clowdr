@@ -58,7 +58,7 @@ func TestDomainAllowed(t *testing.T) {
 		"a.b.example.com":     false,
 		"example.com.evil.io": false,
 		"evilexample.com":     false,
-		"example.org":        false,
+		"example.org":         false,
 		".example.com":        false,
 	}
 	for d, want := range cases {

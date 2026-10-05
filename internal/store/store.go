@@ -82,8 +82,10 @@ type Release struct {
 	Containers []string      `json:"containers,omitempty"`
 	Spec       spec.Service  `json:"spec"`
 	Rollback   bool          `json:"rollback,omitempty"`
-	Created    time.Time     `json:"created"`
-	Finished   time.Time     `json:"finished,omitzero"`
+	// ImageRemoved is set when GC deleted the image; a failed release keeps its status.
+	ImageRemoved bool      `json:"image_removed,omitempty"`
+	Created      time.Time `json:"created"`
+	Finished     time.Time `json:"finished,omitzero"`
 }
 
 type Store struct {

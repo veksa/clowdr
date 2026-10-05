@@ -644,7 +644,7 @@ func (e *Engine) gc(ctx context.Context, project, service string) {
 		}
 	}
 	for _, r := range rels {
-		if keep[r.Image] || r.Status == store.StatusRemoved || r.Status == store.StatusDeploying {
+		if keep[r.Image] || r.ImageRemoved || r.Status == store.StatusRemoved || r.Status == store.StatusDeploying {
 			continue
 		}
 		if strings.HasPrefix(r.Image, "clowdr.local/") {
@@ -653,7 +653,10 @@ func (e *Engine) gc(ctx context.Context, project, service string) {
 				continue
 			}
 		}
-		r.Status = store.StatusRemoved
+		r.ImageRemoved = true
+		if r.Status == store.StatusSuperseded {
+			r.Status = store.StatusRemoved
+		}
 		e.Store.PutRelease(r)
 	}
 	// Keep history bounded.
@@ -683,7 +686,7 @@ func (e *Engine) Rollback(ctx context.Context, project, service string, to uint6
 	if err != nil {
 		return store.Release{}, fmt.Errorf("release r%d: %w", to, err)
 	}
-	if target.Status == store.StatusRemoved {
+	if target.Status == store.StatusRemoved || target.ImageRemoved {
 		return store.Release{}, fmt.Errorf("release r%d image was garbage-collected", to)
 	}
 	if target.Status == store.StatusFailed {

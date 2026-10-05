@@ -13,7 +13,7 @@ func setup(t *testing.T) (dir string, a *app) {
 	os.WriteFile(filepath.Join(dir, "deploy.yml"), []byte(`
 project: shop
 envs:
-  dev:  { server: https://deploy.example.dev }
+  dev:  { server: https://deploy.example.net }
   prod: { context: shop-prod }
 services:
   server: { port: 3000 }
@@ -43,7 +43,7 @@ func TestTargetResolution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tg.client.Server != "https://deploy.example.dev" || tg.client.Token != "clw_file_token" || tg.project != "shop" {
+	if tg.client.Server != "https://deploy.example.net" || tg.client.Token != "clw_file_token" || tg.project != "shop" {
 		t.Fatalf("%+v %+v", tg, tg.client)
 	}
 	t.Setenv("CLOWDR_TOKEN", "clw_env")

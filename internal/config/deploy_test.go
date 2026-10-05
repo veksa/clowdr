@@ -10,7 +10,7 @@ const planExample = `
 project: shop
 
 envs:
-  dev:  { server: https://deploy.example.dev }
+  dev:  { server: https://deploy.example.net }
   prod: { server: https://deploy.example.com }
 
 addons: [redis]
@@ -27,7 +27,7 @@ services:
     uses: [redis]
     domains:
       prod: [api.example.com]
-      dev:  [api.example.dev]
+      dev:  [api.example.net]
     routes:
       - { path: /ws, timeout: 24h, buffering: false }
     volumes:
@@ -41,7 +41,7 @@ services:
     port: 3000
     health: { path: /health, timeout: 2m, successes: 3 }
     memory: 200m
-    domains: { prod: [admin.example.com], dev: [admin.example.dev] }
+    domains: { prod: [admin.example.com], dev: [admin.example.net] }
     env: [ADMIN_ALLOWED_IPS]
 
   landing:
@@ -49,7 +49,7 @@ services:
     port: 8080
     memory: 32m
     max_body: 8m
-    domains: { prod: [example.com], dev: [example.dev] }
+    domains: { prod: [example.com], dev: [example.net] }
 `
 
 func TestParsePlanExample(t *testing.T) {
@@ -80,7 +80,7 @@ func TestParsePlanExample(t *testing.T) {
 		t.Fatalf("health %+v", s.Health)
 	}
 	a, _ := d.Spec("admin", "dev")
-	if a.Health.Timeout != 2*time.Minute || a.Health.Successes != 3 || a.Domains[0] != "admin.example.dev" {
+	if a.Health.Timeout != 2*time.Minute || a.Health.Successes != 3 || a.Domains[0] != "admin.example.net" {
 		t.Fatalf("admin %+v", a)
 	}
 	l, _ := d.Spec("landing", "prod")
