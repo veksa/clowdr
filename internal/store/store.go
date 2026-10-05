@@ -24,7 +24,6 @@ var (
 	bTokens   = []byte("tokens")
 	bServices = []byte("services") // key: project/service
 	bReleases = []byte("releases") // key: project/service/<seq big-endian>
-	bMeta     = []byte("meta")
 )
 
 type Project struct {
@@ -101,7 +100,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open state %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bProjects, bTokens, bServices, bReleases, bMeta, bBlobs} {
+		for _, b := range [][]byte{bProjects, bTokens, bServices, bReleases, bBlobs} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -355,24 +354,6 @@ func (s *Store) Releases(project, service string) (rs []Release, err error) {
 	return
 }
 
-// Meta
-
-func (s *Store) Meta(key string) (string, error) {
-	var v []byte
-	err := s.db.View(func(tx *bolt.Tx) error {
-		v = append([]byte(nil), tx.Bucket(bMeta).Get([]byte(key))...)
-		return nil
-	})
-	if v == nil {
-		return "", ErrNotFound
-	}
-	return string(v), err
-}
-
-func (s *Store) SetMeta(key, value string) error {
-	return s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bMeta).Put([]byte(key), []byte(value)) })
-}
-
 // Blob ownership (registry): which project uploaded or referenced which blob.
 
 var bBlobs = []byte("blobs") // key: project/digest
@@ -390,18 +371,6 @@ func (s *Store) Own(project string, digests ...string) error {
 	return s.db.Update(func(tx *bolt.Tx) error {
 		for _, d := range digests {
 			if err := tx.Bucket(bBlobs).Put([]byte(project+"/"+d), []byte{1}); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-}
-
-// Disown forgets blobs of a project (after its images were garbage-collected).
-func (s *Store) Disown(project string, digests ...string) error {
-	return s.db.Update(func(tx *bolt.Tx) error {
-		for _, d := range digests {
-			if err := tx.Bucket(bBlobs).Delete([]byte(project + "/" + d)); err != nil {
 				return err
 			}
 		}

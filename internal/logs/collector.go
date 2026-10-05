@@ -16,7 +16,8 @@ func Tag(project, service string, release uint64, replica int) string {
 }
 
 // SyslogTag is the nginx syslog tag of a project's access log. Syslog tags allow only
-// letters, digits and '_', so '-' is replaced; ProjectBySyslogTag maps it back.
+// letters, digits and '_', so '-' is replaced; Collector.Syslog maps it back. ingress renders
+// it into nginx's access_log.
 func SyslogTag(project string) string { return "access_" + strings.ReplaceAll(project, "-", "_") }
 
 // Collector routes received lines into the store.

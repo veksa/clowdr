@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/veksa/clowdr/internal/logs"
 	"github.com/veksa/clowdr/internal/spec"
 )
 
@@ -125,7 +126,7 @@ func renderServer(b *strings.Builder, project string, s ServiceView, domain stri
 
 func accessLog(b *strings.Builder, project string, o Options) {
 	if o.Syslog {
-		fmt.Fprintf(b, "    access_log syslog:server=unix:%s,tag=access_%s,nohostname json_combined;\n", LogSocket, strings.ReplaceAll(project, "-", "_"))
+		fmt.Fprintf(b, "    access_log syslog:server=unix:%s,tag=%s,nohostname json_combined;\n", LogSocket, logs.SyslogTag(project))
 	}
 }
 
