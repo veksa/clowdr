@@ -97,7 +97,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open state %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bProjects, bTokens, bServices, bReleases, bMeta} {
+		for _, b := range [][]byte{bProjects, bTokens, bServices, bReleases, bMeta, bBlobs} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
@@ -178,7 +178,7 @@ func (s *Store) DeleteProject(name string) error {
 		if err := tx.Bucket(bProjects).Delete([]byte(name)); err != nil {
 			return err
 		}
-		for _, b := range [][]byte{bServices, bReleases} {
+		for _, b := range [][]byte{bServices, bReleases, bBlobs} {
 			if err := deletePrefix(tx.Bucket(b), name+"/"); err != nil {
 				return err
 			}
@@ -367,4 +367,40 @@ func (s *Store) Meta(key string) (string, error) {
 
 func (s *Store) SetMeta(key, value string) error {
 	return s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bMeta).Put([]byte(key), []byte(value)) })
+}
+
+// Blob ownership (registry): which project uploaded or referenced which blob.
+
+var bBlobs = []byte("blobs") // key: project/digest
+
+func (s *Store) Owns(project, digest string) (bool, error) {
+	var ok bool
+	err := s.db.View(func(tx *bolt.Tx) error {
+		ok = tx.Bucket(bBlobs).Get([]byte(project+"/"+digest)) != nil
+		return nil
+	})
+	return ok, err
+}
+
+func (s *Store) Own(project string, digests ...string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		for _, d := range digests {
+			if err := tx.Bucket(bBlobs).Put([]byte(project+"/"+d), []byte{1}); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// Disown forgets blobs of a project (after its images were garbage-collected).
+func (s *Store) Disown(project string, digests ...string) error {
+	return s.db.Update(func(tx *bolt.Tx) error {
+		for _, d := range digests {
+			if err := tx.Bucket(bBlobs).Delete([]byte(project + "/" + d)); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
