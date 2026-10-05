@@ -34,6 +34,8 @@ type Project struct {
 	Memory  int64     `json:"memory"`  // quota in bytes, 0 = unlimited
 	Created time.Time `json:"created"`
 	Seeded  bool      `json:"seeded,omitempty"` // from platform.yml
+	// NginxExtra allows raw nginx snippets in the project's deploy.yml (trusted projects only).
+	NginxExtra bool `json:"nginx_extra,omitempty"`
 }
 
 type Token struct {
@@ -403,4 +405,8 @@ func (s *Store) Disown(project string, digests ...string) error {
 		}
 		return nil
 	})
+}
+
+func (s *Store) DeleteRelease(project, service string, id uint64) error {
+	return s.db.Update(func(tx *bolt.Tx) error { return tx.Bucket(bReleases).Delete([]byte(relKey(project, service, id))) })
 }

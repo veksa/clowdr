@@ -109,3 +109,22 @@ func writeAtomic(path string, b []byte) error {
 
 // ProjectFile is the conf.d path of a project.
 func ProjectFile(project string) string { return "conf.d/" + project + ".conf" }
+
+// Write writes files without testing or reloading; used before nginx runs for the first time.
+func (c *Controller) Write(files ...File) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, f := range files {
+		p := filepath.Join(c.Dir, filepath.FromSlash(f.Path))
+		if f.Content == "" {
+			if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+			continue
+		}
+		if err := writeAtomic(p, []byte(f.Content)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
