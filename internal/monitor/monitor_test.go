@@ -307,3 +307,34 @@ func TestDiskAndMemory(t *testing.T) {
 	f.m.checkMemory(ctx, 50*mb, 1000*mb)
 	f.waitAlert(t, "only 50 MB of 1000 MB memory available")
 }
+
+func TestNginxDown(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	down := 0
+	f.m.NginxDown = func() { down++ }
+	nginx := func(action string, attrs ...string) runtime.Event {
+		var e runtime.Event
+		e.Action = action
+		e.Actor.Attributes = map[string]string{"name": "clowdr-nginx", runtime.LabelRole: "nginx"}
+		for i := 0; i+1 < len(attrs); i += 2 {
+			e.Actor.Attributes[attrs[i]] = attrs[i+1]
+		}
+		return e
+	}
+	f.m.handle(ctx, nginx("start"))
+	if down != 0 || len(f.sent()) != 0 {
+		t.Fatalf("start: %d %q", down, f.sent())
+	}
+	f.m.handle(ctx, nginx("die", "exitCode", "137"))
+	f.m.handle(ctx, nginx("destroy"))
+	got := f.sent()
+	if down != 2 || len(got) != 2 || !strings.Contains(got[0], "code 137") || !strings.Contains(got[1], "removed") {
+		t.Fatalf("down %d, alerts %q", down, got)
+	}
+	// A removed service container is not a crash.
+	f.m.handle(ctx, ev("destroy", "shop-api-r1-1", 1))
+	if len(f.sent()) != 2 {
+		t.Fatal(f.sent())
+	}
+}

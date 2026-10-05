@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/veksa/clowdr/internal/ingress"
 	"github.com/veksa/clowdr/internal/runtime"
@@ -26,7 +27,12 @@ func (n NginxExec) Test(ctx context.Context) (string, error) {
 	return out, nil
 }
 
+// Reload signals nginx and waits until the new config takes the traffic. `nginx -s reload`
+// returns as soon as the signal is sent, while the old workers keep accepting connections
+// until the master has started new ones and told the old ones to quit; a deploy is only
+// "live" once that happened.
 func (n NginxExec) Reload(ctx context.Context) error {
+	old, _ := n.workers(ctx)
 	out, code, err := n.Docker.Exec(ctx, NginxContainer, []string{"nginx", "-s", "reload", "-c", ingress.MainConf})
 	if err != nil {
 		return err
@@ -34,7 +40,49 @@ func (n NginxExec) Reload(ctx context.Context) error {
 	if code != 0 {
 		return fmt.Errorf("nginx -s reload exited with %d: %s", code, strings.TrimSpace(out))
 	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(old) > 0 && time.Now().Before(deadline) {
+		now, err := n.workers(ctx)
+		if err != nil {
+			return nil // cannot tell; the reload itself went through
+		}
+		accepting := false
+		for pid := range old {
+			if title, ok := now[pid]; ok && !strings.Contains(title, "shutting down") {
+				accepting = true
+				break
+			}
+		}
+		if !accepting {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 	return nil
+}
+
+// workers lists nginx worker processes (pid -> title). Old workers renamed to "worker process
+// is shutting down" no longer accept connections. Needs ps in the image (nginx images have it).
+func (n NginxExec) workers(ctx context.Context) (map[string]string, error) {
+	out, code, err := n.Docker.Exec(ctx, NginxContainer, []string{"ps", "-o", "pid,args"})
+	if err != nil {
+		return nil, err
+	}
+	if code != 0 {
+		return nil, fmt.Errorf("ps exited with %d", code)
+	}
+	ws := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		pid, title, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if ok && strings.Contains(title, "nginx: worker process") {
+			ws[pid] = strings.TrimSpace(title)
+		}
+	}
+	return ws, nil
 }
 
 // EnsureNginx makes sure the nginx container runs the configured image with clowdr's config,

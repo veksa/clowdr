@@ -1,0 +1,21 @@
+# The chaos test's project: the shop site, deployed slowly enough to kill clowdrd at a chosen
+# step, and a service that runs out of memory on request.
+project: shop
+envs:
+  prod: { server: https://deploy.example.com }
+
+services:
+  web:
+    path: web
+    port: 8080
+    health: { path: /health, successes: 5 }
+    drain: 20s
+    memory: 32m
+    domains:
+      prod: [shop.example.com]
+
+  hog:
+    path: hog
+    port: 8080
+    health: /health
+    memory: 32m

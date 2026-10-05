@@ -191,12 +191,18 @@ func (e *Engine) GC(ctx context.Context) (GCResult, error) {
 	}
 	keepC := map[string]bool{}
 	keepI := map[string]bool{}
+	// A deploy in flight records its containers only once they all started: keep every
+	// container labelled with a deploying release.
+	deploying := map[string]bool{}
 	for _, v := range svcs {
 		e.gc(ctx, v.Project, v.Name)
 		rels, _ := e.Store.Releases(v.Project, v.Name)
 		for _, r := range rels {
 			if r.ID == v.Current || r.ID == v.Previous {
 				keepI[r.Image] = true
+			}
+			if r.Status == store.StatusDeploying {
+				deploying[fmt.Sprintf("%s/%s/%d", r.Project, r.Service, r.ID)] = true
 			}
 			if r.ID == v.Current || r.ID == v.Previous || r.Status == store.StatusDeploying {
 				for _, c := range r.Containers {
@@ -210,7 +216,8 @@ func (e *Engine) GC(ctx context.Context) (GCResult, error) {
 		return res, err
 	}
 	for _, c := range cs {
-		if !keepC[c.Name()] {
+		l := c.Labels
+		if !keepC[c.Name()] && !deploying[l[runtime.LabelProject]+"/"+l[runtime.LabelService]+"/"+l[runtime.LabelRelease]] {
 			if err := e.Docker.ContainerRemove(ctx, c.ID); err == nil {
 				res.Containers = append(res.Containers, c.Name())
 			}

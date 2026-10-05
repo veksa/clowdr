@@ -33,6 +33,9 @@ type Monitor struct {
 	Platform func() *config.Platform
 	StateDir string
 	Log      *slog.Logger
+	// NginxDown is called when the nginx container exits or is removed (clowdrd brings it
+	// back if docker does not). Optional.
+	NginxDown func()
 
 	// Every is how often rates, disk and memory are checked (default a minute).
 	Every time.Duration
@@ -190,7 +193,7 @@ func (m *Monitor) checkRates(ctx context.Context) {
 // watchDocker follows container events, reconnecting when docker restarts.
 func (m *Monitor) watchDocker(ctx context.Context) {
 	for ctx.Err() == nil {
-		evs, errc := m.Docker.Events(ctx, []string{"die", "oom", "start"}, runtime.LabelManaged)
+		evs, errc := m.Docker.Events(ctx, []string{"die", "oom", "start", "destroy"}, runtime.LabelManaged)
 		for ev := range evs {
 			m.handle(ctx, ev)
 		}
@@ -212,8 +215,16 @@ func (m *Monitor) handle(ctx context.Context, ev runtime.Event) {
 		service = a[runtime.LabelAddon]
 	}
 	if role == "nginx" {
-		if ev.Action == "die" {
-			m.Events.Emit(ctx, Event{Kind: "nginx", Severity: Error, Message: "nginx exited with code " + a["exitCode"] + " (docker restarts it)"}, "")
+		switch ev.Action {
+		case "die":
+			m.Events.Emit(ctx, Event{Kind: "nginx", Severity: Error, Message: "nginx exited with code " + a["exitCode"]}, "")
+		case "destroy":
+			m.Events.Emit(ctx, Event{Kind: "nginx", Severity: Error, Message: "nginx container was removed"}, "")
+		default:
+			return
+		}
+		if m.NginxDown != nil {
+			m.NginxDown()
 		}
 		return
 	}

@@ -29,3 +29,16 @@ jobs:
         with:
           name: fuzz-${{ matrix.target.fn }}
           path: "**/testdata/fuzz/**"
+
+  # clowdrd killed mid-deploy, interrupted pushes, OOM, nginx down, full disk, reboot
+  # (test/chaos/run.sh).
+  chaos:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=chaos" -o clowdrd ./cmd/clowdr
+      - run: sudo CLOWDR_BINARY=$PWD/clowdrd test/chaos/run.sh

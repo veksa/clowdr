@@ -117,11 +117,22 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 		events.Emit(ctx, monitor.Event{Project: project, Service: service, Kind: kind, Severity: sev, Message: msg}, "")
 	}
 	mon.Logs, mon.Events = logStore, events
+	nginxDown := make(chan struct{}, 1)
+	mon.NginxDown = func() {
+		select {
+		case nginxDown <- struct{}{}:
+		default:
+		}
+	}
 	go mon.Run(ctx)
 
 	// nginx: write config, make sure the container runs, then a checked reload.
 	if err := bootstrapNginx(ctx, eng, ing, st); err != nil {
 		return err
+	}
+	// Finish what a killed clowdrd or a reboot left half-done, before anything deploys.
+	if err := eng.Recover(ctx); err != nil {
+		log.Error("recover", "err", err)
 	}
 	if res, err := eng.GC(ctx); err != nil {
 		log.Warn("gc", "err", err)
@@ -216,6 +227,30 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 				return
 			case <-t.C:
 			case <-kick:
+			}
+		}
+	}()
+
+	// nginx watchdog: docker restarts a crashed nginx itself, but not one that was stopped or
+	// removed. Check shortly after it went down, retrying until it runs.
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-nginxDown:
+			}
+			for i := 0; i < 12; i++ {
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(5 * time.Second):
+				}
+				err := eng.EnsureNginx(ctx)
+				if err == nil {
+					break
+				}
+				log.Error("nginx", "err", err)
 			}
 		}
 	}()

@@ -267,3 +267,29 @@ func TestHTTPProber(t *testing.T) {
 		t.Fatal("refused connection")
 	}
 }
+
+func TestNginxReloadWaitsForNewWorkers(t *testing.T) {
+	f := newFixture(t)
+	n := NginxExec{Docker: f.d}
+	ps := 0
+	f.d.ExecFn = func(_ string, cmd []string) (string, int, error) {
+		if cmd[0] != "ps" {
+			return "", 0, nil
+		}
+		ps++
+		switch {
+		case ps == 1: // before the reload
+			return "PID   COMMAND\n    7 nginx: master process nginx\n   91 nginx: worker process\n", 0, nil
+		case ps < 4: // the master has not started the new workers yet
+			return "    7 nginx: master process nginx\n   91 nginx: worker process\n", 0, nil
+		default:
+			return "    7 nginx: master process nginx\n   91 nginx: worker process is shutting down\n  120 nginx: worker process\n", 0, nil
+		}
+	}
+	if err := n.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if ps != 4 {
+		t.Fatalf("ps ran %d times, want 4", ps)
+	}
+}
