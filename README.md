@@ -26,11 +26,14 @@ curl -fsSL https://github.com/veksa/clowdr/releases/latest/download/install.sh |
 
 On first start clowdrd writes `/etc/clowdr/platform.yml`, starts nginx on :80/:443 and prints
 the admin token.
+To update the server, run `install.sh` again; it keeps the state. `clowctl self-update` updates
+the CLI from the same GitHub Releases.
 
 ```sh
 clowctl context add prod https://deploy.example.com --token <admin token>
 clowctl project create shop --domains example.com,*.example.com --platform redis --memory 600m
 clowctl token create --project shop --env prod      # give this to the project / CI
+clowctl platform status                             # nginx, certificates, memory and disk, projects
 ```
 
 ## Project
@@ -69,6 +72,7 @@ services:
 ```sh
 export CLOWDR_TOKEN=<project token>    # or put it in .clowdr/token.prod (gitignored)
 clowctl deploy api -e prod             # build → push new layers → start → health → switch → drain
+clowctl diff -e prod                   # deploy.yml vs the server; clowctl apply applies it
 clowctl ps -e prod
 clowctl logs api -f -e prod
 clowctl rollback api -e prod

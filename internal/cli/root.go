@@ -58,10 +58,10 @@ func NewRoot(version string) *cobra.Command {
 	f.StringVarP(&a.output, "output", "o", "table", "output format: table|json")
 
 	root.AddCommand(
-		a.deployCmd(), a.applyCmd(), a.rollbackCmd(), a.releasesCmd(),
+		a.deployCmd(), a.applyCmd(), a.diffCmd(), a.rollbackCmd(), a.releasesCmd(),
 		a.psCmd(), a.statusCmd(), a.routesCmd(), a.logsCmd(), a.accessCmd(), a.eventsCmd(), a.scaleCmd(), a.execCmd(), a.topCmd(), a.volumeCmd(), a.addonCmd(), a.gcCmd(),
 		a.restartCmd(), a.stopCmd(), a.startCmd(), a.rmCmd(), a.envCmd(),
-		a.contextCmd(), a.projectCmd(), a.tokenCmd(), a.platformCmd(), a.versionCmd(),
+		a.contextCmd(), a.projectCmd(), a.tokenCmd(), a.platformCmd(), a.versionCmd(), a.selfUpdateCmd(),
 	)
 	return root
 }

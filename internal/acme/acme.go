@@ -40,15 +40,7 @@ type Manager struct {
 
 // NeedsCert reports whether domain has no certificate or it expires soon.
 func (m *Manager) NeedsCert(domain string) bool {
-	b, err := os.ReadFile(filepath.Join(m.CertDir, domain, "fullchain.pem"))
-	if err != nil {
-		return true
-	}
-	blk, _ := pem.Decode(b)
-	if blk == nil {
-		return true
-	}
-	c, err := x509.ParseCertificate(blk.Bytes)
+	exp, err := CertExpiry(m.CertDir, domain)
 	if err != nil {
 		return true
 	}
@@ -56,7 +48,24 @@ func (m *Manager) NeedsCert(domain string) bool {
 	if rb == 0 {
 		rb = 30 * 24 * time.Hour
 	}
-	return time.Until(c.NotAfter) < rb
+	return time.Until(exp) < rb
+}
+
+// CertExpiry returns when the certificate of domain in certDir expires.
+func CertExpiry(certDir, domain string) (time.Time, error) {
+	b, err := os.ReadFile(filepath.Join(certDir, domain, "fullchain.pem"))
+	if err != nil {
+		return time.Time{}, err
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil {
+		return time.Time{}, errors.New("fullchain.pem: no PEM block")
+	}
+	c, err := x509.ParseCertificate(blk.Bytes)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return c.NotAfter, nil
 }
 
 // Ensure obtains certificates for domains that need one. It returns the domains that got a

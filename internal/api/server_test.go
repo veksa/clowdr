@@ -205,3 +205,33 @@ func TestIngressOnly(t *testing.T) {
 		t.Fatal("memory is not ingress")
 	}
 }
+
+func TestPlatformStatus(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	shop := e.projectClient(t, "shop", "example.com", "*.example.com")
+	e.projectClient(t, "blog", "example.org")
+	push(t, shop, "shop/server:v1")
+	sp := svcSpec()
+	sp.Memory, sp.Replicas = 128<<20, 2
+	if _, err := shop.Stream(ctx, "POST", Path("projects", "shop", "services", "server", "deploy"), DeployRequest{Spec: sp, Tag: "v1"}, func(Event) {}); err != nil {
+		t.Fatal(err)
+	}
+
+	var st PlatformStatus
+	if err := e.admin.Do(ctx, "GET", "/v1/platform/status", nil, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Version != "test" || st.Nginx.State != "missing" || len(st.Projects) != 2 {
+		t.Fatalf("%+v", st)
+	}
+	for _, p := range st.Projects {
+		if p.Name == "shop" && (p.Services != 1 || p.Running != 1 || p.Reserved != 256<<20) {
+			t.Fatalf("%+v", p)
+		}
+	}
+	var se *StatusError
+	if err := shop.Do(ctx, "GET", "/v1/platform/status", nil, nil); !errors.As(err, &se) || se.Status != 403 {
+		t.Fatalf("project token read platform status: %v", err)
+	}
+}

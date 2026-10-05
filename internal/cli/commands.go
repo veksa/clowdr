@@ -842,7 +842,68 @@ func (a *app) platformCmd() *cobra.Command {
 			return t.client.Do(cmd.Context(), "POST", "/v1/platform/reconcile", nil, nil)
 		},
 	})
+	cmd.AddCommand(&cobra.Command{
+		Use:   "status",
+		Short: "Server overview: versions, nginx, memory and disk, certificates, projects",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			t, err := a.target(false)
+			if err != nil {
+				return err
+			}
+			var st api.PlatformStatus
+			if err := t.client.Do(cmd.Context(), "GET", "/v1/platform/status", nil, &st); err != nil {
+				return err
+			}
+			if a.json() {
+				return a.printJSON(st)
+			}
+			a.printPlatformStatus(st)
+			return nil
+		},
+	})
 	return cmd
+}
+
+func (a *app) printPlatformStatus(st api.PlatformStatus) {
+	fmt.Fprintf(a.out, "clowdrd %s, docker %s, registry %s\n", st.Version, st.Docker, st.Registry)
+	if h := st.Host; h.MemTotal > 0 {
+		fmt.Fprintf(a.out, "server: memory %s free of %s, disk %s free of %s\n",
+			human(h.MemAvail), human(h.MemTotal), human(h.DiskFree), human(h.DiskTotal))
+	}
+	n := st.Nginx
+	switch {
+	case n.State == "missing":
+		fmt.Fprintln(a.out, "nginx:  missing (clowctl platform reconcile)")
+	case n.State != "running":
+		fmt.Fprintf(a.out, "nginx:  %s (clowctl platform reconcile)\n", n.State)
+	default:
+		fmt.Fprintf(a.out, "nginx:  running %s, %s, restarts %d\n", n.Image, strings.TrimSuffix(ago(n.Started), " ago"), n.Restarts)
+	}
+	if n.ConfigError != "" {
+		fmt.Fprintf(a.out, "        config does not load: %s\n", n.ConfigError)
+	}
+	if len(st.Certs) > 0 {
+		fmt.Fprintln(a.out)
+		w := a.table("CERTIFICATE", "EXPIRES")
+		for _, c := range st.Certs {
+			exp := c.Error
+			if exp == "" {
+				exp = fmt.Sprintf("%s (%dd)", c.Expires.Format(time.DateOnly), int(time.Until(c.Expires).Hours()/24))
+			}
+			fmt.Fprintf(w, "%s\t%s\n", c.Domain, exp)
+		}
+		w.Flush()
+	}
+	fmt.Fprintln(a.out)
+	w := a.table("PROJECT", "SERVICES", "RUNNING", "MEMORY / QUOTA")
+	for _, p := range st.Projects {
+		quota := "unlimited"
+		if p.Quota > 0 {
+			quota = config.FormatBytes(p.Quota)
+		}
+		fmt.Fprintf(w, "%s\t%d\t%d\t%s / %s\n", p.Name, p.Services, p.Running, human(p.Reserved), quota)
+	}
+	w.Flush()
 }
 
 func (a *app) versionCmd() *cobra.Command {
