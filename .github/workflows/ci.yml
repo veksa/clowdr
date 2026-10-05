@@ -16,8 +16,15 @@ jobs:
       - name: gofmt
         run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
       - run: go vet ./...
-      - run: go test -race -coverprofile=cover.out ./...
-      - run: go tool cover -func=cover.out | tail -1
+      # Unit and integration tests (the docker, Pebble and registry ones use the runner's docker).
+      # Coverage counts code exercised from any package (the CLI tests drive the API), without
+      # the test helpers.
+      - run: go test -race -coverpkg=$(go list ./internal/... | grep -v -e /apitest -e /fake | paste -sd, -) -coverprofile=cover.out ./...
+      - name: coverage gate
+        run: |
+          total=$(go tool cover -func=cover.out | tail -1 | awk '{print int($NF)}')
+          echo "coverage: $total% (gate 74%, target 80%)"
+          [ "$total" -ge 74 ]
 
   build:
     runs-on: ubuntu-latest
