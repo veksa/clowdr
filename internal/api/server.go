@@ -40,6 +40,8 @@ type Server struct {
 	Logs *logs.Store
 	// Events is the events journal; nil disables `clowctl events`.
 	Events *monitor.Events
+	// StateDir is used for the host disk figures in `clowctl top`.
+	StateDir string
 }
 
 type ctxKey struct{}
@@ -82,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	a("PATCH /v1/projects/{project}/services/{service}/env", s.patchEnv)
 	a("GET /v1/projects/{project}/access", s.access)
 	a("GET /v1/projects/{project}/events", s.events)
+	s.registerOps(a)
 
 	if s.Registry != nil {
 		mux.Handle("/v2/", s.Registry)

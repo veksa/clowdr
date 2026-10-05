@@ -144,3 +144,18 @@ func (e *Events) Subscribe(project string) (<-chan Event, func(), error) {
 	}()
 	return out, func() { cancel(); close(done) }, nil
 }
+
+// Host is free memory and disk of the server, for `clowctl top`.
+type Host struct {
+	MemTotal  int64 `json:"mem_total,omitempty"`
+	MemAvail  int64 `json:"mem_available,omitempty"`
+	DiskTotal int64 `json:"disk_total,omitempty"`
+	DiskFree  int64 `json:"disk_free,omitempty"`
+}
+
+func HostStats(dir string) Host {
+	var h Host
+	h.MemAvail, h.MemTotal, _ = memAvailable()
+	h.DiskFree, h.DiskTotal, _ = diskFree(dir)
+	return h
+}

@@ -59,7 +59,7 @@ func NewRoot(version string) *cobra.Command {
 
 	root.AddCommand(
 		a.deployCmd(), a.applyCmd(), a.rollbackCmd(), a.releasesCmd(),
-		a.psCmd(), a.statusCmd(), a.routesCmd(), a.logsCmd(), a.accessCmd(), a.eventsCmd(),
+		a.psCmd(), a.statusCmd(), a.routesCmd(), a.logsCmd(), a.accessCmd(), a.eventsCmd(), a.scaleCmd(), a.execCmd(), a.topCmd(), a.volumeCmd(), a.addonCmd(),
 		a.restartCmd(), a.stopCmd(), a.startCmd(), a.rmCmd(), a.envCmd(),
 		a.contextCmd(), a.projectCmd(), a.tokenCmd(), a.platformCmd(), a.versionCmd(),
 	)
@@ -71,6 +71,10 @@ func Execute(version string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 	if err := NewRoot(version).ExecuteContext(ctx); err != nil {
+		var code exitError
+		if errors.As(err, &code) {
+			return int(code)
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		return 1
 	}

@@ -197,3 +197,6 @@ type Nginx struct{ Reloads int }
 
 func (n *Nginx) Test(context.Context) (string, error) { return "", nil }
 func (n *Nginx) Reload(context.Context) error         { n.Reloads++; return nil }
+
+func (f *Docker) Volumes(context.Context, ...string) ([]runtime.Volume, error) { return nil, nil }
+func (f *Docker) VolumeRemove(context.Context, string) error                   { return nil }

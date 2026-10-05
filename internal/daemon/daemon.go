@@ -131,7 +131,7 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 		return err
 	}
 
-	srv := &api.Server{Store: st, Engine: eng, Log: log, Version: o.Version, RegistryKind: regKind, Logs: logStore, Events: events}
+	srv := &api.Server{Store: st, Engine: eng, Log: log, Version: o.Version, RegistryKind: regKind, Logs: logStore, Events: events, StateDir: o.StateDir}
 	reg := &registry.Handler{Store: regStore, Owners: st, Authorize: srv.RegistryAuthorize, Log: log}
 	srv.Registry = reg
 	handler := srv.Handler()

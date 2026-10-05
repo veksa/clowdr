@@ -274,3 +274,34 @@ func TestAddonAndStopStart(t *testing.T) {
 		t.Fatal("not removed")
 	}
 }
+
+func TestScaleAndExec(t *testing.T) {
+	f := newFixture(t)
+	if _, err := f.deploy(t, "v1", serverSpec()); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	nop := func(string, ...any) {}
+	r, err := f.e.Scale(ctx, "shop", "server", 3, "test", nop)
+	f.e.WaitDrains()
+	if err != nil || len(r.Containers) != 3 || r.Image != "clowdr.local/shop/server:v1" {
+		t.Fatalf("%+v %v", r, err)
+	}
+	if _, _, err := f.e.Exec(ctx, "shop", "server", 3, []string{"true"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := f.e.Exec(ctx, "shop", "server", 4, []string{"true"}); err == nil {
+		t.Fatal("replica 4 of 3")
+	}
+	// Does not fit: 1 GB host, 100m each.
+	f.d.MemTotal = 1 << 30
+	if _, err := f.e.Scale(ctx, "shop", "server", 12, "test", nop); err == nil || !strings.Contains(err.Error(), "does not fit") {
+		t.Fatalf("want does not fit, got %v", err)
+	}
+	if _, err := f.e.Scale(ctx, "shop", "server", 0, "test", nop); err != nil {
+		t.Fatal(err)
+	}
+	if svc, _ := f.st.Service("shop", "server"); !svc.Stopped {
+		t.Fatal("scale 0 must stop")
+	}
+}

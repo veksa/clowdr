@@ -40,6 +40,8 @@ type Docker interface {
 	NetworkEnsure(ctx context.Context, name string, labels map[string]string) error
 	NetworkConnect(ctx context.Context, network, container string, aliases []string) error
 	VolumeEnsure(ctx context.Context, name string, labels map[string]string) error
+	Volumes(ctx context.Context, labels ...string) ([]runtime.Volume, error)
+	VolumeRemove(ctx context.Context, name string) error
 	Exec(ctx context.Context, id string, cmd []string) (string, int, error)
 }
 
