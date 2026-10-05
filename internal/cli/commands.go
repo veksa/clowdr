@@ -387,7 +387,14 @@ func (a *app) logsCmd() *cobra.Command {
 						if len(names) > 1 {
 							prefix = n + prefix
 						}
-						fmt.Fprintf(a.out, "[%s] %s\n", prefix, l.Line)
+						switch {
+						case download:
+							fmt.Fprintf(a.out, "%s %s %s\n", l.Time, l.Container, l.Line)
+						case timestamps:
+							fmt.Fprintf(a.out, "%s [%s] %s\n", shortTime(l.Time), prefix, l.Line)
+						default:
+							fmt.Fprintf(a.out, "[%s] %s\n", prefix, l.Line)
+						}
 					})
 				}()
 			}
