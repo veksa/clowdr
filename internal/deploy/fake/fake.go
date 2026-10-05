@@ -6,6 +6,9 @@ import (
 	"errors"
 	"io"
 	"net/url"
+	"path"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -22,15 +25,21 @@ type Container struct {
 type Docker struct {
 	mu       sync.Mutex
 	ByName   map[string]*Container
-	Images   map[string]bool
+	Local    map[string]bool // local images
 	Removed  []string
 	MemTotal int64
+	Vols     map[string]map[string]string // volume name → labels
+	Networks map[string][]string          // network → connected containers
+	// ExecFn answers Exec; nil = empty output, exit 0. Execs records every call.
+	ExecFn func(container string, cmd []string) (string, int, error)
+	Execs  []string
 	// Crash makes containers of these images exit right after start.
 	Crash map[string]bool
 }
 
 func NewDocker() *Docker {
-	return &Docker{ByName: map[string]*Container{}, Images: map[string]bool{}, Crash: map[string]bool{}}
+	return &Docker{ByName: map[string]*Container{}, Local: map[string]bool{}, Crash: map[string]bool{},
+		Vols: map[string]map[string]string{}, Networks: map[string][]string{}}
 }
 
 func (f *Docker) Info(context.Context) (runtime.Info, error) {
@@ -40,7 +49,7 @@ func (f *Docker) Info(context.Context) (runtime.Info, error) {
 func (f *Docker) ImageInspect(_ context.Context, ref string) (runtime.ImageInspect, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !f.Images[ref] {
+	if !f.Local[ref] {
 		return runtime.ImageInspect{}, &runtime.APIError{Status: 404}
 	}
 	return runtime.ImageInspect{ID: ref}, nil
@@ -49,14 +58,14 @@ func (f *Docker) ImageInspect(_ context.Context, ref string) (runtime.ImageInspe
 func (f *Docker) ImagePull(_ context.Context, ref string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Images[ref] = true
+	f.Local[ref] = true
 	return nil
 }
 
 func (f *Docker) ImageRemove(_ context.Context, ref string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.Images, ref)
+	delete(f.Local, ref)
 	f.Removed = append(f.Removed, ref)
 	return nil
 }
@@ -132,7 +141,7 @@ func (f *Docker) ContainerLogs(_ context.Context, id string, _ bool, _ string, _
 func (f *Docker) AddImage(ref string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Images[ref] = true
+	f.Local[ref] = true
 }
 
 func (f *Docker) Containers(_ context.Context, labels ...string) ([]runtime.ContainerSummary, error) {
@@ -140,28 +149,17 @@ func (f *Docker) Containers(_ context.Context, labels ...string) ([]runtime.Cont
 	defer f.mu.Unlock()
 	var out []runtime.ContainerSummary
 	for name, c := range f.ByName {
-		match := true
-		for _, l := range labels {
-			k, v, hasV := strings.Cut(l, "=")
-			if got, ok := c.Config.Labels[k]; !ok || hasV && got != v {
-				match = false
-			}
+		if !matches(c.Config.Labels, labels) {
+			continue
 		}
-		if match {
-			state := "exited"
-			if c.Running {
-				state = "running"
-			}
-			out = append(out, runtime.ContainerSummary{ID: name, Names: []string{"/" + name}, State: state, Labels: c.Config.Labels})
+		state := "exited"
+		if c.Running {
+			state = "running"
 		}
+		out = append(out, runtime.ContainerSummary{ID: name, Names: []string{"/" + name}, State: state, Image: c.Config.Image, Labels: c.Config.Labels})
 	}
 	return out, nil
 }
-
-func (f *Docker) NetworkEnsure(context.Context, string, map[string]string) error { return nil }
-func (f *Docker) NetworkConnect(context.Context, string, string, []string) error { return nil }
-func (f *Docker) VolumeEnsure(context.Context, string, map[string]string) error  { return nil }
-func (f *Docker) Exec(context.Context, string, []string) (string, int, error)    { return "", 0, nil }
 
 func (f *Docker) RunningWith(prefix string) []string {
 	f.mu.Lock()
@@ -198,5 +196,83 @@ type Nginx struct{ Reloads int }
 func (n *Nginx) Test(context.Context) (string, error) { return "", nil }
 func (n *Nginx) Reload(context.Context) error         { n.Reloads++; return nil }
 
-func (f *Docker) Volumes(context.Context, ...string) ([]runtime.Volume, error) { return nil, nil }
-func (f *Docker) VolumeRemove(context.Context, string) error                   { return nil }
+func (f *Docker) NetworkEnsure(context.Context, string, map[string]string) error { return nil }
+
+func (f *Docker) NetworkConnect(_ context.Context, network, container string, _ []string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !slices.Contains(f.Networks[network], container) {
+		f.Networks[network] = append(f.Networks[network], container)
+	}
+	return nil
+}
+
+func (f *Docker) VolumeEnsure(_ context.Context, name string, labels map[string]string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.Vols[name]; !ok {
+		f.Vols[name] = labels
+	}
+	return nil
+}
+
+func (f *Docker) Volumes(_ context.Context, labels ...string) ([]runtime.Volume, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []runtime.Volume
+	for name, vl := range f.Vols {
+		if matches(vl, labels) {
+			out = append(out, runtime.Volume{Name: name, Labels: vl})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+func (f *Docker) VolumeRemove(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, ok := f.Vols[name]; !ok {
+		return &runtime.APIError{Status: 404, Message: "no such volume"}
+	}
+	delete(f.Vols, name)
+	return nil
+}
+
+func (f *Docker) Exec(_ context.Context, id string, cmd []string) (string, int, error) {
+	f.mu.Lock()
+	f.Execs = append(f.Execs, id+": "+strings.Join(cmd, " "))
+	fn := f.ExecFn
+	f.mu.Unlock()
+	if fn != nil {
+		return fn(id, cmd)
+	}
+	return "", 0, nil
+}
+
+// Images lists local images whose tag matches reference (a glob like clowdr.local/*/*).
+func (f *Docker) Images(_ context.Context, reference string) ([]runtime.ImageSummary, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []runtime.ImageSummary
+	for ref := range f.Local {
+		repo := ref
+		if i := strings.LastIndex(ref, ":"); i > strings.LastIndex(ref, "/") {
+			repo = ref[:i]
+		}
+		if ok, _ := path.Match(reference, repo); reference == "" || ok {
+			out = append(out, runtime.ImageSummary{ID: ref, RepoTags: []string{ref}})
+		}
+	}
+	return out, nil
+}
+
+func matches(have map[string]string, labels []string) bool {
+	for _, l := range labels {
+		k, v, hasV := strings.Cut(l, "=")
+		if got, ok := have[k]; !ok || hasV && got != v {
+			return false
+		}
+	}
+	return true
+}

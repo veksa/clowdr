@@ -52,7 +52,7 @@ func newFixture(t *testing.T) *fixture {
 
 func (f *fixture) push(img string) string {
 	ref := "clowdr.local/shop/server:" + img
-	f.d.Images[ref] = true
+	f.d.Local[ref] = true
 	return ref
 }
 
@@ -154,7 +154,7 @@ func TestGC(t *testing.T) {
 	if strings.Join(f.d.Removed, ",") != "clowdr.local/shop/server:v1,clowdr.local/shop/server:v2" {
 		t.Fatalf("removed %v", f.d.Removed)
 	}
-	if !f.d.Images["clowdr.local/shop/server:v3"] || !f.d.Images["clowdr.local/shop/server:v4"] {
+	if !f.d.Local["clowdr.local/shop/server:v3"] || !f.d.Local["clowdr.local/shop/server:v4"] {
 		t.Fatal("current or previous image removed")
 	}
 
@@ -165,7 +165,7 @@ func TestGC(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, _ := f.st.Release("shop", "server", bad.ID)
-	if r.Status != store.StatusFailed || !r.ImageRemoved || f.d.Images["clowdr.local/shop/server:bad"] {
+	if r.Status != store.StatusFailed || !r.ImageRemoved || f.d.Local["clowdr.local/shop/server:bad"] {
 		t.Fatalf("failed release after gc: %+v", r)
 	}
 }
