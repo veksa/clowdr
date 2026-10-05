@@ -118,4 +118,9 @@ go build -o bin/clowctl ./cmd/clowdr
 GOOS=linux go build -o bin/clowdrd ./cmd/clowdr
 ```
 
+`examples/shop` is a minimal project. `test/e2e/run.sh` deploys it on a real Linux host with
+Docker 29 (installs clowdrd system-wide, takes ports 80/443/7443): deploys under load with zero
+failed requests, a failed health check, rollback, scale, restarts, logs. CI runs it on every
+push; fuzz targets (`go test -fuzz`) run nightly.
+
 License: Apache-2.0.

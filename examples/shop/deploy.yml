@@ -1,0 +1,15 @@
+# A minimal project: one static site behind nginx, deployed with health-gated switching.
+#   clowctl project create shop --domains shop.example.com --memory 128m   (admin, once)
+#   clowctl deploy -e prod
+project: shop
+envs:
+  prod: { server: https://deploy.example.com }
+
+services:
+  web:
+    path: web
+    port: 8080
+    health: /health
+    memory: 32m
+    domains:
+      prod: [shop.example.com]

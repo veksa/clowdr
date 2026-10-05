@@ -259,3 +259,17 @@ func FuzzMsgpack(f *testing.F) {
 		}
 	})
 }
+
+func FuzzParseSyslog(f *testing.F) {
+	f.Add(`<190>Oct  5 18:00:00 access_shop: {"status":200}`)
+	f.Add(`<187>Oct 15 18:00:00 nginx: connect() failed`)
+	f.Fuzz(func(t *testing.T, s string) {
+		tag, msg, sev, ok := parseSyslog(s)
+		if !ok {
+			return
+		}
+		if sev < 0 || sev > 7 || len(tag)+len(msg) > len(s) {
+			t.Fatalf("%q → %q %q %d", s, tag, msg, sev)
+		}
+	})
+}

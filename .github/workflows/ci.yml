@@ -44,3 +44,16 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./internal/cli/... ./internal/config/... ./internal/api/...
+
+  # The whole path on a real host: Docker 29 + containerd store, install.sh, nginx, registry,
+  # deploys under load, rollback, scale, logs (test/e2e/run.sh).
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=e2e" -o clowdrd ./cmd/clowdr
+      - run: sudo CLOWDR_BINARY=$PWD/clowdrd test/e2e/run.sh

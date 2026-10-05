@@ -42,3 +42,32 @@ addons:
 		t.Fatal("empty file must be valid:", err)
 	}
 }
+
+func FuzzParsePlatform(f *testing.F) {
+	f.Add([]byte(DefaultPlatform))
+	f.Add([]byte("domain: example.com\nprojects:\n  shop: { domains: [example.com], memory: 300m }\n"))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		p, err := ParsePlatform(b)
+		if err != nil {
+			return
+		}
+		p.DeployHost()
+		for name := range p.Addons {
+			p.AddonAllowed(name, "shop")
+		}
+	})
+}
+
+func FuzzUnits(f *testing.F) {
+	for _, s := range []string{"300m", "1g", "512k", "1.5G", "24h", "14d", "30s", ""} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		if n, err := ParseBytes(s); err == nil && n >= 0 {
+			if m, err := ParseBytes(FormatBytes(n)); err != nil || (n > 0 && m <= 0) {
+				t.Fatalf("%q → %d → %q → %d, %v", s, n, FormatBytes(n), m, err)
+			}
+		}
+		ParseDuration(s)
+	})
+}

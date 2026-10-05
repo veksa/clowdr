@@ -1,11 +1,13 @@
 #!/bin/sh
 # clowdr server install: curl -fsSL https://github.com/veksa/clowdr/releases/latest/download/install.sh | sh
 # Options (sh -s -- ...): --domain example.com  --version v0.1.0
+#   --binary ./clowdrd   install a local build instead of downloading a release
 set -eu
 
 REPO="${CLOWDR_REPO:-veksa/clowdr}"
 VERSION="latest"
 DOMAIN=""
+BINARY=""
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -13,6 +15,8 @@ while [ $# -gt 0 ]; do
 	--domain=*) DOMAIN="${1#*=}"; shift ;;
 	--version) VERSION="$2"; shift 2 ;;
 	--version=*) VERSION="${1#*=}"; shift ;;
+	--binary) BINARY="$2"; shift 2 ;;
+	--binary=*) BINARY="${1#*=}"; shift ;;
 	*) echo "unknown option $1" >&2; exit 2 ;;
 	esac
 done
@@ -37,20 +41,25 @@ if ! docker info --format '{{json .DriverStatus}}' | grep -q 'io.containerd.snap
 	die 'docker does not use the containerd image store: add {"features": {"containerd-snapshotter": true}} to /etc/docker/daemon.json, then systemctl restart docker'
 fi
 
-if [ "$VERSION" = latest ]; then
-	BASE="https://github.com/$REPO/releases/latest/download"
-else
-	BASE="https://github.com/$REPO/releases/download/$VERSION"
-fi
-
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
-say "downloading clowdrd ($ARCH, $VERSION)"
-curl -fsSL "$BASE/clowdrd_linux_$ARCH" -o "$TMP/clowdrd"
-curl -fsSL "$BASE/checksums.txt" -o "$TMP/checksums.txt"
-EXPECTED="$(grep " clowdrd_linux_$ARCH\$" "$TMP/checksums.txt" | cut -d' ' -f1)"
-ACTUAL="$(sha256sum "$TMP/clowdrd" | cut -d' ' -f1)"
-[ -n "$EXPECTED" ] && [ "$EXPECTED" = "$ACTUAL" ] || die "checksum mismatch for clowdrd_linux_$ARCH"
+if [ -n "$BINARY" ]; then
+	[ -f "$BINARY" ] || die "$BINARY not found"
+	say "installing $BINARY"
+	cp "$BINARY" "$TMP/clowdrd"
+else
+	if [ "$VERSION" = latest ]; then
+		BASE="https://github.com/$REPO/releases/latest/download"
+	else
+		BASE="https://github.com/$REPO/releases/download/$VERSION"
+	fi
+	say "downloading clowdrd ($ARCH, $VERSION)"
+	curl -fsSL "$BASE/clowdrd_linux_$ARCH" -o "$TMP/clowdrd"
+	curl -fsSL "$BASE/checksums.txt" -o "$TMP/checksums.txt"
+	EXPECTED="$(grep " clowdrd_linux_$ARCH\$" "$TMP/checksums.txt" | cut -d' ' -f1)"
+	ACTUAL="$(sha256sum "$TMP/clowdrd" | cut -d' ' -f1)"
+	[ -n "$EXPECTED" ] && [ "$EXPECTED" = "$ACTUAL" ] || die "checksum mismatch for clowdrd_linux_$ARCH"
+fi
 
 install -m 0755 "$TMP/clowdrd" /usr/local/bin/clowdrd
 ln -sf /usr/local/bin/clowdrd /usr/local/bin/clowctl
