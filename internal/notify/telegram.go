@@ -13,7 +13,9 @@ import (
 type Telegram struct {
 	Token  string
 	ChatID string
-	Log    *slog.Logger
+	// API is the Bot API base URL (default https://api.telegram.org).
+	API string
+	Log *slog.Logger
 	// Dedup drops identical messages sent within this window (default 10 minutes).
 	Dedup time.Duration
 
@@ -30,8 +32,12 @@ func (t *Telegram) Send(ctx context.Context, text string) {
 	go func() {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
 		defer cancel()
+		api := t.API
+		if api == "" {
+			api = "https://api.telegram.org"
+		}
 		form := url.Values{"chat_id": {t.ChatID}, "text": {text}, "disable_web_page_preview": {"true"}}
-		req, err := http.NewRequestWithContext(ctx, "POST", "https://api.telegram.org/bot"+t.Token+"/sendMessage", nil)
+		req, err := http.NewRequestWithContext(ctx, "POST", api+"/bot"+t.Token+"/sendMessage", nil)
 		if err != nil {
 			return
 		}

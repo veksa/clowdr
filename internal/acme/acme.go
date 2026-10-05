@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -30,7 +31,11 @@ type Manager struct {
 	CertDir      string // <domain>/fullchain.pem, privkey.pem
 	ChallengeDir string // HTTP-01 tokens
 	Log          *slog.Logger
-	// RenewBefore renews certificates expiring sooner than this (default 30 days).
+	// HTTPClient talks to the ACME server (default http.DefaultClient; tests trust Pebble's CA).
+	HTTPClient *http.Client
+	// RenewBefore renews certificates expiring sooner than this. Default: when a third of the
+	// lifetime is left (30 days of a 90-day certificate, 2 days of a 6-day one), as Let's
+	// Encrypt recommends.
 	RenewBefore time.Duration
 
 	mu     sync.Mutex
@@ -40,32 +45,36 @@ type Manager struct {
 
 // NeedsCert reports whether domain has no certificate or it expires soon.
 func (m *Manager) NeedsCert(domain string) bool {
-	exp, err := CertExpiry(m.CertDir, domain)
+	c, err := loadCert(m.CertDir, domain)
 	if err != nil {
 		return true
 	}
 	rb := m.RenewBefore
 	if rb == 0 {
-		rb = 30 * 24 * time.Hour
+		rb = c.NotAfter.Sub(c.NotBefore) / 3
 	}
-	return time.Until(exp) < rb
+	return time.Until(c.NotAfter) < rb
 }
 
 // CertExpiry returns when the certificate of domain in certDir expires.
 func CertExpiry(certDir, domain string) (time.Time, error) {
-	b, err := os.ReadFile(filepath.Join(certDir, domain, "fullchain.pem"))
-	if err != nil {
-		return time.Time{}, err
-	}
-	blk, _ := pem.Decode(b)
-	if blk == nil {
-		return time.Time{}, errors.New("fullchain.pem: no PEM block")
-	}
-	c, err := x509.ParseCertificate(blk.Bytes)
+	c, err := loadCert(certDir, domain)
 	if err != nil {
 		return time.Time{}, err
 	}
 	return c.NotAfter, nil
+}
+
+func loadCert(certDir, domain string) (*x509.Certificate, error) {
+	b, err := os.ReadFile(filepath.Join(certDir, domain, "fullchain.pem"))
+	if err != nil {
+		return nil, err
+	}
+	blk, _ := pem.Decode(b)
+	if blk == nil {
+		return nil, errors.New("fullchain.pem: no PEM block")
+	}
+	return x509.ParseCertificate(blk.Bytes)
 }
 
 // Ensure obtains certificates for domains that need one. It returns the domains that got a
@@ -110,7 +119,7 @@ func (m *Manager) acmeClient(ctx context.Context) (*acme.Client, error) {
 	if dir == "" {
 		dir = acme.LetsEncryptURL
 	}
-	c := &acme.Client{Key: key, DirectoryURL: dir, UserAgent: "clowdr"}
+	c := &acme.Client{Key: key, DirectoryURL: dir, UserAgent: "clowdr", HTTPClient: m.HTTPClient}
 	acct := &acme.Account{}
 	if m.Email != "" {
 		acct.Contact = []string{"mailto:" + m.Email}
@@ -131,12 +140,12 @@ func (m *Manager) obtain(ctx context.Context, domain string) error {
 	}
 	order, err := c.AuthorizeOrder(ctx, acme.DomainIDs(domain))
 	if err != nil {
-		return err
+		return fmt.Errorf("new order: %w", err)
 	}
 	for _, u := range order.AuthzURLs {
 		z, err := c.GetAuthorization(ctx, u)
 		if err != nil {
-			return err
+			return fmt.Errorf("authorization: %w", err)
 		}
 		if z.Status == acme.StatusValid {
 			continue
@@ -152,7 +161,7 @@ func (m *Manager) obtain(ctx context.Context, domain string) error {
 		}
 		body, err := c.HTTP01ChallengeResponse(chal.Token)
 		if err != nil {
-			return err
+			return fmt.Errorf("challenge response: %w", err)
 		}
 		if err := os.MkdirAll(m.ChallengeDir, 0o755); err != nil {
 			return err
@@ -163,10 +172,10 @@ func (m *Manager) obtain(ctx context.Context, domain string) error {
 		}
 		defer os.Remove(tokenPath)
 		if _, err := c.Accept(ctx, chal); err != nil {
-			return err
+			return fmt.Errorf("accept challenge: %w", err)
 		}
 		if _, err := c.WaitAuthorization(ctx, z.URI); err != nil {
-			return err
+			return fmt.Errorf("wait authorization: %w", err)
 		}
 	}
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -180,11 +189,19 @@ func (m *Manager) obtain(ctx context.Context, domain string) error {
 		return err
 	}
 	if _, err := c.WaitOrder(ctx, order.URI); err != nil {
-		return err
+		return fmt.Errorf("wait order: %w", err)
 	}
 	ders, _, err := c.CreateOrderCert(ctx, order.FinalizeURL, csr, true)
 	if err != nil {
-		return err
+		// With asynchronous finalization the CA answers "processing", and without a Location
+		// header x/crypto has no order URL to wait on. We have it from the new order.
+		o, werr := c.WaitOrder(ctx, order.URI)
+		if werr != nil || o.Status != acme.StatusValid || o.CertURL == "" {
+			return fmt.Errorf("finalize: %w", err)
+		}
+		if ders, err = c.FetchCert(ctx, o.CertURL, true); err != nil {
+			return fmt.Errorf("fetch certificate: %w", err)
+		}
 	}
 	var chain []byte
 	for _, d := range ders {
