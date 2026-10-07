@@ -175,6 +175,65 @@ func (e *Engine) RemoveAddon(ctx context.Context, project, addon string, volumes
 	return nil
 }
 
+// RemoveProject removes what a project runs on the host: services, addon containers and the
+// project network; its volumes (data) only with volumes=true. The project record is the
+// caller's (the store). Addons used to keep running after the project was gone, and a new
+// project of the same name, possibly someone else's, inherited them; leftover volumes are
+// guarded by LeftoverVolumes.
+func (e *Engine) RemoveProject(ctx context.Context, project string, volumes bool) error {
+	svcs, err := e.Store.Services(project)
+	if err != nil && !errors.Is(err, store.ErrNotFound) {
+		return err
+	}
+	for _, s := range svcs {
+		if err := e.Remove(ctx, project, s.Name); err != nil {
+			return fmt.Errorf("service %s: %w", s.Name, err)
+		}
+	}
+	addons, err := e.Docker.Containers(ctx, runtime.LabelProject+"="+project, runtime.LabelRole+"=addon")
+	if err != nil {
+		return err
+	}
+	for _, c := range addons {
+		if err := e.Docker.ContainerRemove(ctx, c.ID); err != nil && !errors.Is(err, runtime.ErrNotFound) {
+			return fmt.Errorf("addon %s: %w", c.Labels[runtime.LabelAddon], err)
+		}
+	}
+	e.Docker.NetworkDisconnect(ctx, NetworkName(project), NginxContainer)
+	if err := e.Docker.NetworkRemove(ctx, NetworkName(project)); err != nil {
+		// Still in use (a container docker has not finished removing): harmless, it is
+		// recreated for a new project of the same name either way.
+		e.Log.Warn("remove project network", "network", NetworkName(project), "err", err)
+	}
+	if !volumes {
+		return nil
+	}
+	vols, err := e.Docker.Volumes(ctx, runtime.LabelProject+"="+project)
+	if err != nil {
+		return err
+	}
+	for _, v := range vols {
+		if err := e.Docker.VolumeRemove(ctx, v.Name); err != nil && !errors.Is(err, runtime.ErrNotFound) {
+			return fmt.Errorf("volume %s: %w", v.Name, err)
+		}
+	}
+	return nil
+}
+
+// LeftoverVolumes lists volumes labelled for project, left by a removed project of the same
+// name. A new project must not get another owner's data without the admin saying so.
+func (e *Engine) LeftoverVolumes(ctx context.Context, project string) ([]string, error) {
+	vols, err := e.Docker.Volumes(ctx, runtime.LabelProject+"="+project)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, v := range vols {
+		out = append(out, v.Name)
+	}
+	return out, nil
+}
+
 // GCResult is what `clowctl gc` removed.
 type GCResult struct {
 	Containers []string `json:"containers"`

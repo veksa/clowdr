@@ -41,6 +41,8 @@ type Docker interface {
 	Containers(ctx context.Context, labels ...string) ([]runtime.ContainerSummary, error)
 	NetworkEnsure(ctx context.Context, name string, labels map[string]string) error
 	NetworkConnect(ctx context.Context, network, container string, aliases []string) error
+	NetworkDisconnect(ctx context.Context, network, container string) error
+	NetworkRemove(ctx context.Context, name string) error
 	VolumeEnsure(ctx context.Context, name string, labels map[string]string) error
 	Volumes(ctx context.Context, labels ...string) ([]runtime.Volume, error)
 	VolumeRemove(ctx context.Context, name string) error

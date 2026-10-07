@@ -207,6 +207,23 @@ func (f *Docker) NetworkConnect(_ context.Context, network, container string, _ 
 	return nil
 }
 
+func (f *Docker) NetworkDisconnect(_ context.Context, network, container string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Networks[network] = slices.DeleteFunc(f.Networks[network], func(c string) bool { return c == container })
+	return nil
+}
+
+func (f *Docker) NetworkRemove(_ context.Context, network string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.Networks[network]) > 0 {
+		return &runtime.APIError{Status: 403, Message: "network has active endpoints"}
+	}
+	delete(f.Networks, network)
+	return nil
+}
+
 func (f *Docker) VolumeEnsure(_ context.Context, name string, labels map[string]string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

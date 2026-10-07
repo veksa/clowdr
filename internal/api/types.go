@@ -44,6 +44,8 @@ type ProjectRequest struct {
 	Addons     []string `json:"addons,omitempty"`
 	Memory     int64    `json:"memory,omitempty"`
 	NginxExtra bool     `json:"nginx_extra,omitempty"`
+	// AdoptVolumes lets a new project take over the volumes of a removed one of the same name.
+	AdoptVolumes bool `json:"adopt_volumes,omitempty"`
 }
 
 type TokenRequest struct {

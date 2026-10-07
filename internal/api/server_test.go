@@ -235,3 +235,38 @@ func TestPlatformStatus(t *testing.T) {
 		t.Fatalf("project token read platform status: %v", err)
 	}
 }
+
+// A new project does not silently get the volumes of a removed one of the same name.
+func TestProjectVolumesLeftover(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	create := func(adopt bool) error {
+		return e.admin.Do(ctx, "POST", "/v1/projects", ProjectRequest{Name: "shop", Domains: []string{"example.com"}, AdoptVolumes: adopt}, nil)
+	}
+	if err := create(false); err != nil {
+		t.Fatal(err)
+	}
+	e.d.VolumeEnsure(ctx, "shop_data", map[string]string{"clowdr.project": "shop"})
+	if err := e.admin.Do(ctx, "DELETE", "/v1/projects/shop", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var se *StatusError
+	if err := create(false); !errors.As(err, &se) || se.Status != 409 || !strings.Contains(err.Error(), "shop_data") {
+		t.Fatalf("leftover volumes: %v", err)
+	}
+	if err := create(true); err != nil {
+		t.Fatalf("--adopt-volumes: %v", err)
+	}
+	if err := create(false); err != nil { // updating an existing project is not affected
+		t.Fatal(err)
+	}
+	if err := e.admin.Do(ctx, "DELETE", "/v1/projects/shop?volumes=1", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := create(false); err != nil {
+		t.Fatalf("after rm --volumes: %v", err)
+	}
+	if err := e.admin.Do(ctx, "DELETE", "/v1/projects/nope", nil, nil); !errors.As(err, &se) || se.Status != 404 {
+		t.Fatalf("unknown project: %v", err)
+	}
+}

@@ -293,3 +293,39 @@ func TestNginxReloadWaitsForNewWorkers(t *testing.T) {
 		t.Fatalf("ps ran %d times, want 4", ps)
 	}
 }
+
+func TestRemoveProject(t *testing.T) {
+	f := newFixture(t)
+	plat := f.e.Platform()
+	redis := plat.Addons["redis"]
+	redis.Volume = "/data"
+	plat.Addons["redis"] = redis
+	ctx := context.Background()
+	s := serverSpec()
+	s.Uses = []string{"redis"}
+	s.Volumes = []spec.Volume{{Name: "uploads", Target: "/app/uploads"}}
+	if _, err := f.deploy(t, "v1", s); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := f.e.RemoveProject(ctx, "shop", false); err != nil {
+		t.Fatal(err)
+	}
+	if cs, _ := f.d.Containers(ctx, "clowdr.project=shop"); len(cs) != 0 {
+		t.Fatalf("containers left, the addon included: %+v", cs)
+	}
+	if slices.Contains(f.d.Networks[NetworkName("shop")], NginxContainer) {
+		t.Error("nginx still in the project network")
+	}
+	left, err := f.e.LeftoverVolumes(ctx, "shop")
+	if err != nil || !slices.Equal(left, []string{"shop_redis-data", "shop_uploads"}) {
+		t.Fatalf("volumes are kept by default: %v %v", left, err)
+	}
+
+	if err := f.e.RemoveProject(ctx, "shop", true); err != nil {
+		t.Fatal(err)
+	}
+	if left, _ := f.e.LeftoverVolumes(ctx, "shop"); len(left) != 0 {
+		t.Fatalf("volumes=true left %v", left)
+	}
+}

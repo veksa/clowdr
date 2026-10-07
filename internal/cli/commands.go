@@ -725,7 +725,7 @@ func (a *app) projectCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "project", Short: "Projects on the server (admin)"}
 	var domains, addons []string
 	var memory string
-	var nginxExtra bool
+	var nginxExtra, adopt bool
 	create := &cobra.Command{
 		Use:   "create <name>",
 		Short: "Create or update a project with its allowed domains and memory quota",
@@ -739,7 +739,7 @@ func (a *app) projectCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			req := api.ProjectRequest{Name: args[0], Domains: domains, Addons: addons, Memory: mem, NginxExtra: nginxExtra}
+			req := api.ProjectRequest{Name: args[0], Domains: domains, Addons: addons, Memory: mem, NginxExtra: nginxExtra, AdoptVolumes: adopt}
 			return t.client.Do(cmd.Context(), "POST", "/v1/projects", req, nil)
 		},
 	}
@@ -747,23 +747,31 @@ func (a *app) projectCmd() *cobra.Command {
 	create.Flags().StringSliceVar(&addons, "platform", nil, "addons the project may run, e.g. redis")
 	create.Flags().StringVar(&memory, "memory", "", "memory quota for all services, e.g. 300m")
 	create.Flags().BoolVar(&nginxExtra, "nginx-extra", false, "allow raw nginx snippets (trusted projects only)")
-	var yes bool
+	create.Flags().BoolVar(&adopt, "adopt-volumes", false, "a new project takes over the volumes of a removed project of the same name")
+	var yes, rmVolumes bool
 	rm := &cobra.Command{
 		Use:   "rm <name>",
-		Short: "Remove a project: services, routes, tokens (volumes stay)",
+		Short: "Remove a project: services, addons, routes, tokens (volumes stay unless --volumes)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			t, err := a.target(false)
 			if err != nil {
 				return err
 			}
-			if !yes && !confirm(fmt.Sprintf("Remove project %s and all its services from %s?", args[0], t.client.Server)) {
+			what := "all its services and addons"
+			path := api.Path("projects", args[0])
+			if rmVolumes {
+				what += ", and DELETE ITS DATA (volumes)"
+				path += "?volumes=1"
+			}
+			if !yes && !confirm(fmt.Sprintf("Remove project %s with %s from %s?", args[0], what, t.client.Server)) {
 				return errors.New("aborted")
 			}
-			return t.client.Do(cmd.Context(), "DELETE", api.Path("projects", args[0]), nil, nil)
+			return t.client.Do(cmd.Context(), "DELETE", path, nil, nil)
 		},
 	}
 	rm.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
+	rm.Flags().BoolVar(&rmVolumes, "volumes", false, "also delete the project's volumes (addon data included)")
 	cmd.AddCommand(create, rm, &cobra.Command{
 		Use:   "ls",
 		Short: "List projects",

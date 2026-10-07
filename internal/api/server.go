@@ -264,6 +264,18 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	if err != nil && !req.AdoptVolumes { // a new project
+		left, lerr := s.Engine.LeftoverVolumes(r.Context(), req.Name)
+		if lerr != nil {
+			writeErr(w, 500, lerr.Error())
+			return
+		}
+		if len(left) > 0 {
+			writeErr(w, 409, fmt.Sprintf("volumes of a removed project %s are still on the host (%s): pass --adopt-volumes to give them to the new project, or remove them first (docker volume rm %s)",
+				req.Name, strings.Join(left, ", "), strings.Join(left, " ")))
+			return
+		}
+	}
 	p.Name, p.Domains, p.Addons, p.Memory, p.NginxExtra = req.Name, req.Domains, req.Addons, req.Memory, req.NginxExtra
 	if err := s.Store.PutProject(p); err != nil {
 		writeErr(w, 500, err.Error())
@@ -282,12 +294,13 @@ func overlaps(a, b string) bool {
 
 func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	project := r.PathValue("project")
-	svcs, _ := s.Store.Services(project)
-	for _, v := range svcs {
-		if err := s.Engine.Remove(r.Context(), project, v.Name); err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
+	if _, err := s.Store.Project(project); err != nil {
+		writeErr(w, errStatus(err), err.Error())
+		return
+	}
+	if err := s.Engine.RemoveProject(r.Context(), project, r.URL.Query().Get("volumes") == "1"); err != nil {
+		writeErr(w, 500, err.Error())
+		return
 	}
 	if err := s.Store.DeleteProject(project); err != nil {
 		writeErr(w, 500, err.Error())
