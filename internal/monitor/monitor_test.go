@@ -213,6 +213,50 @@ func TestRates(t *testing.T) {
 	}
 }
 
+func TestErrorRate(t *testing.T) {
+	f := newFixture(t)
+	f.m.MaxErrorsPerMin = 3
+	web, api := logs.Key{Project: "shop", Kind: logs.KindApp, Name: "web"}, logs.Key{Project: "shop", Kind: logs.KindApp, Name: "api"}
+	for i := 0; i < 50; i++ { // an access log on stderr is not an error
+		f.m.OnLine(web, logs.Line{E: true, L: "[::ffff:172.18.0.1]:36688: response:200"})
+	}
+	for _, l := range []string{"ERROR db: connection refused", `{"level":"error","msg":"boom"}`, "TypeError: x is undefined"} {
+		f.m.OnLine(api, logs.Line{L: l}) // errors on stdout count
+	}
+	f.m.checkRates(context.Background())
+	got := f.sent()
+	if len(got) != 1 || !strings.Contains(got[0], "3 error lines") || !strings.Contains(got[0], "api") {
+		t.Fatalf("alerts: %q", got)
+	}
+}
+
+func TestErrorLine(t *testing.T) {
+	for l, want := range map[string]bool{
+		"[::ffff:172.18.0.1]:36688: response:200":                     false,
+		"GET /health 200 1ms":                                         false,
+		"level=info msg=\"retrying after error\"":                     false, // the level wins
+		`{"level":"warn","msg":"slow query"}`:                         false,
+		"processed 10 jobs, 0 errors":                                 false,
+		"2026/10/07 15:35:46 [notice] 1#1: start worker processes":    false,
+		"written to stderr by design":                                 false,
+		"no terror here":                                              false,
+		"level=error msg=\"db down\"":                                 true,
+		`{"time":"x","level":"ERROR","msg":"db down"}`:                true,
+		`{"severity":"CRITICAL","message":"disk"}`:                    true,
+		"2026/10/07 15:35:46 [error] 7#7: *1 connect() failed":        true,
+		"ERROR: relation \"users\" does not exist":                    true,
+		"panic: runtime error: invalid memory address":                true,
+		"Traceback (most recent call last):":                          true,
+		"Exception in thread \"main\" java.lang.NullPointerException": true,
+		"TypeError: Cannot read properties of undefined":              true,
+		"fatal: unable to access repository":                          true,
+	} {
+		if got := errorLine(l); got != want {
+			t.Errorf("errorLine(%q) = %v, want %v", l, got, want)
+		}
+	}
+}
+
 func TestDedup(t *testing.T) {
 	var n int
 	e := &Events{Alert: func(context.Context, string) { n++ }}

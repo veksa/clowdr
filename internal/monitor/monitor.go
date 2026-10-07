@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,7 +47,7 @@ type Monitor struct {
 	RestartWindow   time.Duration
 	Min5xxRequests  int
 	Max5xxRatio     float64
-	MaxStderrPerMin int
+	MaxErrorsPerMin int // app log lines that look like errors (see errorLine)
 
 	mu       sync.Mutex
 	starts   map[string][]time.Time // container -> start times
@@ -86,8 +87,8 @@ func (m *Monitor) defaults() {
 	if m.Max5xxRatio == 0 {
 		m.Max5xxRatio = 0.1
 	}
-	if m.MaxStderrPerMin == 0 {
-		m.MaxStderrPerMin = 100
+	if m.MaxErrorsPerMin == 0 {
+		m.MaxErrorsPerMin = 100
 	}
 	m.starts = map[string][]time.Time{}
 	m.oom = map[string]bool{}
@@ -107,7 +108,7 @@ func (m *Monitor) Run(ctx context.Context) {
 	wg.Wait()
 }
 
-// OnLine counts 5xx responses and stderr lines (hook for logs.Collector).
+// OnLine counts 5xx responses and error lines (hook for logs.Collector).
 func (m *Monitor) OnLine(k logs.Key, l logs.Line) {
 	var rk rateKey
 	bad := false
@@ -117,7 +118,9 @@ func (m *Monitor) OnLine(k logs.Key, l logs.Line) {
 		rk = rateKey{project: k.Project, host: host}
 		bad = status >= 500
 	case logs.KindApp:
-		if !l.E {
+		// Not the stream: plenty of servers (busybox httpd, nginx, Python's logging, Node's
+		// console.error) write ordinary logs to stderr, and some write errors to stdout.
+		if !errorLine(l.L) {
 			return
 		}
 		rk = rateKey{project: k.Project, service: k.Name}
@@ -138,6 +141,26 @@ func (m *Monitor) OnLine(k logs.Key, l logs.Line) {
 		}
 	}
 	m.mu.Unlock()
+}
+
+var (
+	// level=error, "level":"error", "severity":"ERROR", lvl=crit ...
+	levelField = regexp.MustCompile(`(?i)"?\b(?:level|lvl|severity|loglevel)"?\s*[=:]\s*"?([a-z]+)`)
+	// [error], ERROR:, panic:, TypeError, NullPointerException, Traceback ...
+	errorWord = regexp.MustCompile(`(?i)\b(?:error|err|fatal|panic|critical|exception|traceback)\b|(?-i:[a-z](?:Error|Exception)\b)`)
+)
+
+// errorLine reports whether an app log line is an error: by its level when the line has
+// one (structured logs), otherwise by an error word in it.
+func errorLine(s string) bool {
+	if m := levelField.FindStringSubmatch(s); m != nil {
+		switch strings.ToLower(m[1]) {
+		case "error", "err", "fatal", "panic", "crit", "critical", "alert", "emerg", "emergency":
+			return true
+		}
+		return false
+	}
+	return errorWord.MatchString(s)
 }
 
 // accessFields extracts host and status from a json_combined line without a full decode.
@@ -183,9 +206,9 @@ func (m *Monitor) checkRates(ctx context.Context) {
 		case k.host != "" && r.total >= m.Min5xxRequests && float64(r.bad)/float64(r.total) >= m.Max5xxRatio:
 			m.Events.Emit(ctx, Event{Project: k.project, Kind: "5xx", Severity: Warn,
 				Message: fmt.Sprintf("%s: %d of %d requests failed with 5xx in the last minute", k.host, r.bad, r.total)}, "")
-		case k.service != "" && r.bad >= m.MaxStderrPerMin:
+		case k.service != "" && r.bad >= m.MaxErrorsPerMin:
 			m.Events.Emit(ctx, Event{Project: k.project, Service: k.service, Kind: "errors", Severity: Warn,
-				Message: fmt.Sprintf("%d lines on stderr in the last minute", r.bad)}, "")
+				Message: fmt.Sprintf("%d error lines in the log in the last minute", r.bad)}, "")
 		}
 	}
 }
