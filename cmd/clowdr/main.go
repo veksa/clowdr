@@ -43,6 +43,15 @@ func runDaemon(args []string) int {
 	debug := fs.Bool("debug", false, "debug logging")
 	showVersion := fs.Bool("version", false, "print version")
 	fs.Parse(args)
+	// Anything left after the flags is a mistake (`clowdrd version`, `clowdrd --debug start`):
+	// refuse it instead of starting the daemon and writing default config.
+	if fs.NArg() == 1 && fs.Arg(0) == "version" {
+		*showVersion = true
+	} else if fs.NArg() > 0 {
+		fmt.Fprintf(os.Stderr, "clowdrd: unexpected argument %q\n", fs.Arg(0))
+		fs.Usage()
+		return 2
+	}
 	if *showVersion {
 		fmt.Println(version)
 		return 0
