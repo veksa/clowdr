@@ -42,19 +42,41 @@ func gitAuthor() string {
 	return os.Getenv("USERNAME")
 }
 
-// shell runs a build command with the platform shell: cmd /C on Windows, sh -c elsewhere,
-// so the same deploy.yml works on every OS.
+// shell runs a build command with sh -c, so the same deploy.yml works on every OS. On
+// Windows that is the sh of Git Bash (or MSYS2/Cygwin) when clowctl runs from it or sh is on
+// PATH, and cmd /C only as a last resort.
 func shell(ctx context.Context, dir, command string, env []string) error {
-	var cmd *exec.Cmd
-	if goruntime.GOOS == "windows" {
-		cmd = exec.CommandContext(ctx, "cmd", "/C", command)
-	} else {
-		cmd = exec.CommandContext(ctx, "sh", "-c", command)
-	}
+	name, args := buildShell(goruntime.GOOS, os.Getenv, exec.LookPath)
+	cmd := exec.CommandContext(ctx, name, append(args, command)...)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), env...)
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	return cmd.Run()
+}
+
+func buildShell(goos string, getenv func(string) string, lookPath func(string) (string, error)) (string, []string) {
+	if goos != "windows" {
+		return "sh", []string{"-c"}
+	}
+	if sh, err := lookPath("sh"); err == nil {
+		return sh, []string{"-c"}
+	}
+	// Git Bash started from a shortcut puts its sh on PATH; cmd and PowerShell usually do not
+	// have it, but Git for Windows installs it at a known place.
+	for _, dir := range []string{getenv("ProgramFiles"), getenv("ProgramW6432"), getenv("LOCALAPPDATA") + `\Programs`} {
+		if dir == "" || dir == `\Programs` {
+			continue
+		}
+		if sh := filepath.Join(dir, "Git", "bin", "sh.exe"); fileExists(sh) {
+			return sh, []string{"-c"}
+		}
+	}
+	return "cmd", []string{"/C"}
+}
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
 }
 
 func run(ctx context.Context, env []string, name string, args ...string) error {

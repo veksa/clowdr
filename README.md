@@ -78,11 +78,33 @@ clowctl logs api -f -e prod
 clowctl rollback api -e prod
 ```
 
+### Building without a local Docker engine (Windows without Docker Desktop)
+
+`clowctl` only needs the Docker CLI: point it at the server's engine over SSH and images are
+built there, so the push transfers almost nothing. In Git Bash:
+
+```sh
+# docker.exe from https://download.docker.com/win/static/stable/x86_64/ into ~/bin,
+# buildx from https://github.com/docker/buildx/releases into ~/.docker/cli-plugins/docker-buildx.exe
+cat >> ~/.ssh/config <<'EOF'
+Host deploy-server
+    HostName deploy.example.com
+    User root
+    IdentityFile ~/.ssh/id_ed25519
+EOF
+docker context create deploy-server --docker host=ssh://deploy-server
+docker context use deploy-server
+clowctl deploy -e prod
+```
+
+This needs SSH access to the server (root or the docker group). `build:` commands still run
+locally, with the `sh` of Git Bash.
+
 ### deploy.yml fields
 
 | Field | Meaning |
 |---|---|
-| `path`, `build`, `dockerfile`, `build_args` | local build: `build` runs in `path` (`${ENV}` is replaced), then `docker build` with `path` as context |
+| `path`, `build`, `dockerfile`, `build_args` | local build: `build` runs with `sh -c` in `path` (`${ENV}` is replaced; on Windows the sh of Git for Windows), then `docker build` with `path` as context |
 | `image` | prebuilt image pulled by the server instead of building |
 | `port`, `health` | container port; `health: /health` or `{path, interval, timeout, successes}` gates the switch |
 | `memory`, `replicas` | container memory limit; number of copies behind one upstream |
