@@ -517,6 +517,10 @@ func (s *Server) deploy(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if err := deploy.CheckImage(project, image); err != nil {
+		writeErr(w, 403, err.Error())
+		return
+	}
 	s.stream(w, r, func(ctx context.Context, p deploy.Progress) (*store.Release, error) {
 		rel, err := s.Engine.Deploy(ctx, deploy.Request{
 			Project: project, Spec: req.Spec, Image: image, Version: req.Version, Author: author(r, req.Author),

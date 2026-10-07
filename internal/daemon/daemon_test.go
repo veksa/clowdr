@@ -11,6 +11,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -156,5 +157,25 @@ func TestFluentdLogConfig(t *testing.T) {
 	}
 	if !strings.Contains(c.Config["tag"], "shop") || !strings.Contains(c.Config["tag"], "web") {
 		t.Fatalf("tag %q", c.Config["tag"])
+	}
+}
+
+func TestPlatformConfigIsRootOnly(t *testing.T) {
+	if goruntime.GOOS == "windows" {
+		t.Skip("no unix permissions")
+	}
+	p := filepath.Join(t.TempDir(), "platform.yml")
+	if _, err := loadPlatform(p, quiet); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
+		t.Errorf("new platform.yml is %o, want 600", fi.Mode().Perm())
+	}
+	os.Chmod(p, 0o644) // written by install.sh or an older version
+	if _, err := loadPlatform(p, quiet); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
+		t.Errorf("existing platform.yml left at %o", fi.Mode().Perm())
 	}
 }

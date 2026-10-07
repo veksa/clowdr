@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+
+	"github.com/veksa/clowdr/internal/spec"
 )
 
 // routes is every API route, as registered in Handler and registerOps, with whether it is
@@ -174,6 +176,9 @@ func TestErrorStatuses(t *testing.T) {
 		{"DELETE", "/v1/projects/shop/volumes/nope", nil, 404},
 		{"DELETE", "/v1/tokens/nope", nil, 404},
 		{"POST", "/v1/projects/shop/services/web/deploy", map[string]any{"unknown_field": 1}, 400},
+		// another project's pushed image, by name or by image ID
+		{"POST", "/v1/projects/shop/services/server/deploy", DeployRequest{Spec: spec.Service{Name: "server", Port: 3000}, Image: "clowdr.local/blog/server:v1"}, 403},
+		{"POST", "/v1/projects/shop/services/server/deploy", DeployRequest{Spec: spec.Service{Name: "server", Port: 3000}, Image: "64d5d9"}, 403},
 		{"POST", "/v1/projects", ProjectRequest{Name: "Bad Name"}, 400},
 		{"POST", "/v1/projects", ProjectRequest{Name: "blog", Domains: []string{"example.com"}}, 409},
 	} {

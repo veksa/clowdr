@@ -75,6 +75,9 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 		return err
 	}
 	tuneConntrack(log)
+	if o.RegistryDir == "" { // not on a development machine
+		go keepMetadataBlocked(ctx, log)
+	}
 
 	var regStore registry.Store
 	regKind := "containerd"
@@ -295,10 +298,14 @@ func loadPlatform(path string, log *slog.Logger) (*config.Platform, error) {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return nil, err
 		}
-		if err := os.WriteFile(path, []byte(config.DefaultPlatform), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(config.DefaultPlatform), 0o600); err != nil {
 			return nil, err
 		}
 		log.Info("wrote default platform config", "path", path)
+	}
+	// It may hold the Telegram bot token; install.sh and older versions created it 0644.
+	if fi, err := os.Stat(path); err == nil && fi.Mode().Perm()&0o077 != 0 {
+		os.Chmod(path, 0o600)
 	}
 	return config.LoadPlatform(path)
 }

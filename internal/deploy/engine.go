@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/veksa/clowdr/internal/auth"
 	"github.com/veksa/clowdr/internal/config"
 	"github.com/veksa/clowdr/internal/ingress"
+	"github.com/veksa/clowdr/internal/registry"
 	"github.com/veksa/clowdr/internal/runtime"
 	"github.com/veksa/clowdr/internal/spec"
 	"github.com/veksa/clowdr/internal/store"
@@ -142,6 +144,22 @@ func containerName(project, service string, release uint64, replica int) string 
 	return fmt.Sprintf("%s-%s-r%d-%d", project, service, release, replica)
 }
 
+var imageID = regexp.MustCompile(`^(sha256:)?[0-9a-f]+$`)
+
+// CheckImage rejects image references that would run another project's image: pushed images
+// live in docker as clowdr.local/<project>/..., and docker also resolves a bare image ID, or
+// any unique prefix of one, to whatever local image it names.
+func CheckImage(project, ref string) error {
+	r := strings.ToLower(strings.TrimSpace(ref))
+	if imageID.MatchString(r) {
+		return fmt.Errorf("image %s: refer to images by name, not by ID", ref)
+	}
+	if strings.HasPrefix(r, registry.ImagePrefix) && !strings.HasPrefix(r, registry.ImagePrefix+project+"/") {
+		return fmt.Errorf("image %s belongs to another project", ref)
+	}
+	return nil
+}
+
 // CheckSpec validates a spec against the project and the rest of the host.
 func (e *Engine) CheckSpec(project string, s spec.Service) error {
 	if err := s.Validate(); err != nil {
@@ -209,6 +227,9 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 	s := req.Spec
 	s.Defaults()
 	if err := e.CheckSpec(req.Project, s); err != nil {
+		return store.Release{}, err
+	}
+	if err := CheckImage(req.Project, req.Image); err != nil {
 		return store.Release{}, err
 	}
 	unlock := e.lock(req.Project, s.Name)

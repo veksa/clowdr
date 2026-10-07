@@ -211,6 +211,33 @@ func TestChecks(t *testing.T) {
 	if _, err := f.e.Deploy(context.Background(), Request{Project: "shop", Spec: serverSpec(), Image: "clowdr.local/shop/server:nope"}, nil); err == nil {
 		t.Fatal("missing image")
 	}
+	// Another project's image, even when it is on the host.
+	f.d.Local["clowdr.local/blog/server:v1"] = true
+	if _, err := f.e.Deploy(context.Background(), Request{Project: "shop", Spec: serverSpec(), Image: "clowdr.local/blog/server:v1"}, nil); err == nil || !strings.Contains(err.Error(), "another project") {
+		t.Fatalf("foreign image: %v", err)
+	}
+}
+
+func TestCheckImage(t *testing.T) {
+	for ref, ok := range map[string]bool{
+		"nginx:alpine":             true,
+		"ghcr.io/example/app:1.2":  true,
+		"clowdr.local/shop/web:v1": true,
+		"clowdr.local/shop/web@sha256:" + strings.Repeat("a", 64): true,
+		"clowdr.local/blog/web:v1":                                false,
+		"CLOWDR.LOCAL/blog/web:v1":                                false,
+		"clowdr.local/shopx/web:v1":                               false, // a project named like a prefix of another
+		"clowdr.local/shop":                                       false,
+		"64d5d947aea7":                                            false, // image ID, or a prefix of one
+		"64d5d9":                                                  false,
+		"a":                                                       false,
+		"sha256:" + strings.Repeat("a", 64):                       false,
+		"cafe:latest":                                             true, // a name with a tag, not an ID
+	} {
+		if err := CheckImage("shop", ref); (err == nil) != ok {
+			t.Errorf("CheckImage(shop, %q) = %v, want ok=%v", ref, err, ok)
+		}
+	}
 }
 
 func TestQuotaAndStopFirst(t *testing.T) {
