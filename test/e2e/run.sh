@@ -69,7 +69,7 @@ load_stop "clowdrd restart"
 
 step "logs, access log and events"
 get release.txt >/dev/null
-eventually has GET cc logs web --since 10m
+eventually has "response:200" cc logs web --since 10m # busybox httpd -v
 eventually has /release.txt cc access "$DOMAIN" --since 10m
 eventually has deploy cc events
 cc top --once
