@@ -74,6 +74,7 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 	if err := checkDocker(info, o, log); err != nil {
 		return err
 	}
+	tuneConntrack(log)
 
 	var regStore registry.Store
 	regKind := "containerd"

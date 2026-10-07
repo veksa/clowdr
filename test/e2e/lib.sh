@@ -101,6 +101,12 @@ setup() {
 	local major
 	major="$(docker version --format '{{.Server.Version}}' 2>/dev/null | cut -d. -f1 || true)"
 	if [ "${major:-0}" -lt 29 ]; then
+		# a fresh VM runs unattended-upgrades on boot and holds the dpkg lock for a while
+		local i
+		for i in $(seq 120); do
+			fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock >/dev/null 2>&1 || break
+			sleep 5
+		done
 		curl -fsSL https://get.docker.com | sh
 	fi
 	if ! docker info --format '{{json .DriverStatus}}' | grep -q io.containerd.snapshotter; then
@@ -124,6 +130,8 @@ setup() {
 	clowctl context add e2e https://127.0.0.1:7443 --token "$ADMIN" --fingerprint "$FP"
 	clowctl --context e2e version
 	clowctl --context e2e platform status
+	# small hosts drop connections under load with the kernel's default conntrack table
+	[ "$(sysctl -n net.netfilter.nf_conntrack_max)" -ge 131072 ] || fail "nf_conntrack_max was not raised"
 
 	step "project and token"
 	clowctl --context e2e project create shop --domains "$DOMAIN" --memory 256m
