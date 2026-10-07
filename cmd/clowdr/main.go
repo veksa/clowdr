@@ -42,6 +42,7 @@ func runDaemon(args []string) int {
 	fs.StringVar(&o.RegistryDir, "registry-dir", "", "development: keep pushed blobs in a directory instead of containerd")
 	debug := fs.Bool("debug", false, "debug logging")
 	showVersion := fs.Bool("version", false, "print version")
+	defaultConfig := fs.Bool("default-config", false, "print the default platform config (install.sh)")
 	fs.Parse(args)
 	// Anything left after the flags is a mistake (`clowdrd version`, `clowdrd --debug start`):
 	// refuse it instead of starting the daemon and writing default config.
@@ -54,6 +55,10 @@ func runDaemon(args []string) int {
 	}
 	if *showVersion {
 		fmt.Println(version)
+		return 0
+	}
+	if *defaultConfig {
+		fmt.Print(config.DefaultPlatform)
 		return 0
 	}
 	level := slog.LevelInfo

@@ -66,14 +66,16 @@ ln -sf /usr/local/bin/clowdrd /usr/local/bin/clowctl
 
 mkdir -p /etc/clowdr
 if [ -n "$DOMAIN" ]; then
-	if [ -f /etc/clowdr/platform.yml ]; then
-		if grep -q '^domain:' /etc/clowdr/platform.yml; then
-			sed -i "s/^domain:.*/domain: $DOMAIN/" /etc/clowdr/platform.yml
-		else
-			sed -i "1i domain: $DOMAIN" /etc/clowdr/platform.yml
-		fi
+	if [ ! -f /etc/clowdr/platform.yml ]; then
+		# the full default (addons, logs, limits), as clowdrd writes it without a domain
+		(umask 077 && /usr/local/bin/clowdrd -default-config >/etc/clowdr/platform.yml)
+	fi
+	if grep -q '^domain:' /etc/clowdr/platform.yml; then
+		sed -i "s/^domain:.*/domain: $DOMAIN/" /etc/clowdr/platform.yml
+	elif grep -q '^# domain:' /etc/clowdr/platform.yml; then
+		sed -i "s/^# domain:.*/domain: $DOMAIN/" /etc/clowdr/platform.yml
 	else
-		printf 'domain: %s\n' "$DOMAIN" >/etc/clowdr/platform.yml
+		sed -i "1i domain: $DOMAIN" /etc/clowdr/platform.yml
 	fi
 fi
 
