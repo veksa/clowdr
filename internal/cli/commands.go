@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,6 +51,9 @@ when it is healthy, the old one is drained. Without arguments deploys every serv
 			if image != "" && len(names) != 1 {
 				return errors.New("--image needs exactly one service")
 			}
+			if image == "" && slices.ContainsFunc(names, func(n string) bool { return usesDocker(d.Services[n]) }) {
+				defer a.dockerTunnel(cmd.Context())()
+			}
 			for _, name := range names {
 				if err := a.deployOne(cmd.Context(), d, t, name, noBuild, image, tag); err != nil {
 					return err
@@ -76,7 +80,7 @@ func (a *app) deployOne(ctx context.Context, d *config.Deploy, t *target, name s
 	switch {
 	case image != "":
 		req.Image, req.Version = image, image
-	case s.Image != "" && s.Build == "" && s.Dockerfile == "":
+	case !usesDocker(s):
 		req.Image, req.Version = s.Image, s.Image
 	default:
 		if tag == "" {

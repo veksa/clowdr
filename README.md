@@ -97,7 +97,9 @@ docker context use deploy-server
 clowctl deploy -e prod
 ```
 
-This needs SSH access to the server (root or the docker group). `build:` commands still run
+`clowctl deploy` opens one SSH connection for the whole deploy and tunnels docker through it
+(docker alone opens one per command, ~10 per build). This needs SSH access to the server (root
+or the docker group). `build:` commands still run
 locally, with the `sh` of Git Bash.
 
 ### deploy.yml fields

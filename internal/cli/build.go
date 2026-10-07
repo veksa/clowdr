@@ -146,3 +146,9 @@ func pushImage(ctx context.Context, ref, registryHost, project, token string) er
 	}
 	return run(ctx, env, "docker", "push", ref)
 }
+
+// usesDocker reports whether deploying s builds and pushes an image locally (anything but a
+// prebuilt image the server pulls).
+func usesDocker(s config.Service) bool {
+	return s.Image == "" || s.Build != "" || s.Dockerfile != ""
+}
