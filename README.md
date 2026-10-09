@@ -78,29 +78,10 @@ clowctl logs api -f -e prod
 clowctl rollback api -e prod
 ```
 
-### Building without a local Docker engine (Windows without Docker Desktop)
-
-`clowctl` only needs the Docker CLI: point it at the server's engine over SSH and images are
-built there, so the push transfers almost nothing. In Git Bash:
-
-```sh
-# docker.exe from https://download.docker.com/win/static/stable/x86_64/ into ~/bin,
-# buildx from https://github.com/docker/buildx/releases into ~/.docker/cli-plugins/docker-buildx.exe
-cat >> ~/.ssh/config <<'EOF'
-Host deploy-server
-    HostName deploy.example.com
-    User root
-    IdentityFile ~/.ssh/id_ed25519
-EOF
-docker context create deploy-server --docker host=ssh://deploy-server
-docker context use deploy-server
-clowctl deploy -e prod
-```
-
-`clowctl deploy` opens one SSH connection for the whole deploy and tunnels docker through it
-(docker alone opens one per command, ~10 per build). This needs SSH access to the server (root
-or the docker group). `build:` commands still run
-locally, with the `sh` of Git Bash.
+Images are always built by a local docker engine (Docker Desktop on Windows and macOS); the
+server only receives the new layers. `clowctl deploy` refuses a docker context or `DOCKER_HOST`
+that points at another machine (`ssh://`, a remote `tcp://`). On Windows, `build:` commands run
+with the `sh` of Git Bash.
 
 ### deploy.yml fields
 

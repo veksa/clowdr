@@ -52,7 +52,9 @@ when it is healthy, the old one is drained. Without arguments deploys every serv
 				return errors.New("--image needs exactly one service")
 			}
 			if image == "" && slices.ContainsFunc(names, func(n string) bool { return usesDocker(d.Services[n]) }) {
-				defer a.dockerTunnel(cmd.Context())()
+				if err := requireLocalDocker(cmd.Context()); err != nil {
+					return err
+				}
 			}
 			for _, name := range names {
 				if err := a.deployOne(cmd.Context(), d, t, name, noBuild, image, tag); err != nil {

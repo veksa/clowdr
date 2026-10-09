@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -138,10 +140,8 @@ func pushImage(ctx context.Context, ref, registryHost, project, token string) er
 	}
 	env := []string{"DOCKER_CONFIG=" + dir}
 	if os.Getenv("DOCKER_HOST") == "" {
-		if out, err := exec.CommandContext(ctx, "docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").Output(); err == nil {
-			if host := strings.TrimSpace(string(out)); host != "" {
-				env = append(env, "DOCKER_HOST="+host)
-			}
+		if host := dockerEndpoint(ctx); host != "" {
+			env = append(env, "DOCKER_HOST="+host)
 		}
 	}
 	return run(ctx, env, "docker", "push", ref)
@@ -151,4 +151,40 @@ func pushImage(ctx context.Context, ref, registryHost, project, token string) er
 // prebuilt image the server pulls).
 func usesDocker(s config.Service) bool {
 	return s.Image == "" || s.Build != "" || s.Dockerfile != ""
+}
+
+// dockerEndpoint is where docker commands go: DOCKER_HOST, else the current context.
+func dockerEndpoint(ctx context.Context) string {
+	if h := os.Getenv("DOCKER_HOST"); h != "" {
+		return h
+	}
+	out, err := exec.CommandContext(ctx, "docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// requireLocalDocker refuses a docker engine on another machine: images are built by the
+// local engine and only the new layers are pushed to the server, never built there.
+func requireLocalDocker(ctx context.Context) error {
+	if endpoint := dockerEndpoint(ctx); !localDockerEndpoint(endpoint) {
+		return fmt.Errorf("docker points at %s: clowctl builds images with a local docker engine only (docker context use default)", endpoint)
+	}
+	return nil
+}
+
+func localDockerEndpoint(endpoint string) bool {
+	if endpoint == "" || strings.HasPrefix(endpoint, "unix://") || strings.HasPrefix(endpoint, "npipe://") {
+		return true
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Scheme != "tcp" {
+		return false
+	}
+	if u.Hostname() == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(u.Hostname())
+	return ip != nil && ip.IsLoopback()
 }
