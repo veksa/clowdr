@@ -45,6 +45,10 @@ type Options struct {
 
 func (o Options) hasCert(d string) bool { return o.HasCert != nil && o.HasCert(d) }
 
+// proxyOnly reports whether sites without `tls: direct` accept connections only from the
+// trusted proxies (see RenderMain).
+func (o Options) proxyOnly() bool { return len(o.TrustedProxies) > 0 }
+
 // ServiceView is a service with the containers currently serving it.
 type ServiceView struct {
 	Spec    spec.Service
@@ -106,6 +110,8 @@ func renderServer(b *strings.Builder, project string, s ServiceView, domain stri
 	accessLog(b, project, o)
 	if direct {
 		acmeLocation(b)
+	} else if o.proxyOnly() {
+		b.WriteString("    if ($clowdr_via_proxy = 0) {\n        return 444;\n    }\n")
 	}
 	if cert {
 		b.WriteString("    location / {\n        return 301 https://$host$request_uri;\n    }\n}\n")
@@ -304,6 +310,16 @@ http {
 		} else {
 			b.WriteString("    real_ip_header X-Forwarded-For;\n    real_ip_recursive on;\n\n")
 		}
+		// Sites without `tls: direct` sit behind the trusted proxies. A connection from
+		// anywhere else (someone who found the server's IP, e.g. from deploy.<domain>) would
+		// skip the proxy's WAF and limits, so it is dropped. $realip_remote_addr is the TCP
+		// peer, which headers cannot change. Private ranges stay allowed: curl and health
+		// checks on the host come through docker's gateway.
+		b.WriteString("    geo $realip_remote_addr $clowdr_via_proxy {\n        default 0;\n")
+		for _, p := range append([]string{"127.0.0.0/8", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "::1/128", "fc00::/7"}, proxies...) {
+			fmt.Fprintf(&b, "        %s 1;\n", p)
+		}
+		b.WriteString("    }\n\n")
 	}
 	b.WriteString(`    log_format json_combined escape=json '{"time":"$time_iso8601","ip":"$remote_addr",'
         '"host":"$host","method":"$request_method","uri":"$request_uri","status":$status,'

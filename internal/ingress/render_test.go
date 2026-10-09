@@ -83,6 +83,36 @@ func TestRenderSpecialCases(t *testing.T) {
 	golden(t, "blog.conf", got)
 }
 
+func TestProxyOnly(t *testing.T) {
+	views := []ServiceView{
+		{Spec: svc(spec.Service{Name: "web", Port: 80, Domains: []string{"example.com"}})},
+		{Spec: svc(spec.Service{Name: "cdn", Port: 80, Domains: []string{"cdn.example.com"}, TLS: spec.TLSDirect})},
+	}
+	guard := "if ($clowdr_via_proxy = 0)"
+	got, err := RenderProject("shop", views, Options{TrustedProxies: []string{"cloudflare"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := func(name string) string {
+		s, _, _ := strings.Cut(got[strings.Index(got, "server_name "+name+";"):], "\n}\n")
+		return s
+	}
+	web, cdn := server("example.com"), server("cdn.example.com")
+	if !strings.Contains(web, guard) {
+		t.Error("site behind the proxy is reachable directly")
+	}
+	if strings.Contains(cdn, guard) {
+		t.Error("tls: direct site is limited to the proxy")
+	}
+	got, _ = RenderProject("shop", views, Options{})
+	if strings.Contains(got, guard) {
+		t.Error("guard without trusted proxies")
+	}
+	if strings.Contains(RenderMain(Options{}), "clowdr_via_proxy") {
+		t.Error("geo without trusted proxies")
+	}
+}
+
 func TestRenderMain(t *testing.T) {
 	o := Options{
 		Syslog: true, TrustedProxies: []string{"cloudflare"}, WorkerShutdownTimeout: 30 * time.Second,

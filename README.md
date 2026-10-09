@@ -94,7 +94,7 @@ with the `sh` of Git Bash.
 | `drain`, `stop_grace`, `switch` | how long old copies keep serving; SIGTERM grace; `stop-first` for services that must not run twice |
 | `domains` | per env: `{prod: [api.example.com]}`; must be allowed for the project on the server |
 | `routes` | `{path, service, timeout, buffering, max_body}`; `service` routes a path to another service |
-| `tls: direct` | domain not behind Cloudflare: clowdr gets a Let's Encrypt certificate |
+| `tls: direct` | domain not behind Cloudflare: clowdr gets a Let's Encrypt certificate. Without it the domain answers only connections from `trusted_proxies` (Cloudflare by default), so the site cannot be reached past Cloudflare by the server's IP |
 | `max_body`, `timeout`, `nginx_extra` | nginx limits; raw snippet (only if the admin allowed it) |
 | `volumes` | named volumes `name:/path[:ro]`, never removed automatically |
 | `env` | names whose values are set with `clowctl env set` |
