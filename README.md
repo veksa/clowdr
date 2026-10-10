@@ -118,7 +118,8 @@ Record format, the Node package and how to wire a service: [docs/tracing.md](doc
 
 Metrics go the same way: one JSON point per series per minute on stdout, plus CPU and memory of
 every container sampled by clowdr. `clowctl metrics ls`, `clowctl metrics show <name> --by <label>`;
-format and the Node API: [docs/metrics.md](docs/metrics.md).
+format and the Node API: [docs/metrics.md](docs/metrics.md). CPU profiles of a Node service:
+`clowctl profile <service> --seconds 30`, no endpoint needed.
 
 ## How a deploy works
 

@@ -1,6 +1,6 @@
 {
   "name": "clowdr-node",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Traces for services deployed with clowdr: records written to stdout, read with `clowctl trace`.",
   "license": "Apache-2.0",
   "main": "dist/index.js",

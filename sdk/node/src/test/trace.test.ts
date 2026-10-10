@@ -388,3 +388,21 @@ test('metrics.probe times a function on a timer and counts failures', async () =
     assert.equal(lines.find(l => l.name === 'db_probe_failures').value, 1);
     assert.equal(seconds.count, calls - 1); // the skipped round is not timed
 });
+
+test('profileOnce writes a CPU profile; installProfiler leaves a pid file', async () => {
+    const {profileOnce, installProfiler} = await import('../index');
+    const {mkdtempSync, readFileSync, existsSync} = await import('node:fs');
+    const {join} = await import('node:path');
+    const {tmpdir} = await import('node:os');
+    const dir = mkdtempSync(join(tmpdir(), 'clowdr-profile-'));
+    installProfiler(dir);
+    assert.ok(existsSync(join(dir, `${process.pid}.pid`)));
+    const busyWork = setInterval(() => { let x = 0; for (let i = 0; i < 1e5; i++) x += i; }, 1);
+    const [file, second] = await Promise.all([profileOnce(dir, 0.3), profileOnce(dir, 0.1)]);
+    clearInterval(busyWork);
+    assert.equal(second, undefined); // one profile at a time
+    const profile = JSON.parse(readFileSync(file!, 'utf8'));
+    assert.ok(Array.isArray(profile.nodes) && profile.nodes.length > 0);
+    assert.ok(profile.endTime > profile.startTime);
+    assert.ok(!existsSync(`${file}.part`));
+});

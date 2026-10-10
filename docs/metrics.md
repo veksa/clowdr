@@ -97,3 +97,16 @@ metrics.probe('db', () => prisma.$queryRaw`SELECT 1`);   // db_probe_seconds, db
 ```
 
 Return `false` from the function to skip a round (not connected yet).
+
+## CPU profiles
+
+```sh
+clowctl profile server --seconds 30          # every running replica, every cluster worker
+clowctl profile server --replica 2 -O /tmp
+```
+
+Each process that called `installTracing()` (clowdr-node 0.4+, under clowdr) profiles itself with
+Node's built-in inspector and clowctl downloads `<service>-r<replica>-<pid>-<time>.cpuprofile`:
+open it in Chrome DevTools → Performance → Load profile. There is no endpoint: the request goes
+through `clowctl exec` and SIGUSR2 to the processes that registered in `/tmp/clowdr-node`.
+`installTracing({profile: false})` opts out.
