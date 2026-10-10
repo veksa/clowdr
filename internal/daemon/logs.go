@@ -40,6 +40,9 @@ func startLogs(ctx context.Context, o Options, st *store.Store, plat func() *con
 		RetentionFor: func(k logs.Key) logs.Retention {
 			p := plat()
 			r := p.Logs.App
+			if k.Kind == logs.KindTrace {
+				r = p.Logs.Trace
+			}
 			if k.Kind == logs.KindAccess || k.Kind == logs.KindNginx {
 				r = p.Logs.Access
 			}

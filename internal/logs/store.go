@@ -21,18 +21,23 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-// Key names a stream: an app stream per service, one access stream per project.
+// Key names a stream: an app and a trace stream per service, one access stream per project.
 type Key struct {
 	Project string
-	Kind    string // KindApp | KindAccess | KindNginx
+	Kind    string // KindApp | KindTrace | KindAccess | KindNginx
 	Name    string // service; "_" for access and nginx
 }
 
 const (
 	KindApp    = "app"
+	KindTrace  = "trace" // structured trace records a service writes to stdout (see TraceMark)
 	KindAccess = "access"
 	KindNginx  = "nginx"
 )
+
+// maxLine bounds one stored line when it is read back: trace records carry prompts and
+// request bodies and run far past an ordinary log line.
+const maxLine = 16 << 20
 
 func (k Key) path() string { return filepath.Join(k.Project, k.Kind, k.Name) }
 
@@ -471,7 +476,7 @@ func readZstd(path string, fn func(Line)) error {
 
 func scanLines(r io.Reader, fn func(Line)) error {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64<<10), 4<<20)
+	sc.Buffer(make([]byte, 64<<10), maxLine)
 	for sc.Scan() {
 		var l Line
 		if json.Unmarshal(sc.Bytes(), &l) == nil {

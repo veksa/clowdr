@@ -102,6 +102,20 @@ with the `sh` of Git Bash.
 
 All commands: `clowctl --help`.
 
+## Logs and traces
+
+Services only write to stdout. Plain lines are the log (`clowctl logs`); JSON lines starting with
+`{"$":"trace"` are trace records, kept in a separate stream: one trace per request or job run,
+with model calls, outgoing HTTP, SQL and log lines in order.
+
+```sh
+clowctl trace ls --since 2h --errors
+clowctl trace show <traceId>
+clowctl sdk install        # clowdr-node, served by the server itself, into vendor/clowdr
+```
+
+Record format, the Node package and how to wire a service: [docs/tracing.md](docs/tracing.md).
+
 ## How a deploy works
 
 1. `build` and `docker build --platform linux/amd64` run on your machine.

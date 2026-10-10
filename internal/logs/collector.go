@@ -36,6 +36,11 @@ func (c *Collector) emit(k Key, l Line) {
 	}
 }
 
+// TraceMark starts every trace record a service writes to stdout: a JSON object whose first
+// key is "$":"trace". Such lines go to the service's trace stream instead of its log. The
+// format is described in docs/tracing.md.
+const TraceMark = `{"$":"trace"`
+
 // Forward handles a line from docker's fluentd driver.
 func (c *Collector) Forward(tag string, r Record) {
 	parts := strings.Split(tag, ".")
@@ -45,7 +50,11 @@ func (c *Collector) Forward(tag string, r Record) {
 	}
 	rel, _ := strconv.ParseUint(parts[2], 10, 64)
 	rep, _ := strconv.Atoi(parts[3])
-	c.emit(Key{parts[0], KindApp, parts[1]}, Line{T: r.Time.UnixNano(), R: rel, I: rep, E: r.Stderr, L: r.Line})
+	kind := KindApp
+	if strings.HasPrefix(r.Line, TraceMark) {
+		kind = KindTrace
+	}
+	c.emit(Key{parts[0], kind, parts[1]}, Line{T: r.Time.UnixNano(), R: rel, I: rep, E: r.Stderr, L: r.Line})
 }
 
 // Syslog handles a line from nginx.

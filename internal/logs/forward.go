@@ -158,7 +158,9 @@ func (s *ForwardServer) entry(tag string, t any, rec any, parts map[string]*stri
 			b = &strings.Builder{}
 			parts[id] = b
 		}
-		b.WriteString(line)
+		if b.Len() < maxLine {
+			b.WriteString(line)
+		} // past the cap the rest is dropped: the stored line ends where the cap was hit
 		if asString(m["partial_last"]) != "true" {
 			return
 		}

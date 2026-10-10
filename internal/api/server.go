@@ -24,6 +24,7 @@ import (
 	"github.com/veksa/clowdr/internal/monitor"
 	"github.com/veksa/clowdr/internal/registry"
 	"github.com/veksa/clowdr/internal/runtime"
+	"github.com/veksa/clowdr/internal/sdk"
 	"github.com/veksa/clowdr/internal/spec"
 	"github.com/veksa/clowdr/internal/store"
 )
@@ -85,12 +86,17 @@ func (s *Server) Handler() http.Handler {
 	a("GET /v1/projects/{project}/services/{service}/env", s.getEnv)
 	a("PATCH /v1/projects/{project}/services/{service}/env", s.patchEnv)
 	a("GET /v1/projects/{project}/access", s.access)
+	a("GET /v1/projects/{project}/traces", s.traces)
+	a("GET /v1/projects/{project}/traces/{trace}", s.traceOne)
+	a("GET /v1/projects/{project}/trace-records", s.traceRecords)
 	a("GET /v1/projects/{project}/events", s.events)
 	s.registerOps(a)
 
 	if s.Registry != nil {
 		mux.Handle("/v2/", s.Registry)
 	}
+	// Client packages (docs/tracing.md): open source, no token.
+	mux.Handle("GET /sdk/node/", sdk.Handler(writeJSON))
 	mux.HandleFunc("GET "+ingress.ACMEChallenge, func(w http.ResponseWriter, r *http.Request) {
 		token := strings.TrimPrefix(r.URL.Path, ingress.ACMEChallenge)
 		if strings.ContainsAny(token, "/\\.") || token == "" {
