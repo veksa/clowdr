@@ -11,6 +11,7 @@ export * from './sanitize';
 export {traceFetch, untraceFetch, llmFetch, createLlmFetch, callerFrame, traceTools, baseFetch, setBaseFetch, hostAndPath, stripQuery, type LlmFetchOptions} from './fetch';
 export {traceAxios, traceS3, tracePrismaAdapter, tracePrismaQuery, tracePgPool, traceRedis, traceCall, traceMethods, statementKind, type TracedCall} from './integrations';
 export {httpTraceMiddleware, defaultQuiet, TRACE_ID_HEADER, type HttpTraceOptions} from './http';
+export {metrics, flushMetrics, setMetricsWriter, DEFAULT_BOUNDS, type Labels} from './metrics';
 
 /** `llmFetch` under the name existing services use. */
 export {llmFetch as tracedFetch} from './fetch';

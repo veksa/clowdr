@@ -103,6 +103,7 @@ addons:
 logs:
   app:    { retention: 14d, max: 200MB }
   trace:  { retention: 7d, max: 2GB }
+  metric: { retention: 30d, max: 500MB }
   access: { retention: 30d, max: 500MB }
 
 limits:
@@ -166,6 +167,9 @@ func (p *Platform) defaults() {
 	}
 	if p.Logs.App == nil {
 		p.Logs.App = &Retention{Retention: Duration(14 * 24 * 3600e9), Max: 200 << 20}
+	}
+	if p.Logs.Metric == nil {
+		p.Logs.Metric = &Retention{Retention: Duration(30 * 24 * 3600e9), Max: 500 << 20}
 	}
 	if p.Logs.Trace == nil {
 		p.Logs.Trace = &Retention{Retention: Duration(7 * 24 * 3600e9), Max: 2 << 30}

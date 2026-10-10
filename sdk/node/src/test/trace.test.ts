@@ -297,3 +297,33 @@ test('createLlmFetch takes the cost from a provider-specific function', async ()
     }
     assert.equal(c.records[0].costUsd, 0.02);
 });
+
+test('metrics: counters write their increase, gauges their value, histograms their buckets', async () => {
+    const {metrics, flushMetrics, setMetricsWriter, setTracing} = await import('../index');
+    setTracing(true);
+    const lines: any[] = [];
+    setMetricsWriter(l => lines.push(JSON.parse(l)));
+    metrics.counter('orders', {outcome: 'paid'});
+    metrics.counter('orders', {outcome: 'paid'}, 2);
+    metrics.counter('orders', {outcome: 'failed', skip: undefined});
+    metrics.gauge('connections', 4);
+    metrics.buckets('dur', [1, 2]);
+    metrics.observe('dur', 0.5);
+    metrics.observe('dur', 1.5);
+    metrics.observe('dur', 9);
+    metrics.gaugeFn('queue', async () => 12, {kind: 'studio'});
+    metrics.gaugeFn('broken', () => { throw new Error('x'); });
+    await flushMetrics(new Date('2026-01-02T10:00:00Z'));
+    const by = (n: string) => lines.filter(l => l.name === n);
+    assert.ok(lines.every(l => l.$ === 'metric' && l.ts === '2026-01-02T10:00:00.000Z'));
+    assert.deepEqual(by('orders').map(l => [l.labels.outcome, l.value]).sort(), [['failed', 1], ['paid', 3]]);
+    assert.equal(by('connections')[0].value, 4);
+    assert.deepEqual(by('dur')[0], {$: 'metric', ts: '2026-01-02T10:00:00.000Z', name: 'dur', kind: 'histogram', count: 3, sum: 11, min: 0.5, max: 9, bounds: [1, 2], counts: [1, 1, 1]});
+    assert.deepEqual(by('queue')[0].labels, {kind: 'studio'});
+    assert.equal(by('broken').length, 0);
+    lines.length = 0;
+    await flushMetrics(new Date('2026-01-02T10:01:00Z'));
+    // The next minute: counters and histograms start at zero, gauges are written again.
+    assert.deepEqual(lines.map(l => l.name).sort(), ['connections', 'queue']);
+    setMetricsWriter(null);
+});

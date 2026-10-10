@@ -47,6 +47,8 @@ var routes = []struct {
 	{"GET /v1/projects/{project}/traces", false},
 	{"GET /v1/projects/{project}/traces/{trace}", false},
 	{"GET /v1/projects/{project}/trace-records", false},
+	{"GET /v1/projects/{project}/metrics", false},
+	{"GET /v1/projects/{project}/metrics/{name}", false},
 	{"GET /v1/projects/{project}/events", false},
 	{"POST /v1/projects/{project}/services/{service}/scale", false},
 	{"POST /v1/projects/{project}/services/{service}/exec", false},

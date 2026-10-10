@@ -89,6 +89,8 @@ func (s *Server) Handler() http.Handler {
 	a("GET /v1/projects/{project}/traces", s.traces)
 	a("GET /v1/projects/{project}/traces/{trace}", s.traceOne)
 	a("GET /v1/projects/{project}/trace-records", s.traceRecords)
+	a("GET /v1/projects/{project}/metrics", s.metricsList)
+	a("GET /v1/projects/{project}/metrics/{name}", s.metricQuery)
 	a("GET /v1/projects/{project}/events", s.events)
 	s.registerOps(a)
 

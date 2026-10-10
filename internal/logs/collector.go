@@ -41,6 +41,9 @@ func (c *Collector) emit(k Key, l Line) {
 // format is described in docs/tracing.md.
 const TraceMark = `{"$":"trace"`
 
+// MetricMark starts every metric point a service writes to stdout (docs/metrics.md).
+const MetricMark = `{"$":"metric"`
+
 // Forward handles a line from docker's fluentd driver.
 func (c *Collector) Forward(tag string, r Record) {
 	parts := strings.Split(tag, ".")
@@ -51,8 +54,11 @@ func (c *Collector) Forward(tag string, r Record) {
 	rel, _ := strconv.ParseUint(parts[2], 10, 64)
 	rep, _ := strconv.Atoi(parts[3])
 	kind := KindApp
-	if strings.HasPrefix(r.Line, TraceMark) {
+	switch {
+	case strings.HasPrefix(r.Line, TraceMark):
 		kind = KindTrace
+	case strings.HasPrefix(r.Line, MetricMark):
+		kind = KindMetric
 	}
 	c.emit(Key{parts[0], kind, parts[1]}, Line{T: r.Time.UnixNano(), R: rel, I: rep, E: r.Stderr, L: r.Line})
 }

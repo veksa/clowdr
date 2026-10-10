@@ -116,6 +116,10 @@ clowctl sdk install        # clowdr-node, served by the server itself, into vend
 
 Record format, the Node package and how to wire a service: [docs/tracing.md](docs/tracing.md).
 
+Metrics go the same way: one JSON point per series per minute on stdout, plus CPU and memory of
+every container sampled by clowdr. `clowctl metrics ls`, `clowctl metrics show <name> --by <label>`;
+format and the Node API: [docs/metrics.md](docs/metrics.md).
+
 ## How a deploy works
 
 1. `build` and `docker build --platform linux/amd64` run on your machine.

@@ -91,6 +91,7 @@ type Route struct {
 type LogsConf struct {
 	App    *Retention `yaml:"app"`
 	Trace  *Retention `yaml:"trace"`
+	Metric *Retention `yaml:"metric"`
 	Access *Retention `yaml:"access"`
 }
 

@@ -101,7 +101,7 @@ func (m *Monitor) defaults() {
 func (m *Monitor) Run(ctx context.Context) {
 	m.Init()
 	var wg sync.WaitGroup
-	for _, f := range []func(context.Context){m.watchDocker, m.watchHealth, m.watchRates, m.watchResources} {
+	for _, f := range []func(context.Context){m.watchDocker, m.watchHealth, m.watchRates, m.watchResources, m.containerMetrics} {
 		wg.Add(1)
 		go func() { defer wg.Done(); f(ctx) }()
 	}

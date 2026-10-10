@@ -19,8 +19,14 @@ type TraceDetail struct {
 
 // traceStreams returns the trace streams to read: one service, or every service of the project.
 func (s *Server) traceStreams(w http.ResponseWriter, r *http.Request) ([]logs.Key, bool) {
+	return s.serviceStreams(w, r, logs.KindTrace)
+}
+
+// serviceStreams returns the streams of one kind to read: one service (?service=), or every
+// service of the project.
+func (s *Server) serviceStreams(w http.ResponseWriter, r *http.Request, kind string) ([]logs.Key, bool) {
 	if s.Logs == nil {
-		writeErr(w, 501, "traces need the clowdr log pipeline")
+		writeErr(w, 501, "this needs the clowdr log pipeline")
 		return nil, false
 	}
 	project := r.PathValue("project")
@@ -43,7 +49,7 @@ func (s *Server) traceStreams(w http.ResponseWriter, r *http.Request) ([]logs.Ke
 	}
 	keys := make([]logs.Key, len(names))
 	for i, n := range names {
-		keys[i] = logs.Key{Project: project, Kind: logs.KindTrace, Name: n}
+		keys[i] = logs.Key{Project: project, Kind: kind, Name: n}
 	}
 	return keys, true
 }

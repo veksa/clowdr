@@ -24,13 +24,14 @@ import (
 // Key names a stream: an app and a trace stream per service, one access stream per project.
 type Key struct {
 	Project string
-	Kind    string // KindApp | KindTrace | KindAccess | KindNginx
+	Kind    string // KindApp | KindTrace | KindMetric | KindAccess | KindNginx
 	Name    string // service; "_" for access and nginx
 }
 
 const (
 	KindApp    = "app"
-	KindTrace  = "trace" // structured trace records a service writes to stdout (see TraceMark)
+	KindTrace  = "trace"  // structured trace records a service writes to stdout (see TraceMark)
+	KindMetric = "metric" // metric points a service (or clowdrd) writes once a minute (see MetricMark)
 	KindAccess = "access"
 	KindNginx  = "nginx"
 )
