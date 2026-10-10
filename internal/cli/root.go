@@ -117,6 +117,8 @@ func (a *app) needDeploy() (*config.Deploy, error) {
 //
 // Server: --context, else envs.<env> in deploy.yml, else the current context.
 // Token: CLOWDR_TOKEN, else .clowdr/token.<env> next to deploy.yml, else the context token.
+// An explicit --context brings its own token: the project token file is skipped,
+// so `--context admin` inside a project directory still talks as admin.
 func (a *app) target(needProject bool) (*target, error) {
 	var ctx *Context
 	var server string
@@ -154,7 +156,7 @@ func (a *app) target(needProject bool) (*target, error) {
 	if token == "" {
 		token = os.Getenv("CLOWDER_TOKEN")
 	}
-	if token == "" && a.deploy != nil {
+	if token == "" && a.deploy != nil && a.contextName == "" {
 		if b, err := os.ReadFile(filepath.Join(a.deploy.Dir, ".clowdr", "token."+a.env)); err == nil {
 			token = strings.TrimSpace(string(b))
 		}

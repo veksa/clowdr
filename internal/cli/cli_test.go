@@ -46,11 +46,19 @@ func TestTargetResolution(t *testing.T) {
 	if tg.client.Server != "https://deploy.example.net" || tg.client.Token != "clw_file_token" || tg.project != "shop" {
 		t.Fatalf("%+v %+v", tg, tg.client)
 	}
+	// An explicit --context uses its own token, not the project token file.
+	a.cfg.Contexts["admin"] = &Context{Server: "https://deploy.example.net", Token: "clw_admin"}
+	a.contextName = "admin"
+	tg, _ = a.target(true)
+	if tg.client.Token != "clw_admin" {
+		t.Fatal("--context token must beat the token file:", tg.client.Token)
+	}
 	t.Setenv("CLOWDR_TOKEN", "clw_env")
 	tg, _ = a.target(true)
 	if tg.client.Token != "clw_env" {
 		t.Fatal("env token must win")
 	}
+	a.contextName = ""
 
 	// prod uses a context that does not exist yet.
 	a.env = "prod"
