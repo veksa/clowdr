@@ -6,9 +6,17 @@ import {maskSecrets, sanitize} from './sanitize';
 let patched: typeof globalThis.fetch | null = null;
 let unpatched: typeof globalThis.fetch | null = null;
 
-/** The fetch in place before traceFetch() patched the global one. */
+/** The fetch in place before traceFetch() patched the global one (llmFetch goes through it). */
 export function baseFetch(): typeof globalThis.fetch {
     return unpatched ?? globalThis.fetch;
+}
+
+/**
+ * Replace what baseFetch() returns: for a layer that must also sit under model calls (rewriting
+ * URLs, signing), installed after traceFetch(): `setBaseFetch(wrap(baseFetch()))`; null resets.
+ */
+export function setBaseFetch(fn: typeof globalThis.fetch | null): void {
+    unpatched = fn;
 }
 
 /**

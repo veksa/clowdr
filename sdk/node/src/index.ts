@@ -8,7 +8,7 @@ import {emitTrace} from './record';
 export * from './context';
 export * from './record';
 export * from './sanitize';
-export {traceFetch, untraceFetch, llmFetch, baseFetch} from './fetch';
+export {traceFetch, untraceFetch, llmFetch, baseFetch, setBaseFetch, hostAndPath, stripQuery} from './fetch';
 export {traceAxios, traceS3, tracePrismaAdapter, statementKind} from './integrations';
 export {httpTraceMiddleware, defaultQuiet, type HttpTraceOptions} from './http';
 
