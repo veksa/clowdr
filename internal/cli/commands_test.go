@@ -290,6 +290,8 @@ func TestExecAndAccess(t *testing.T) {
 		t.Fatalf("--status 5xx:\n%s", out)
 	}
 	contains(t, h.ok("access", "shop.example.com", "--top", "statuses"), "200", "502")
+	// Shares are of all requests; the rows cut by --limit are summed up as (other).
+	contains(t, h.ok("access", "shop.example.com", "--top", "paths", "--limit", "2"), "25.0%", "50.0%  (other)")
 	contains(t, h.ok("access", "shop.example.com", "--export", "combined"), `"GET /p1`)
 }
 

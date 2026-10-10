@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -59,16 +60,25 @@ func TestLogsAndAccess(t *testing.T) {
 		t.Fatalf("release+since: %+v", got)
 	}
 
-	var top []TopEntry
+	var top TopResult
 	if err := c.Do(ctx, "GET", Path("projects", "shop", "access")+"?top=statuses", nil, &top); err != nil {
 		t.Fatal(err)
 	}
-	if top[0].Key != "200" || top[0].Count != 3 {
+	if top.Total != 5 || top.Rows[0].Key != "200" || top.Rows[0].Count != 3 {
 		t.Fatalf("top: %+v", top)
 	}
 	c.Do(ctx, "GET", Path("projects", "shop", "access")+"?top=paths", nil, &top)
-	if top[0].Key != "/p0" || top[0].Count != 3 {
+	if top.Rows[0].Key != "/p0" || top.Rows[0].Count != 3 {
 		t.Fatalf("top paths: %+v", top)
+	}
+	// The total counts every matching request, not only the rows that fit the limit.
+	c.Do(ctx, "GET", Path("projects", "shop", "access")+"?top=statuses&limit=1", nil, &top)
+	if top.Total != 5 || len(top.Rows) != 1 {
+		t.Fatalf("top limit: %+v", top)
+	}
+	// A bare array from an older server still decodes, with the total of its rows.
+	if err := json.Unmarshal([]byte(`[{"key":"200","count":3},{"key":"404","count":1}]`), &top); err != nil || top.Total != 4 || len(top.Rows) != 2 {
+		t.Fatalf("old format: %+v %v", top, err)
 	}
 	var combined string
 	c.Do(ctx, "GET", Path("projects", "shop", "access")+"?export=combined&status=5xx", nil, &combined)

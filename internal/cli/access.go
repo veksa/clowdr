@@ -51,24 +51,25 @@ func (a *app) accessCmd() *cobra.Command {
 
 			switch {
 			case top != "":
-				var rows []api.TopEntry
-				if err := t.client.Do(ctx, "GET", base, nil, &rows); err != nil {
+				var res api.TopResult
+				if err := t.client.Do(ctx, "GET", base, nil, &res); err != nil {
 					return err
 				}
 				if a.json() {
-					return a.printJSON(rows)
-				}
-				total := 0
-				for _, r := range rows {
-					total += r.Count
+					return a.printJSON(res)
 				}
 				w := a.table("COUNT", "SHARE", top)
-				for _, r := range rows {
+				shown := 0
+				for _, r := range res.Rows {
 					key := r.Key
 					if key == "" {
 						key = "-"
 					}
-					fmt.Fprintf(w, "%d\t%.1f%%\t%s\n", r.Count, 100*float64(r.Count)/float64(max(total, 1)), key)
+					shown += r.Count
+					fmt.Fprintf(w, "%d\t%.1f%%\t%s\n", r.Count, 100*float64(r.Count)/float64(max(res.Total, 1)), key)
+				}
+				if rest := res.Total - shown; rest > 0 {
+					fmt.Fprintf(w, "%d\t%.1f%%\t(other)\n", rest, 100*float64(rest)/float64(res.Total))
 				}
 				return w.Flush()
 			case export != "":

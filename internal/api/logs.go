@@ -36,6 +36,30 @@ type TopEntry struct {
 	Count int    `json:"count"`
 }
 
+// TopResult is an access log summary: the most frequent keys and the number of all matching
+// requests, so shares stay correct when the rows are cut by limit.
+type TopResult struct {
+	Total int        `json:"total"`
+	Rows  []TopEntry `json:"rows"`
+}
+
+// UnmarshalJSON also accepts a bare array of rows, as older servers send it.
+func (r *TopResult) UnmarshalJSON(b []byte) error {
+	if len(b) > 0 && b[0] == '[' {
+		r.Rows = nil
+		if err := json.Unmarshal(b, &r.Rows); err != nil {
+			return err
+		}
+		r.Total = 0
+		for _, e := range r.Rows {
+			r.Total += e.Count
+		}
+		return nil
+	}
+	type plain TopResult
+	return json.Unmarshal(b, (*plain)(r))
+}
+
 // timeParams parses since/until given as durations ago ("2h") or RFC 3339 times.
 func timeParams(r *http.Request) (since, until time.Time, err error) {
 	parse := func(v string) (time.Time, error) {
@@ -245,9 +269,11 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		counts := map[string]int{}
+		total := 0
 		s.Logs.Read(key, logs.Query{Since: since, Until: until}, func(l logs.Line) {
 			if e, ok := parse(l); ok && match(e) {
 				counts[field(e)]++
+				total++
 			}
 		})
 		out := make([]TopEntry, 0, len(counts))
@@ -265,7 +291,7 @@ func (s *Server) access(w http.ResponseWriter, r *http.Request) {
 		} else if len(out) > 50 {
 			out = out[:50]
 		}
-		writeJSON(w, 200, out)
+		writeJSON(w, 200, TopResult{Total: total, Rows: out})
 		return
 	}
 
