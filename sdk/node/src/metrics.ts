@@ -120,6 +120,34 @@ export const metrics = {
         }
     },
 
+    /**
+     * Probe something on a timer (default every 5 s): `<name>_probe_seconds` (histogram) and
+     * `<name>_probe_failures`. `fn` returns false to skip a round (not connected yet). Returns the stop.
+     */
+    probe(name: string, fn: () => Promise<unknown>, intervalMs = 5_000): () => void {
+        let stopped = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const round = async () => {
+            if (stopped) return;
+            const started = process.hrtime.bigint();
+            try {
+                const r = await fn();
+                if (r !== false) metrics.observe(`${name}_probe_seconds`, Number(process.hrtime.bigint() - started) / 1e9);
+            } catch {
+                metrics.counter(`${name}_probe_failures`);
+                metrics.observe(`${name}_probe_seconds`, Number(process.hrtime.bigint() - started) / 1e9);
+            }
+            if (stopped) return;
+            timer = setTimeout(() => void round(), intervalMs);
+            timer.unref?.();
+        };
+        void round();
+        return () => {
+            stopped = true;
+            clearTimeout(timer);
+        };
+    },
+
     /** Buckets for a histogram, before its first observation (default: DEFAULT_BOUNDS, seconds). */
     buckets(name: string, upperBounds: number[]): void {
         bounds.set(name, [...upperBounds].sort((a, b) => a - b));

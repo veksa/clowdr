@@ -327,3 +327,64 @@ test('metrics: counters write their increase, gauges their value, histograms the
     assert.deepEqual(lines.map(l => l.name).sort(), ['connections', 'queue']);
     setMetricsWriter(null);
 });
+
+test('metrics derived from trace records: models, tools, outbound calls, other calls, warn/error lines', async () => {
+    const {deriveMetrics, emitTrace, flushMetrics, setMetricsWriter, setTracing} = await import('../index');
+    setTracing(true);
+    setTraceWriter(() => undefined);
+    const lines: any[] = [];
+    setMetricsWriter(l => lines.push(JSON.parse(l)));
+    const off = deriveMetrics();
+    try {
+        emitTrace({type: 'llm', name: 'm1', durationMs: 1500, costUsd: 0.02, ok: true, data: {route: 'dialogue', usage: {prompt_tokens: 100, completion_tokens: 20}}});
+        emitTrace({type: 'llm', name: 'm1', durationMs: 500, ok: false, data: {route: 'dialogue'}});
+        emitTrace({type: 'tool', name: 'lookup', durationMs: 30, ok: true});
+        emitTrace({type: 'http', name: 'POST api.example.com/v1/x', durationMs: 200, ok: false, data: {dir: 'out', status: 503}});
+        emitTrace({type: 'http', name: 'GET /orders', data: {dir: 'in'}});
+        emitTrace({type: 'storage', name: 'PutObject a/b.png', durationMs: 40, ok: true});
+        emitTrace({type: 'log', name: 'Billing', level: 'error', data: {message: 'x'}});
+        emitTrace({type: 'log', name: 'Billing', level: 'info', data: {message: 'y'}});
+        emitTrace({type: 'note', name: 'boot'});
+        await flushMetrics();
+    } finally {
+        off();
+        setMetricsWriter(null);
+        setTraceWriter(null);
+    }
+    const get = (name: string, labels: Record<string, string> = {}) =>
+        lines.filter(l => l.name === name && Object.entries(labels).every(([k, v]) => l.labels?.[k] === v));
+    assert.equal(get('llm_calls', {model: 'm1', outcome: 'ok'})[0].value, 1);
+    assert.equal(get('llm_calls', {outcome: 'error'})[0].value, 1);
+    assert.equal(get('llm_cost_usd', {route: 'dialogue'})[0].value, 0.02);
+    assert.equal(get('llm_tokens', {direction: 'in'})[0].value, 100);
+    assert.equal(get('llm_seconds', {route: 'dialogue'})[0].count, 2);
+    assert.equal(get('tool_calls', {tool: 'lookup'})[0].value, 1);
+    assert.equal(get('outbound_requests', {host: 'api.example.com', status: '5xx'})[0].value, 1);
+    assert.equal(get('outbound_requests').length, 1); // inbound requests are not counted
+    assert.equal(get('calls', {type: 'storage', outcome: 'ok'})[0].value, 1);
+    assert.equal(get('log_lines', {level: 'error', context: 'Billing'})[0].value, 1);
+    assert.equal(get('log_lines').length, 1);
+});
+
+test('metrics.probe times a function on a timer and counts failures', async () => {
+    const {metrics, flushMetrics, setMetricsWriter, setTracing} = await import('../index');
+    setTracing(true);
+    const lines: any[] = [];
+    setMetricsWriter(l => lines.push(JSON.parse(l)));
+    let n = 0;
+    const stop = metrics.probe('db', async () => {
+        n++;
+        if (n === 2) throw new Error('down');
+        if (n === 3) return false;
+    }, 5);
+    await new Promise(r => setTimeout(r, 60));
+    stop();
+    const calls = n;
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(n, calls); // stopped
+    await flushMetrics();
+    setMetricsWriter(null);
+    const seconds = lines.find(l => l.name === 'db_probe_seconds');
+    assert.equal(lines.find(l => l.name === 'db_probe_failures').value, 1);
+    assert.equal(seconds.count, calls - 1); // the skipped round is not timed
+});

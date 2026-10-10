@@ -71,3 +71,29 @@ metrics.gaugeFn('queue_depth', () => db.task.count({where: {status: 'queued'}}))
 Points are written only where clowdr runs the service (or with `CLOWDR_TRACE=1`), like traces.
 Each worker of a Node cluster writes its own points; clowdr adds them up, so no aggregation
 between workers is needed. Tests read points with `setMetricsWriter(fn)` and `flushMetrics()`.
+
+### Metrics you get from tracing
+
+`installTracing()` turns trace records into metrics (`installTracing({metrics: false})` turns it off):
+
+| Metric | Labels | From |
+|---|---|---|
+| `llm_calls`, `llm_cost_usd`, `llm_tokens`, `llm_seconds` | model, route, outcome / direction | every model call (`llmFetch`, `createLlmFetch`) |
+| `tool_calls`, `tool_seconds` | tool, outcome | `traceTools` |
+| `outbound_requests`, `outbound_seconds` | host, status (2xx…5xx, error) | outgoing fetch and axios |
+| `calls`, `call_seconds` | type, outcome | any other timed call: `traceCall`, `traceMethods`, `traceS3`, Telegram… |
+| `log_lines` | level (warn, error), context | `traceLog` |
+
+```sh
+clowctl metrics show llm_cost_usd --by route --since 7d --step 1d
+clowctl metrics show outbound_requests --by host,status --since 24h
+clowctl metrics show log_lines --by context --where level=error --since 24h
+```
+
+### Probes
+
+```ts
+metrics.probe('db', () => prisma.$queryRaw`SELECT 1`);   // db_probe_seconds, db_probe_failures, every 5 s
+```
+
+Return `false` from the function to skip a round (not connected yet).
