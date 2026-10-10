@@ -10,6 +10,8 @@ export interface TraceContext {
     startedAt: number;
     userId?: number | string;
     source?: string;
+    /** Small facts about the whole unit of work (a Telegram user id, a tool name): written on every record. */
+    tags?: Record<string, string | number | boolean>;
 }
 
 const storage = new AsyncLocalStorage<TraceContext>();
@@ -40,6 +42,8 @@ export interface RunOptions {
     userId?: number | string;
     /** What started the work: `http:GET /orders/12`, `job:invoice.send`. */
     source?: string;
+    /** Tags of the trace (merged into the surrounding one when joining); undefined values are dropped. */
+    tags?: Record<string, string | number | boolean | undefined>;
     /**
      * Start a new trace even inside another one: work kicked off by a request that outlives it
      * (a background job) is its own unit.
@@ -56,6 +60,7 @@ export function runInTrace<T>(opts: RunOptions, fn: () => T): T {
     if (existing && !opts.fresh) {
         if (opts.userId !== undefined && existing.userId === undefined) existing.userId = opts.userId;
         if (opts.source && !existing.source) existing.source = opts.source;
+        if (opts.tags) existing.tags = {...existing.tags, ...defined(opts.tags)};
         return fn();
     }
     return storage.run({
@@ -63,6 +68,7 @@ export function runInTrace<T>(opts: RunOptions, fn: () => T): T {
         startedAt: Date.now(),
         userId: opts.userId,
         source: opts.source,
+        tags: opts.tags ? defined(opts.tags) : undefined,
     }, fn);
 }
 
@@ -76,4 +82,15 @@ export function setTraceSource(source: string): void {
 export function setTraceUser(userId: number | string | undefined | null): void {
     const ctx = storage.getStore();
     if (ctx && userId !== undefined && userId !== null) ctx.userId = userId;
+}
+
+/** Add tags to the ambient trace once they are known; written on every record after this. */
+export function addTraceTags(tags: Record<string, string | number | boolean | undefined>): void {
+    const ctx = storage.getStore();
+    if (!ctx) return;
+    ctx.tags = {...ctx.tags, ...defined(tags)};
+}
+
+function defined(tags: Record<string, string | number | boolean | undefined>): Record<string, string | number | boolean> {
+    return Object.fromEntries(Object.entries(tags).filter(([, v]) => v !== undefined)) as Record<string, string | number | boolean>;
 }

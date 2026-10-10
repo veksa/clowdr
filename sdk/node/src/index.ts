@@ -8,14 +8,19 @@ import {emitTrace} from './record';
 export * from './context';
 export * from './record';
 export * from './sanitize';
-export {traceFetch, untraceFetch, llmFetch, baseFetch, setBaseFetch, hostAndPath, stripQuery} from './fetch';
-export {traceAxios, traceS3, tracePrismaAdapter, statementKind} from './integrations';
-export {httpTraceMiddleware, defaultQuiet, type HttpTraceOptions} from './http';
+export {traceFetch, untraceFetch, llmFetch, createLlmFetch, callerFrame, traceTools, baseFetch, setBaseFetch, hostAndPath, stripQuery, type LlmFetchOptions} from './fetch';
+export {traceAxios, traceS3, tracePrismaAdapter, tracePrismaQuery, tracePgPool, traceRedis, traceCall, traceMethods, statementKind, type TracedCall} from './integrations';
+export {httpTraceMiddleware, defaultQuiet, TRACE_ID_HEADER, type HttpTraceOptions} from './http';
 
 /** `llmFetch` under the name existing services use. */
 export {llmFetch as tracedFetch} from './fetch';
 
 export interface InstallOptions {
+    /**
+     * Patch the global fetch (default true). Off for a service that wraps its outgoing calls
+     * itself (traceCall), so they are not recorded twice.
+     */
+    fetch?: boolean;
     /** axios instances to record (usually the default export of `axios`). */
     axios?: any[];
     /** Extra fields of the boot record (environment, version). */
@@ -29,7 +34,7 @@ let installed = false;
  * once at start, before the HTTP server listens. Idempotent.
  */
 export function installTracing(options: InstallOptions = {}): void {
-    traceFetch();
+    if (options.fetch !== false) traceFetch();
     for (const instance of options.axios ?? []) traceAxios(instance);
     if (installed) return;
     installed = true;

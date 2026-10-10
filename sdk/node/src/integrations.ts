@@ -135,3 +135,191 @@ export function statementKind(sql: string): string {
     const table = sql.match(/(?:FROM|INTO|UPDATE)\s+(?:"?\w+"?\.)?"?(\w+)"?/i)?.[1];
     return table ? `${verb} ${table}` : verb;
 }
+
+// ─── Any call that leaves the process ─────────────────────────────────────────
+
+export interface TracedCall {
+    type: string;
+    /** What was called: a URL, a key, a template. The record's title. */
+    name: string;
+    /** Kept as is (after sanitising): what identifies the call. */
+    data?: Record<string, any>;
+}
+
+/**
+ * Wrap one call the global fetch patch cannot see (an SDK with its own HTTP stack, a mail
+ * provider, a queue): one record when it finishes, with its duration and outcome. A call that
+ * never returns leaves no record.
+ */
+export async function traceCall<T>(call: TracedCall, run: () => Promise<T>, describe?: (result: T) => Record<string, any> | undefined): Promise<T> {
+    const started = Date.now();
+    try {
+        const result = await run();
+        emitTrace({type: call.type, name: call.name, ok: true, durationMs: Date.now() - started, data: {...call.data, ...(describe?.(result) ?? {})}});
+        return result;
+    } catch (error) {
+        emitTrace({type: call.type, name: call.name, ok: false, level: 'error', durationMs: Date.now() - started, data: {...call.data, error: sanitize(error)}});
+        throw error;
+    }
+}
+
+// ─── Redis (channel `cache`) ──────────────────────────────────────────────────
+
+const REDIS_COMMANDS = ['get', 'set', 'del', 'getdel', 'incr', 'expire', 'ttl', 'exists', 'sadd', 'srem', 'smembers', 'zadd', 'zrevrange', 'zrange', 'hget', 'hset', 'hdel', 'hgetall', 'mget'];
+const REDIS_READS = new Set(['get', 'getdel', 'ttl', 'exists', 'smembers', 'zrevrange', 'zrange', 'hget', 'hgetall', 'mget']);
+
+/**
+ * Record ioredis commands while the `cache` channel is on: `traceRedis(new Redis(...))`. Reads
+ * report whether the key was there. Arguments and the returned promise are passed through
+ * untouched; pipelines (`multi()`) are not recorded.
+ */
+export function traceRedis<T extends object>(client: T, commands: string[] = REDIS_COMMANDS): T {
+    const allowed = new Set(commands);
+    return new Proxy(client, {
+        get(object, property, receiver) {
+            const value: unknown = Reflect.get(object, property, receiver);
+            const command = String(property);
+            if (typeof value !== 'function' || !allowed.has(command)) return value;
+            const original = value as (...args: any[]) => any;
+            return function (...args: any[]) {
+                if (!channelEnabled('cache')) return original.apply(object, args);
+                const started = Date.now();
+                const result = original.apply(object, args);
+                if (!result || typeof result.then !== 'function') return result;
+                result.then(
+                    (payload: any) => emitTrace({type: 'cache', name: `${command} ${args[0]}`, ok: true, durationMs: Date.now() - started, data: REDIS_READS.has(command) ? {hit: payload !== null && payload !== undefined} : {}}),
+                    (error: any) => emitTrace({type: 'cache', name: `${command} ${args[0]}`, ok: false, level: 'error', durationMs: Date.now() - started, data: {error: sanitize(error)}}),
+                );
+                return result;
+            };
+        },
+    });
+}
+
+// ─── Prisma query events (channel `db`) ───────────────────────────────────────
+
+/**
+ * Record SQL from Prisma's own query event, for clients without a driver adapter to wrap:
+ * `prisma.$on('query', tracePrismaQuery)` with `log: [{emit: 'event', level: 'query'}]`.
+ */
+export function tracePrismaQuery(event: {query: string; params?: string; duration?: number}): void {
+    if (!channelEnabled('db')) return;
+    emitTrace({
+        type: 'db',
+        name: statementKind(event.query),
+        durationMs: event.duration === undefined ? undefined : Math.round(event.duration * 100) / 100,
+        data: {sql: event.query, params: event.params},
+    });
+}
+
+// ─── node-postgres pool (channel `db`) ────────────────────────────────────────
+
+function describeQuery(args: any[]): {sql: string; values?: unknown} {
+    const first = args[0];
+    if (typeof first === 'string') return {sql: first, values: args[1]};
+    if (first && typeof first === 'object') return {sql: typeof first.text === 'string' ? first.text : '<not a string>', values: first.values ?? args[1]};
+    return {sql: '<unknown query shape>'};
+}
+
+/**
+ * Record the SQL a `pg` Pool (or Client) runs while the `db` channel is on: `tracePgPool(pool)`,
+ * for a pool handed to an adapter that offers nothing to wrap. Clients checked out with
+ * `pool.connect()` (transactions) are wrapped too. Observational: the query and its promise or
+ * callback are passed through untouched.
+ */
+export function tracePgPool<T extends {query: (...args: any[]) => any; connect?: (...args: any[]) => any}>(pool: T): T {
+    wrapPgQuery(pool, 'pool');
+    if (typeof pool.connect === 'function') {
+        const connect = pool.connect.bind(pool);
+        pool.connect = function (...args: any[]) {
+            if (typeof args[0] === 'function') return connect(...args); // callback form: untouched
+            const result = connect(...args);
+            if (!result || typeof result.then !== 'function') return result;
+            return result.then((client: any) => {
+                if (client && !client.__clowdrTraced) {
+                    client.__clowdrTraced = true;
+                    wrapPgQuery(client, 'client');
+                }
+                return client;
+            });
+        } as T['connect'];
+    }
+    return pool;
+}
+
+function wrapPgQuery(target: {query: (...args: any[]) => any}, via: string): void {
+    if (typeof target.query !== 'function') return;
+    const original = target.query.bind(target);
+    target.query = function tracedQuery(...args: any[]) {
+        if (!channelEnabled('db')) return original(...args);
+        const started = Date.now();
+        const {sql, values} = describeQuery(args);
+        const record = (extra: Record<string, any>, failed = false) => emitTrace({
+            type: 'db', name: statementKind(sql), ok: !failed, level: failed ? 'error' : undefined,
+            durationMs: Date.now() - started, data: {via, sql, values, ...extra},
+        });
+        let result: any;
+        try {
+            result = original(...args);
+        } catch (error) {
+            record({error: sanitize(error)}, true);
+            throw error;
+        }
+        if (typeof args[args.length - 1] === 'function' || !result || typeof result.then !== 'function') {
+            record({});
+            return result;
+        }
+        result.then(
+            (rows: any) => record({rows: rows?.rowCount ?? rows?.rows?.length}),
+            (error: unknown) => record({error: sanitize(error)}, true),
+        );
+        return result;
+    };
+}
+
+// ─── Any SDK client ───────────────────────────────────────────────────────────
+
+/**
+ * Record every call to the named methods of an object (a payment provider, a mail SDK), arguments
+ * and result included. A Proxy keeps the object otherwise identical. `pickArgs` keeps what is worth
+ * recording when the arguments are bulky (rendered HTML).
+ */
+export function traceMethods<T extends object>(target: T, options: {type: string; label: string; methods: string[]; pickArgs?: (args: any[]) => any}): T {
+    const {type, label, methods, pickArgs} = options;
+    return new Proxy(target, {
+        get(object, property, receiver) {
+            const value = Reflect.get(object, property, receiver);
+            if (typeof value !== 'function' || !methods.includes(String(property))) return value;
+            return function (...args: any[]) {
+                const name = `${label}.${String(property)}`;
+                const started = Date.now();
+                const write = (ok: boolean, data: Record<string, any>) => emitTrace({
+                    type, name, ok, level: ok ? undefined : 'error', durationMs: Date.now() - started,
+                    data: {args: pickArgs ? pickArgs(args) : args, ...data},
+                });
+                let result: any;
+                try {
+                    // On the target, not the proxy: a method calling a sibling would re-enter the trap.
+                    result = value.apply(object, args);
+                } catch (error) {
+                    write(false, {error: sanitize(error)});
+                    throw error;
+                }
+                if (!result || typeof result.then !== 'function') {
+                    write(true, {result});
+                    return result;
+                }
+                return result.then(
+                    (v: any) => {
+                        write(true, {result: v});
+                        return v;
+                    },
+                    (error: any) => {
+                        write(false, {error: sanitize(error)});
+                        throw error;
+                    },
+                );
+            };
+        },
+    });
+}

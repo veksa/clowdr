@@ -1,4 +1,4 @@
-import {currentTrace} from './context';
+import {currentTrace, TraceContext} from './context';
 import {maskSecrets, sanitize} from './sanitize';
 
 export type RecordType =
@@ -39,12 +39,15 @@ const MAX_RECORD_BYTES = 1 << 20;
 const boot = `${Date.now().toString(36)}${Math.floor(Math.random() * 46656).toString(36)}`;
 let seq = 0;
 let writing = false;
-let enabled = process.env.CLOWDR_TRACE !== '0';
+// On where clowdr runs the service (it sets CLOWDR_SERVICE in every container), off elsewhere: in a
+// local `yarn start` or a test run the records would only bury the console. CLOWDR_TRACE=1 / 0
+// forces it either way; setTracing(true) turns it on for a test that reads them.
+let enabled = process.env.CLOWDR_TRACE === '1' || (process.env.CLOWDR_TRACE !== '0' && !!process.env.CLOWDR_SERVICE);
 let write: (line: string) => void = line => {
     process.stdout.write(line);
 };
 
-/** Turn recording off (`CLOWDR_TRACE=0` does the same at start). */
+/** Turn recording on or off (`CLOWDR_TRACE=1` / `0` does the same at start). */
 export function setTracing(on: boolean): void {
     enabled = on;
 }
@@ -65,6 +68,7 @@ export function setTraceWriter(fn: ((line: string) => void) | null): void {
  * request it observes.
  */
 export function emitTrace(input: RecordInput): void {
+    if (listeners.size > 0 && !notifying) notify(input);
     if (!enabled || writing) return;
     writing = true;
     try {
@@ -79,6 +83,7 @@ export function emitTrace(input: RecordInput): void {
             traceId: input.traceId ?? ctx?.traceId ?? ORPHAN_TRACE,
             userId: input.userId ?? ctx?.userId,
             source: input.source ?? ctx?.source,
+            tags: ctx?.tags && Object.keys(ctx.tags).length ? ctx.tags : undefined,
             // Names carry URLs and log contexts, where tokens hide.
             name: maskSecrets(String(input.name)),
             level: input.level,
@@ -104,9 +109,44 @@ export function emitTrace(input: RecordInput): void {
     }
 }
 
-/** A marker in the timeline: "the reproduction starts here". */
-export function traceNote(name: string, data?: Record<string, any>): void {
-    emitTrace({type: 'note', name, data});
+// ─── Listeners ────────────────────────────────────────────────────────────────
+
+export type TraceListener = (record: RecordInput, context: TraceContext | undefined) => void;
+
+const listeners = new Set<TraceListener>();
+let notifying = false;
+
+/**
+ * Hear every record, even with tracing off: for logic that rides on what is recorded (billing a
+ * model call's cost to whoever caused it) and must not depend on the trace stream. Called with
+ * the record as given and the ambient trace. A throwing listener is ignored. Returns the unsubscribe.
+ */
+export function onTraceRecord(fn: TraceListener): () => void {
+    listeners.add(fn);
+    return () => {
+        listeners.delete(fn);
+    };
+}
+
+function notify(input: RecordInput): void {
+    notifying = true;
+    try {
+        const ctx = currentTrace();
+        for (const fn of listeners) {
+            try {
+                fn(input, ctx);
+            } catch {
+                // a broken listener must not break the call it observes
+            }
+        }
+    } finally {
+        notifying = false;
+    }
+}
+
+/** A marker in the timeline: "the reproduction starts here". `type` files it under its own kind (`import`). */
+export function traceNote(name: string, data?: Record<string, any>, type: string = 'note'): void {
+    emitTrace({type, name, data});
 }
 
 /** Start or outcome of a unit of background work: the IN / OUT lines of a job trace. */
@@ -126,7 +166,9 @@ export function traceJob(name: string, data: Record<string, any>, opts?: {ok?: b
  * the plain line stays in `clowctl logs`, this one shows inside `clowctl trace show`.
  */
 export function traceLog(level: Level, context: string | undefined, message: string): void {
-    emitTrace({type: 'log', name: context || 'log', level, data: {message}});
+    // Without a context, a leading [Tag] of the message names the line (Nest's own style).
+    const name = context || message.match(/^\s*\[([^\]]{1,60})]/)?.[1] || 'app';
+    emitTrace({type: 'log', name, level, data: {message}});
 }
 
 // ─── Channels ─────────────────────────────────────────────────────────────────

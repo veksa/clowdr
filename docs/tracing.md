@@ -88,6 +88,7 @@ start with `{"$":"trace"`** — clowdr routes the line by that prefix without pa
 | `seq`, `boot` | recommended | per-process counter and process id: order records within one millisecond |
 | `userId` | | number or string |
 | `source` | | what started the trace: `http:GET /orders/12`, `job:invoice.send`, `socket:chat.send` |
+| `tags` | | small facts about the whole trace (`{"telegramUserId":"42"}`), shown in the trace header |
 | `level` | | `debug`, `info`, `warn`, `error` |
 | `ok` | | `false` marks a failed call |
 | `durationMs`, `costUsd` | | numbers; costs are summed per trace |
@@ -127,7 +128,7 @@ import {installTracing, httpTraceMiddleware, setTraceUser} from 'clowdr-node';
 
 // main.ts, before listen()
 installTracing({axios: [axios], boot: {environment: 'prod'}});
-app.use(httpTraceMiddleware());          // first middleware: it wraps guards and filters too
+app.use(httpTraceMiddleware());          // first after the body parsers: it wraps guards and filters too
 
 // auth guard, once the user is known
 setTraceUser(user.id);
@@ -141,20 +142,39 @@ import {traceLog} from 'clowdr-node';
 traceLog('error', 'Orders', message);    // level, context, text
 ```
 
-Model calls: give the OpenAI-compatible client the traced fetch.
+Model calls: give the OpenAI-compatible client the traced fetch. With `routeHeader`, a header the
+service sets on its calls names what each one is for (`data.route`). Tool executions of the AI SDK
+are recorded with `traceTools`.
 
 ```ts
-import {llmFetch} from 'clowdr-node';
+import {createLlmFetch, llmFetch, traceTools} from 'clowdr-node';
 const openai = createOpenAI({apiKey, baseURL, fetch: llmFetch});
+const routed = createOpenAI({apiKey, baseURL, fetch: createLlmFetch({routeHeader: 'x-app-route'})});
+// cost: when the bill is not usage.cost (OpenRouter BYOK); undefined = unknown, 0 = free
+const billed = createLlmFetch({cost: usage => usage.is_byok ? usage.cost_details?.upstream_inference_cost : usage.cost});
+await generateText({model, tools: traceTools(tools), headers: {'x-app-route': 'summary'}, ...});
 ```
 
-Storage and database:
+Storage, database, cache:
 
 ```ts
-import {traceS3, tracePrismaAdapter} from 'clowdr-node';
+import {traceS3, tracePrismaAdapter, tracePrismaQuery, tracePgPool, traceRedis} from 'clowdr-node';
 const s3 = traceS3(new S3Client({...}));
-const prisma = new PrismaClient({adapter: tracePrismaAdapter(new PrismaPg({...}))});
+const prisma = new PrismaClient({adapter: tracePrismaAdapter(new PrismaPg({...}))});   // channel db
+prisma.$on('query', tracePrismaQuery);    // or this, with log: [{emit: 'event', level: 'query'}]
+tracePgPool(pool);                        // or a node-postgres Pool / Client
+const redis = traceRedis(new Redis({...}));                                         // channel cache
 ```
+
+A call the fetch patch cannot see (an SDK with its own HTTP stack, a mail provider):
+
+```ts
+import {traceCall} from 'clowdr-node';
+const res = await traceCall({type: 'mail', name: template, data: {to}}, () => mailer.send(msg), r => ({id: r.id}));
+```
+
+A service that already wraps every outgoing call that way passes `installTracing({fetch: false})`,
+so fetch calls are not recorded twice.
 
 ### Background work
 
@@ -170,21 +190,38 @@ await runInTrace({source: `job:${step}`, fresh: true}, async () => {
 });
 ```
 
+Facts about the whole unit of work go into tags, written on every record of the trace (and found by
+`-q`): `runInTrace({source: 'telegram:message', tags: {telegramUserId}}, …)` or, once known,
+`addTraceTags({tool: name})`.
+
 `runInTrace` joins the surrounding trace when there is one; `fresh: true` starts a new one, for
 work that outlives the request that started it. Sockets: open `runInTrace` per frame, then
 `setTraceSource('socket:<message>')` once it is decoded.
 
+### Logic that rides on records
+
+Something that must see every record even when tracing is off (billing a model call's cost to
+whoever caused it) subscribes instead of reading the stream:
+
+```ts
+import {onTraceRecord} from 'clowdr-node';
+onTraceRecord((record, trace) => { if (record.costUsd) bill(record.costUsd, trace?.userId); });
+```
+
 ### Noisy channels
 
-SQL is off by default (one job is dozens of statements and buries the chain). Turn it on for a
+SQL (`db`) and Redis (`cache`) are off by default (one job is dozens of statements and buries the chain). Turn it on for a
 while, then off:
 
 ```sh
-clowctl env set server CLOWDR_TRACE_CHANNELS=db && clowctl restart server
+clowctl env set server CLOWDR_TRACE_CHANNELS=db,cache && clowctl restart server
 clowctl env set server CLOWDR_TRACE_CHANNELS= && clowctl restart server
 ```
 
-`CLOWDR_TRACE=0` stops all trace records.
+Records are written where clowdr runs the service (it sets `CLOWDR_SERVICE` in every container)
+and nowhere else: a local `yarn start` or a test run keeps a clean console. `CLOWDR_TRACE=1` writes
+them locally too (pipe through `grep -v '^{"$":"trace"'` to hide them again), `CLOWDR_TRACE=0` stops
+them in a deployment; a test that reads records calls `setTracing(true)`.
 
 ### Secrets
 
@@ -206,4 +243,7 @@ for. Access to traces is access to the project (a project token), like its logs.
 - One unit of work, one trace. Never reuse a trace id across jobs.
 - Put the ids you search by into `data`, under stable names.
 - Health checks are not recorded while they succeed (`httpTraceMiddleware({quiet})`).
+- Every response carries `X-Trace-Id`: ask for it in bug reports, then `clowctl trace show <id>`.
+- A 4xx response is `ok` with level `warn` (shown by `trace errors`); `trace ls --errors` lists
+  traces with a 5xx, a failed call or an `error` line.
 - Do not keep a second copy: no trace files, no debug endpoints. clowdr is the store.

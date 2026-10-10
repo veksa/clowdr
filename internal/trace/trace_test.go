@@ -16,7 +16,7 @@ func rec(line string) Record {
 func TestFormatTrace(t *testing.T) {
 	rs := []Record{
 		rec(`{"$":"trace","seq":2,"ts":"2026-01-02T10:00:00.120Z","type":"llm","traceId":"t1","name":"model-a","durationMs":120,"costUsd":0.0041,"data":{"usage":{"prompt_tokens":10,"completion_tokens":3},"messages":[{"role":"system","content":"s"},{"role":"user","content":[{"type":"text","text":"look"},{"type":"image_url"}]}],"response":{"text":"ok","finishReason":"length"}}}`),
-		rec(`{"$":"trace","seq":1,"ts":"2026-01-02T10:00:00.000Z","type":"http","traceId":"t1","userId":"u-1","source":"http:GET /a","name":"GET /a","data":{"dir":"in","path":"/a"}}`),
+		rec(`{"$":"trace","seq":1,"ts":"2026-01-02T10:00:00.000Z","type":"http","traceId":"t1","userId":"u-1","source":"http:GET /a","tags":{"chat":"42","tool":"x"},"name":"GET /a","data":{"dir":"in","path":"/a"}}`),
 		rec(`{"$":"trace","seq":3,"ts":"2026-01-02T10:00:00.200Z","type":"log","traceId":"t1","name":"Orders","level":"error","data":{"message":"line one\nline two"}}`),
 	}
 	Sort(rs)
@@ -26,7 +26,7 @@ func TestFormatTrace(t *testing.T) {
 	}
 	out := FormatTrace(s, rs, FormatOptions{})
 	for _, want := range []string{
-		"═══ TRACE t1", "who     user=u-1 source=http:GET /a",
+		"═══ TRACE t1", "who     user=u-1 source=http:GET /a", "tags    chat=42 tool=x",
 		"+120ms    llm       model-a  [120ms $0.004100]", "in=10 out=3",
 		"user    │ look <image_url>", "← text  │ ok", "finish=length",
 		"+200ms    log       Orders  [error]", "        │ line two",

@@ -12,10 +12,12 @@ const BLOB_THRESHOLD = 512;
 
 // Suffix patterns rather than today's names: the next credential field will be written by
 // somebody who never read this file. Singular `token` on purpose: `prompt_tokens` is a count.
-const SECRET_KEY_RE = /^(authorization|cookie|set-cookie|key|signature|x-signature|[\w-]*(token|api[-_]?key|secret|secret[-_]?key|password|passwd|private[-_]?key|encrypted[-_]?key))$/i;
+const SECRET_KEY_RE = /^(authorization|cookie|set-cookie|key|apikey|signature|x-signature|code[-_]?verifier|credentials?|[\w-]*(token|api[-_]?key|secret|secret[-_]?key|password|passwd|private[-_]?key|encrypted[-_]?key))$/i;
 
 const SECRET_VALUE_RES: RegExp[] = [
     /sk-or-v1-[A-Za-z0-9]{16,}/g, // OpenRouter
+    /sk-proj-[A-Za-z0-9_-]{16,}/g, // OpenAI project keys
+    /whsec_[A-Za-z0-9/+_-]{16,}/g, // webhook signing secrets
     /sk-[A-Za-z0-9_-]{32,}/g, // OpenAI-style keys
     /\d{8,12}:AA[A-Za-z0-9_-]{30,}/g, // Telegram bot token, also inside Bot API URLs
     /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, // JWT

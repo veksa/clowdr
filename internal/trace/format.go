@@ -35,6 +35,9 @@ func FormatTrace(s Summary, rs []Record, o FormatOptions) string {
 		who += " service=" + s.Service
 	}
 	line("%s", who)
+	if len(s.Tags) > 0 {
+		line("tags    %s", formatTags(s.Tags))
+	}
 	line("totals  records=%d llm=%d sql=%d errors=%d cost=$%.6f", s.Records, s.LLMCalls, s.DBCalls, s.Errors, s.CostUSD)
 	if len(s.Models) > 0 {
 		line("models  %s", strings.Join(s.Models, ", "))
@@ -342,4 +345,17 @@ func orQ(s string) string {
 		return "?"
 	}
 	return s
+}
+
+func formatTags(tags map[string]any) string {
+	keys := make([]string, 0, len(tags))
+	for k := range tags {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, len(keys))
+	for i, k := range keys {
+		parts[i] = k + "=" + str(tags[k])
+	}
+	return strings.Join(parts, " ")
 }

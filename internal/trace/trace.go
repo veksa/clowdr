@@ -24,7 +24,9 @@ type Record struct {
 	// UserID is whatever the service uses: a number or a string.
 	UserID json.RawMessage `json:"userId,omitempty"`
 	// Source is what started the trace: "http:GET /orders/12", "job:invoice.send".
-	Source     string         `json:"source,omitempty"`
+	Source string `json:"source,omitempty"`
+	// Tags are small facts about the whole trace (a Telegram user id, a tool name).
+	Tags       map[string]any `json:"tags,omitempty"`
 	Name       string         `json:"name"`
 	Level      string         `json:"level,omitempty"`
 	DurationMs *float64       `json:"durationMs,omitempty"`
@@ -86,19 +88,20 @@ func Sort(rs []Record) {
 
 // Summary is one trace rolled up: what a list of traces shows before one is opened.
 type Summary struct {
-	TraceID    string   `json:"traceId"`
-	Service    string   `json:"service,omitempty"`
-	StartedAt  string   `json:"startedAt"`
-	EndedAt    string   `json:"endedAt"`
-	DurationMs int64    `json:"durationMs"`
-	UserID     string   `json:"userId,omitempty"`
-	Source     string   `json:"source,omitempty"`
-	Records    int      `json:"records"`
-	LLMCalls   int      `json:"llmCalls"`
-	DBCalls    int      `json:"dbCalls"`
-	Errors     int      `json:"errors"`
-	CostUSD    float64  `json:"costUsd"`
-	Models     []string `json:"models,omitempty"`
+	TraceID    string         `json:"traceId"`
+	Service    string         `json:"service,omitempty"`
+	StartedAt  string         `json:"startedAt"`
+	EndedAt    string         `json:"endedAt"`
+	DurationMs int64          `json:"durationMs"`
+	UserID     string         `json:"userId,omitempty"`
+	Source     string         `json:"source,omitempty"`
+	Tags       map[string]any `json:"tags,omitempty"`
+	Records    int            `json:"records"`
+	LLMCalls   int            `json:"llmCalls"`
+	DBCalls    int            `json:"dbCalls"`
+	Errors     int            `json:"errors"`
+	CostUSD    float64        `json:"costUsd"`
+	Models     []string       `json:"models,omitempty"`
 	// Input is what came in: the request or job name, or the first note.
 	Input string `json:"input,omitempty"`
 	// Output is what went out: the response status or the job outcome.
@@ -136,6 +139,12 @@ func (r *Roller) Add(rec Record) {
 	}
 	if s.Source == "" {
 		s.Source = rec.Source
+	}
+	for k, v := range rec.Tags {
+		if s.Tags == nil {
+			s.Tags = map[string]any{}
+		}
+		s.Tags[k] = v
 	}
 	s.CostUSD += rec.CostUSD
 	if rec.Level == "error" || (rec.OK != nil && !*rec.OK) {
