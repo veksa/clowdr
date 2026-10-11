@@ -139,7 +139,7 @@ stopped first and started again if the new one fails.
 ```sh
 go test ./...
 go build -o bin/clowctl ./cmd/clowdr
-GOOS=linux go build -o bin/clowdrd ./cmd/clowdr
+GOOS=linux go build -o bin/linux/clowdrd ./cmd/clowdr
 ```
 
 `examples/shop` is a minimal project. `test/e2e/run.sh` deploys it on a real Linux host with
