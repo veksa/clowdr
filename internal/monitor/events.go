@@ -145,10 +145,12 @@ func (e *Events) Subscribe(project string) (<-chan Event, func(), error) {
 	return out, func() { cancel(); close(done) }, nil
 }
 
-// Host is free memory and disk of the server, for `clowctl top`.
+// Host is free memory, swap and disk of the server, for `clowctl top`.
 type Host struct {
 	MemTotal  int64 `json:"mem_total,omitempty"`
 	MemAvail  int64 `json:"mem_available,omitempty"`
+	SwapTotal int64 `json:"swap_total,omitempty"`
+	SwapFree  int64 `json:"swap_free,omitempty"`
 	DiskTotal int64 `json:"disk_total,omitempty"`
 	DiskFree  int64 `json:"disk_free,omitempty"`
 }
@@ -156,6 +158,7 @@ type Host struct {
 func HostStats(dir string) Host {
 	var h Host
 	h.MemAvail, h.MemTotal, _ = memAvailable()
+	h.SwapFree, h.SwapTotal, _ = swapFree()
 	h.DiskFree, h.DiskTotal, _ = diskFree(dir)
 	return h
 }

@@ -23,6 +23,7 @@ import (
 
 	"github.com/veksa/clowdr/internal/api"
 	"github.com/veksa/clowdr/internal/config"
+	"github.com/veksa/clowdr/internal/monitor"
 	"github.com/veksa/clowdr/internal/store"
 )
 
@@ -905,8 +906,7 @@ func (a *app) platformCmd() *cobra.Command {
 func (a *app) printPlatformStatus(st api.PlatformStatus) {
 	fmt.Fprintf(a.out, "clowdrd %s, docker %s, registry %s\n", st.Version, st.Docker, st.Registry)
 	if h := st.Host; h.MemTotal > 0 {
-		fmt.Fprintf(a.out, "server: memory %s free of %s, disk %s free of %s\n",
-			human(h.MemAvail), human(h.MemTotal), human(h.DiskFree), human(h.DiskTotal))
+		fmt.Fprintf(a.out, "server: %s\n", hostLine(h))
 	}
 	n := st.Nginx
 	switch {
@@ -1021,4 +1021,18 @@ func shortTime(rfc string) string {
 		return rfc
 	}
 	return t.Local().Format("01-02 15:04:05.000")
+}
+
+// hostLine is the server's memory, swap and disk for `top` and `platform status`. Swap is left out
+// when the host has none (or the daemon predates reporting it).
+func hostLine(h monitor.Host) string {
+	s := fmt.Sprintf("memory %s free of %s", human(h.MemAvail), human(h.MemTotal))
+	if h.SwapTotal > 0 {
+		used := "0"
+		if u := h.SwapTotal - h.SwapFree; u > 0 {
+			used = human(u)
+		}
+		s += fmt.Sprintf(", swap %s used of %s", used, human(h.SwapTotal))
+	}
+	return s + fmt.Sprintf(", disk %s free of %s", human(h.DiskFree), human(h.DiskTotal))
 }

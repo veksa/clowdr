@@ -1,10 +1,7 @@
 package monitor
 
 import (
-	"bufio"
 	"os"
-	"strconv"
-	"strings"
 	"syscall"
 )
 
@@ -16,25 +13,24 @@ func diskFree(path string) (free, total int64, ok bool) {
 	return int64(st.Bavail) * st.Bsize, int64(st.Blocks) * st.Bsize, true
 }
 
-func memAvailable() (avail, total int64, ok bool) {
+func meminfo() map[string]int64 {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {
-		return 0, 0, false
+		return nil
 	}
 	defer f.Close()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		fields := strings.Fields(sc.Text())
-		if len(fields) < 2 {
-			continue
-		}
-		v, _ := strconv.ParseInt(fields[1], 10, 64)
-		switch fields[0] {
-		case "MemTotal:":
-			total = v << 10
-		case "MemAvailable:":
-			avail = v << 10
-		}
-	}
-	return avail, total, total > 0
+	return parseMeminfo(f)
+}
+
+func memAvailable() (avail, total int64, ok bool) {
+	m := meminfo()
+	return m["MemAvailable"], m["MemTotal"], m["MemTotal"] > 0
+}
+
+// swapFree is the host's swap; total is 0 when there is none. Containers never get any
+// (MemorySwap equals the limit), so whatever is in use was pushed out of the host's own processes
+// and of memory clowdr did not promise.
+func swapFree() (free, total int64, ok bool) {
+	m := meminfo()
+	return m["SwapFree"], m["SwapTotal"], m != nil
 }

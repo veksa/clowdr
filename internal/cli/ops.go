@@ -104,8 +104,7 @@ func (a *app) topCmd() *cobra.Command {
 				}
 				h := top.Host
 				if h.MemTotal > 0 {
-					fmt.Fprintf(a.out, "server: memory %s free of %s, disk %s free of %s   %s\n\n",
-						human(h.MemAvail), human(h.MemTotal), human(h.DiskFree), human(h.DiskTotal), time.Now().Format(time.TimeOnly))
+					fmt.Fprintf(a.out, "server: %s   %s\n\n", hostLine(h), time.Now().Format(time.TimeOnly))
 				}
 				sort.Slice(top.Services, func(i, j int) bool { return top.Services[i].Name < top.Services[j].Name })
 				w := a.table("SERVICE", "CONTAINER", "STATE", "CPU", "MEM", "LIMIT", "RESTARTS")
