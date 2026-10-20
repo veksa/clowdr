@@ -264,10 +264,28 @@ services:
 	contains(t, h.fails("deploy", "web", "--tag", "v9", "--no-build"), "not built locally")
 	contains(t, h.fails("deploy", "web", "api", "--image", "example/web:1"), "exactly one service")
 
-	// gc --local removes old local images of the project.
+	// A deploy keeps the deployed image and the one before it, as the server does.
 	h.ok("deploy", "web", "--tag", "v2")
+	contains(t, h.ok("deploy", "web", "--tag", "v3"), "web: removed 1 old local images")
+	if out := h.ok("deploy", "web", "--tag", "v2", "--no-build"); strings.Contains(out, "removed") {
+		t.Fatalf("redeploying the previous tag removed something:\n%s", out)
+	}
+	images := func() string { b, _ := os.ReadFile(filepath.Join(calls, "images")); return string(b) }
+	if got := images(); strings.Contains(got, ":v1") || !strings.Contains(got, ":v2") || !strings.Contains(got, ":v3") {
+		t.Fatalf("local images after deploys:\n%s", got)
+	}
+	contains(t, dockerCalls(t, calls), "builder prune -f --keep-storage 20GB")
+
+	// --no-gc leaves them; gc --local then trims to the two newest.
+	h.ok("deploy", "web", "--tag", "v4", "--no-gc")
+	h.ok("deploy", "web", "--tag", "v5", "--no-gc")
+	if got := images(); !strings.Contains(got, ":v2") || !strings.Contains(got, ":v5") {
+		t.Fatalf("--no-gc removed images:\n%s", got)
+	}
 	h.ok("gc", "--local")
-	contains(t, dockerCalls(t, calls), "image ls")
+	if got := images(); strings.Contains(got, ":v3") || !strings.Contains(got, ":v4") || !strings.Contains(got, ":v5") {
+		t.Fatalf("local images after gc --local:\n%s", got)
+	}
 }
 
 func TestExecAndAccess(t *testing.T) {

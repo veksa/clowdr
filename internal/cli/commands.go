@@ -28,14 +28,17 @@ import (
 )
 
 func (a *app) deployCmd() *cobra.Command {
-	var noBuild bool
-	var image, tag string
+	var noBuild, noGC bool
+	var image, tag, keepCache string
 	cmd := &cobra.Command{
 		Use:   "deploy [service...]",
 		Short: "Build locally, push new layers, switch traffic after health checks",
 		Long: `Build each service locally (build command + docker build), push only the new layers to the
 server's registry and deploy: the new version starts next to the old one, traffic switches
-when it is healthy, the old one is drained. Without arguments deploys every service in order.`,
+when it is healthy, the old one is drained. Without arguments deploys every service in order.
+
+After a service is live its older local images are removed, keeping the deployed one and the
+one before it (the server keeps the same two), and the build cache is trimmed to --keep-cache.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			d, err := a.needDeploy()
 			if err != nil {
@@ -57,9 +60,28 @@ when it is healthy, the old one is drained. Without arguments deploys every serv
 					return err
 				}
 			}
+			built := false
 			for _, name := range names {
-				if err := a.deployOne(cmd.Context(), d, t, name, noBuild, image, tag); err != nil {
+				ref, err := a.deployOne(cmd.Context(), d, t, name, noBuild, image, tag)
+				if err != nil {
 					return err
+				}
+				if ref == "" || noGC {
+					continue
+				}
+				built = true
+				// The tag is always there, so the last colon is its, not a registry port's.
+				refs, err := pruneLocalImages(cmd.Context(), ref[:strings.LastIndex(ref, ":")], ref)
+				if err != nil {
+					fmt.Fprintf(a.err, "! %s: local images not cleaned: %v\n", name, err)
+				} else if len(refs) > 0 {
+					fmt.Fprintf(a.err, "→ %s: removed %d old local images\n", name, len(refs))
+				}
+			}
+			// Once per run, not per service: with the cache under the limit it is a no-op.
+			if built && keepCache != "" {
+				if out, err := exec.CommandContext(cmd.Context(), "docker", "builder", "prune", "-f", "--keep-storage", keepCache).CombinedOutput(); err != nil {
+					fmt.Fprintf(a.err, "! build cache not trimmed: %v %s\n", err, strings.TrimSpace(string(out)))
 				}
 			}
 			return nil
@@ -68,14 +90,18 @@ when it is healthy, the old one is drained. Without arguments deploys every serv
 	cmd.Flags().BoolVar(&noBuild, "no-build", false, "push an image that was already built locally")
 	cmd.Flags().StringVar(&image, "image", "", "deploy this image reference (pulled by the server)")
 	cmd.Flags().StringVar(&tag, "tag", "", "image tag (default: git commit)")
+	cmd.Flags().BoolVar(&noGC, "no-gc", false, "keep older local images and the build cache as they are")
+	cmd.Flags().StringVar(&keepCache, "keep-cache", "20GB", "build cache to keep after deploying (empty: do not touch)")
 	return cmd
 }
 
-func (a *app) deployOne(ctx context.Context, d *config.Deploy, t *target, name string, noBuild bool, image, tag string) error {
+// deployOne returns the local image it built or pushed, empty when the server pulls one itself.
+func (a *app) deployOne(ctx context.Context, d *config.Deploy, t *target, name string, noBuild bool, image, tag string) (string, error) {
 	sp, err := d.Spec(name, a.env)
 	if err != nil {
-		return err
+		return "", err
 	}
+	var ref string
 	s := d.Services[name]
 	dir := filepath.Join(d.Dir, filepath.FromSlash(s.Path))
 	req := api.DeployRequest{Spec: sp, Author: gitAuthor()}
@@ -89,27 +115,27 @@ func (a *app) deployOne(ctx context.Context, d *config.Deploy, t *target, name s
 		if tag == "" {
 			tag = versionTag(dir)
 		}
-		ref := fmt.Sprintf("%s/%s/%s:%s", t.client.Host(), t.project, name, tag)
+		ref = fmt.Sprintf("%s/%s/%s:%s", t.client.Host(), t.project, name, tag)
 		if noBuild {
 			if err := exec.CommandContext(ctx, "docker", "image", "inspect", ref).Run(); err != nil {
-				return fmt.Errorf("--no-build: image %s is not built locally", ref)
+				return "", fmt.Errorf("--no-build: image %s is not built locally", ref)
 			}
 		} else if err := a.buildImage(ctx, d, name, ref); err != nil {
-			return err
+			return "", err
 		}
 		fmt.Fprintf(a.err, "→ %s: push %s\n", name, ref)
 		if err := pushImage(ctx, ref, t.client.Host(), t.project, t.client.Token); err != nil {
-			return fmt.Errorf("push %s: %w", name, err)
+			return "", fmt.Errorf("push %s: %w", name, err)
 		}
 		req.Tag, req.Version = tag, tag
 	}
 	fmt.Fprintf(a.err, "→ %s: deploy to %s (%s)\n", name, t.client.Server, a.env)
 	ev, err := t.client.Stream(ctx, "POST", api.Path("projects", t.project, "services", name, "deploy"), req, a.progress)
 	if err != nil {
-		return fmt.Errorf("%s: %w", name, err)
+		return "", fmt.Errorf("%s: %w", name, err)
 	}
 	fmt.Fprintf(a.err, "✓ %s r%d live in %s\n", name, ev.Release.ID, time.Since(start).Round(100*time.Millisecond))
-	return nil
+	return ref, nil
 }
 
 func (a *app) applyCmd() *cobra.Command {

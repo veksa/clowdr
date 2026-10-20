@@ -37,19 +37,34 @@ func fakeDocker(dir string, args []string) int {
 		b, _ := os.ReadFile(images)
 		return strings.Fields(string(b))
 	}
+	save := func(refs []string) {
+		os.WriteFile(images, []byte(strings.Join(refs, "\n")+"\n"), 0o644)
+	}
 	switch {
 	case len(args) > 0 && args[0] == "build":
-		i := slices.Index(args, "-t")
-		f, _ := os.OpenFile(images, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		fmt.Fprintln(f, args[i+1])
-		f.Close()
+		// Kept oldest first; a rebuilt tag becomes the newest.
+		ref := args[slices.Index(args, "-t")+1]
+		save(append(slices.DeleteFunc(known(), func(r string) bool { return r == ref }), ref))
 	case len(args) > 2 && args[0] == "image" && args[1] == "inspect":
 		if !slices.Contains(known(), args[2]) {
 			fmt.Fprintln(os.Stderr, "No such image:", args[2])
 			return 1
 		}
 	case len(args) > 1 && args[0] == "image" && args[1] == "ls":
-		fmt.Println(strings.Join(known(), "\n"))
+		// Like docker: newest first, narrowed by --filter reference=<repo>.
+		repo := ""
+		if i := slices.Index(args, "--filter"); i >= 0 {
+			repo = strings.TrimPrefix(args[i+1], "reference=")
+		}
+		refs := known()
+		slices.Reverse(refs)
+		for _, r := range refs {
+			if repo == "" || strings.HasPrefix(r, repo+":") {
+				fmt.Println(r)
+			}
+		}
+	case len(args) > 2 && args[0] == "image" && args[1] == "rm":
+		save(slices.DeleteFunc(known(), func(r string) bool { return r == args[2] }))
 	case len(args) > 1 && args[0] == "push":
 		if err := fakePush(args[1]); err != nil {
 			fmt.Fprintln(os.Stderr, err)

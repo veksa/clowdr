@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"sort"
@@ -274,22 +275,14 @@ func (a *app) gcCmd() *cobra.Command {
 			}
 			removed := 0
 			for _, name := range d.ServiceNames() {
-				repo := fmt.Sprintf("%s/%s/%s", t.client.Host(), t.project, name)
-				out, err := exec.CommandContext(cmd.Context(), "docker", "image", "ls", "--filter", "reference="+repo, "--format", "{{.Repository}}:{{.Tag}}").Output()
+				refs, err := pruneLocalImages(cmd.Context(), fmt.Sprintf("%s/%s/%s", t.client.Host(), t.project, name), "")
 				if err != nil {
 					return err
 				}
-				// docker lists newest first: keep current and previous.
-				refs := strings.Fields(string(out))
-				for i, ref := range refs {
-					if i < 2 || strings.HasSuffix(ref, ":<none>") {
-						continue
-					}
-					if exec.CommandContext(cmd.Context(), "docker", "image", "rm", ref).Run() == nil {
-						removed++
-						fmt.Fprintln(a.out, "  removed "+ref)
-					}
+				for _, ref := range refs {
+					fmt.Fprintln(a.out, "  removed "+ref)
 				}
+				removed += len(refs)
 			}
 			fmt.Fprintf(a.out, "removed %d local images\n", removed)
 			if keepCache != "" {
@@ -301,4 +294,34 @@ func (a *app) gcCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&local, "local", false, "clean this machine instead of the server")
 	cmd.Flags().StringVar(&keepCache, "keep-cache", "5GB", "with --local: build cache to keep (empty: do not touch)")
 	return cmd
+}
+
+// pruneLocalImages removes this machine's tags of repo except two: keep (when set) and the
+// newest others, as the server keeps current and previous. Every deploy leaves a whole image
+// behind, so without this a machine that deploys gains a few hundred MB per service per deploy.
+func pruneLocalImages(ctx context.Context, repo, keep string) ([]string, error) {
+	out, err := exec.CommandContext(ctx, "docker", "image", "ls", "--filter", "reference="+repo, "--format", "{{.Repository}}:{{.Tag}}").Output()
+	if err != nil {
+		return nil, err
+	}
+	kept := 0
+	if keep != "" {
+		kept = 1
+	}
+	var removed []string
+	// docker lists newest first.
+	for _, ref := range strings.Fields(string(out)) {
+		if ref == keep || strings.HasSuffix(ref, ":<none>") {
+			continue
+		}
+		if kept < 2 {
+			kept++
+			continue
+		}
+		// A tag still used by a container stays; that is not worth failing over.
+		if exec.CommandContext(ctx, "docker", "image", "rm", ref).Run() == nil {
+			removed = append(removed, ref)
+		}
+	}
+	return removed, nil
 }

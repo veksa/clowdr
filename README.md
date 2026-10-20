@@ -83,6 +83,11 @@ server only receives the new layers. `clowctl deploy` refuses a docker context o
 that points at another machine (`ssh://`, a remote `tcp://`). On Windows, `build:` commands run
 with the `sh` of Git Bash.
 
+Both sides keep two images per service, the live one and the one before it: the server removes
+older ones after each deploy, and so does `clowctl deploy` on the machine that built them, which
+also trims the docker build cache to `--keep-cache` (20GB). `--no-gc` skips the local part;
+`clowctl gc --local` does it on demand.
+
 ### deploy.yml fields
 
 | Field | Meaning |
