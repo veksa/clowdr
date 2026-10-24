@@ -156,7 +156,15 @@ func TestProjectLifeCycle(t *testing.T) {
 		t.Fatal("MODE was not removed")
 	}
 
+	// A restart is recorded under the git author, as a deploy is, not the token's name.
+	t.Setenv("GIT_CONFIG_COUNT", "1")
+	t.Setenv("GIT_CONFIG_KEY_0", "user.email")
+	t.Setenv("GIT_CONFIG_VALUE_0", "dev@example.com")
 	h.ok("restart", "web")
+	rels = nil
+	if err := json.Unmarshal([]byte(h.ok("releases", "web", "-o", "json")), &rels); err != nil || len(rels) == 0 || rels[0]["author"] != "dev@example.com" {
+		t.Fatalf("restart release author: %+v %v", rels, err)
+	}
 	h.ok("stop", "web")
 	h.ok("start", "web")
 	h.ok("apply")

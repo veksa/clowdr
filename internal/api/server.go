@@ -567,8 +567,12 @@ func (s *Server) rollback(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) restart(w http.ResponseWriter, r *http.Request) {
+	var req RestartRequest
+	if r.ContentLength != 0 && !decode(w, r, &req) {
+		return
+	}
 	s.stream(w, r, func(ctx context.Context, p deploy.Progress) (*store.Release, error) {
-		rel, err := s.Engine.Restart(ctx, r.PathValue("project"), r.PathValue("service"), author(r, ""), p)
+		rel, err := s.Engine.Restart(ctx, r.PathValue("project"), r.PathValue("service"), author(r, req.Author), p)
 		return &rel, err
 	})
 }

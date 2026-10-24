@@ -24,6 +24,10 @@ type RollbackRequest struct {
 	Author string `json:"author,omitempty"`
 }
 
+type RestartRequest struct {
+	Author string `json:"author,omitempty"`
+}
+
 type ApplyRequest struct {
 	Services []spec.Service `json:"services"`
 	Author   string         `json:"author,omitempty"`

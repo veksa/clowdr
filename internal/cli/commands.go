@@ -483,7 +483,7 @@ func (a *app) restartCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			_, err = t.client.Stream(cmd.Context(), "POST", api.Path("projects", t.project, "services", args[0], "restart"), nil, a.progress)
+			_, err = t.client.Stream(cmd.Context(), "POST", api.Path("projects", t.project, "services", args[0], "restart"), api.RestartRequest{Author: gitAuthor()}, a.progress)
 			return err
 		},
 	}
