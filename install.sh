@@ -84,8 +84,9 @@ cat >/etc/systemd/system/clowdrd.service <<'EOF'
 Description=clowdr deploy daemon
 Documentation=https://github.com/veksa/clowdr
 After=docker.service network-online.target
-Requires=docker.service
-Wants=network-online.target
+# Not Requires: a docker stop (package upgrade, colima boot) would stop clowdrd for good, as
+# Restart= does not apply to stops systemd itself makes. clowdrd reconnects to docker.
+Wants=docker.service network-online.target
 
 [Service]
 ExecStart=/usr/local/bin/clowdrd

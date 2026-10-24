@@ -220,9 +220,28 @@ func (s *ContainerdStore) PutManifest(ctx context.Context, repo, tag string, des
 	}
 	ci := containerd.NewImageWithPlatform(s.Client, img, platforms.Default())
 	if err := ci.Unpack(lctx, s.Snapshotter); err != nil {
+		if built := imagePlatforms(lctx, cs, od); errdefs.IsNotFound(err) && built != "" {
+			// Typically an image built on an arm64 Mac for an amd64 server.
+			return fmt.Errorf("%s:%s is built for %s, this server runs %s: set platform: in deploy.yml", repo, tag, built, platforms.DefaultString())
+		}
 		return fmt.Errorf("unpack %s: %w", img.Name, err)
 	}
 	return nil
+}
+
+// imagePlatforms lists the platforms an image or index is built for, without attestations.
+func imagePlatforms(ctx context.Context, cs content.Store, desc ocispec.Descriptor) string {
+	ps, err := images.Platforms(ctx, cs, desc)
+	if err != nil {
+		return ""
+	}
+	var names []string
+	for _, p := range ps {
+		if p.OS != "unknown" {
+			names = append(names, platforms.Format(p))
+		}
+	}
+	return strings.Join(names, ", ")
 }
 
 func (s *ContainerdStore) Resolve(ctx context.Context, repo, tag string) (Descriptor, error) {
