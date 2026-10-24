@@ -264,6 +264,12 @@ services:
 	contains(t, h.fails("deploy", "web", "--tag", "v9", "--no-build"), "not built locally")
 	contains(t, h.fails("deploy", "web", "api", "--image", "example/web:1"), "exactly one service")
 
+	// The legacy builder would ignore --platform: no build without buildx, a built image deploys.
+	t.Setenv("FAKE_DOCKER_NO_BUILDX", "1")
+	contains(t, h.fails("deploy", "web", "--tag", "v1"), "docker buildx is missing")
+	h.ok("deploy", "web", "--tag", "v1", "--no-build")
+	t.Setenv("FAKE_DOCKER_NO_BUILDX", "")
+
 	// A deploy keeps the deployed image and the one before it, as the server does.
 	h.ok("deploy", "web", "--tag", "v2")
 	contains(t, h.ok("deploy", "web", "--tag", "v3"), "web: removed 1 old local images")
@@ -319,6 +325,7 @@ func TestContextPinsSelfSignedCertificate(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
+	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock") // never a developer's colima VM
 
 	// Without a pin the self-signed certificate is rejected.
 	h.fails("context", "add", "tls", srv.URL, "--token", srv.AdminToken)

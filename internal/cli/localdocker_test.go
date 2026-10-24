@@ -24,6 +24,23 @@ func TestLocalDockerEndpoint(t *testing.T) {
 	}
 }
 
+func TestColimaProfile(t *testing.T) {
+	for endpoint, want := range map[string]string{
+		"unix:///Users/me/.colima/default/docker.sock":    "default",
+		"unix:///Users/me/.colima/shop/docker.sock":       "shop",
+		"unix:///Users/me/.colima/docker.sock":            "default",
+		"unix:///Users/me/.config/colima/dev/docker.sock": "dev",
+		"unix:///var/run/docker.sock":                     "",
+		"unix:///Users/me/.orbstack/run/docker.sock":      "",
+		"tcp://127.0.0.1:2375":                            "",
+		"":                                                "",
+	} {
+		if got, ok := colimaProfile(endpoint); got != want || ok != (want != "") {
+			t.Errorf("colimaProfile(%q) = %q, %v, want %q", endpoint, got, ok, want)
+		}
+	}
+}
+
 func TestRequireLocalDocker(t *testing.T) {
 	t.Setenv("DOCKER_HOST", "ssh://root@example.com")
 	if err := requireLocalDocker(t.Context()); err == nil {

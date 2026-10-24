@@ -78,8 +78,9 @@ clowctl logs api -f -e prod
 clowctl rollback api -e prod
 ```
 
-Images are always built by a local docker engine (Docker Desktop on Windows and macOS); the
-server only receives the new layers. `clowctl deploy` refuses a docker context or `DOCKER_HOST`
+Images are always built by a local docker engine (Docker Desktop on Windows and macOS, or
+colima); the server only receives the new layers. Builds need buildx, which honors `--platform`:
+Docker Desktop ships it, with Homebrew's docker it is `brew install docker-buildx`. `clowctl deploy` refuses a docker context or `DOCKER_HOST`
 that points at another machine (`ssh://`, a remote `tcp://`). On Windows, `build:` commands run
 with the `sh` of Git Bash.
 

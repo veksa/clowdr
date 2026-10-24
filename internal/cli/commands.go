@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/pem"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	goruntime "runtime"
 	"slices"
@@ -58,6 +60,11 @@ one before it (the server keeps the same two), and the build cache is trimmed to
 			if image == "" && slices.ContainsFunc(names, func(n string) bool { return usesDocker(d.Services[n]) }) {
 				if err := requireLocalDocker(cmd.Context()); err != nil {
 					return err
+				}
+				if !noBuild {
+					if err := requireBuildx(cmd.Context()); err != nil {
+						return err
+					}
 				}
 			}
 			built := false
@@ -622,7 +629,7 @@ func (a *app) contextCmd() *cobra.Command {
 				return fmt.Errorf("cannot reach %s: %w", server, err)
 			}
 			if c.Fingerprint != "" {
-				if err := trustForDocker(server, c.Fingerprint, a.err); err != nil {
+				if err := trustForDocker(cmd.Context(), server, c.Fingerprint, a.err); err != nil {
 					fmt.Fprintf(a.err, "warning: %v\n", err)
 				}
 			}
@@ -694,9 +701,9 @@ func fetchFingerprint(server string) (string, error) {
 }
 
 // trustForDocker installs the server's self-signed certificate for docker push:
-// ~/.docker/certs.d (Docker Desktop, OrbStack) or /etc/docker/certs.d (Linux engine). The
-// certificate must match the pinned fingerprint.
-func trustForDocker(server, fingerprint string, log io.Writer) error {
+// ~/.docker/certs.d (Docker Desktop, OrbStack), /etc/docker/certs.d (Linux engine) or that of
+// a running colima VM. The certificate must match the pinned fingerprint.
+func trustForDocker(ctx context.Context, server, fingerprint string, log io.Writer) error {
 	u, _ := url.Parse(server)
 	conn, err := tls.Dial("tcp", u.Host, &tls.Config{InsecureSkipVerify: true})
 	if err != nil {
@@ -728,6 +735,18 @@ func trustForDocker(server, fingerprint string, log io.Writer) error {
 		}
 		fmt.Fprintf(log, "docker trusts %s via %s\n", u.Host, filepath.Join(d, "ca.crt"))
 	}
+	// colima copies ~/.docker/certs.d into its VM only on start; until then its dockerd, which
+	// reads /etc/docker/certs.d in the VM, fails the push with x509.
+	if profile, ok := colimaProfile(dockerEndpoint(ctx)); ok {
+		target := "/etc/docker/certs.d/" + dir
+		cmd := exec.CommandContext(ctx, "colima", "ssh", "-p", profile, "--", "sudo", "sh", "-c", "mkdir -p '"+target+"' && cat > '"+target+"/ca.crt'")
+		cmd.Stdin = bytes.NewReader(pemBytes)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			lastErr = fmt.Errorf("colima %s: %v %s; run: colima restart %s", profile, err, strings.TrimSpace(string(out)), profile)
+		} else {
+			fmt.Fprintf(log, "docker trusts %s via colima %s:%s/ca.crt\n", u.Host, profile, target)
+		}
+	}
 	switch {
 	case lastErr != nil && goruntime.GOOS == "linux":
 		return fmt.Errorf("%v; run: sudo mkdir -p /etc/docker/certs.d/%s && sudo cp ~/.docker/certs.d/%s/ca.crt /etc/docker/certs.d/%s/", lastErr, dir, dir, dir)
@@ -737,6 +756,24 @@ func trustForDocker(server, fingerprint string, log io.Writer) error {
 		fmt.Fprintf(log, "if docker push still fails with an x509 error, trust it in Windows: certutil -user -addstore Root %s\n", filepath.Join(dirs[0], "ca.crt"))
 	}
 	return nil
+}
+
+// colimaProfile reports the colima profile whose docker socket endpoint is:
+// ~/.colima/<profile>/docker.sock, ~/.colima/docker.sock for the default one, or the same
+// under $XDG_CONFIG_HOME/colima.
+func colimaProfile(endpoint string) (string, bool) {
+	p, ok := strings.CutPrefix(endpoint, "unix://")
+	if !ok || path.Base(p) != "docker.sock" {
+		return "", false
+	}
+	dir := path.Dir(p)
+	switch parent := path.Base(path.Dir(dir)); {
+	case path.Base(dir) == ".colima" || path.Base(dir) == "colima":
+		return "default", true
+	case parent == ".colima" || parent == "colima":
+		return path.Base(dir), true
+	}
+	return "", false
 }
 
 // certsDirName is the certs.d directory docker looks up for a registry host: host:port, or

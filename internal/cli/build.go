@@ -118,7 +118,8 @@ func (a *app) buildImage(ctx context.Context, d *config.Deploy, name, ref string
 	}
 	args = append(args, dir)
 	fmt.Fprintf(a.err, "→ %s: docker %s\n", name, strings.Join(args, " "))
-	if err := run(ctx, nil, "docker", args...); err != nil {
+	// BuildKit even with DOCKER_BUILDKIT=0 set: only it honors --platform (see requireBuildx).
+	if err := run(ctx, []string{"DOCKER_BUILDKIT=1"}, "docker", args...); err != nil {
 		return fmt.Errorf("docker build %s: %w", name, err)
 	}
 	return nil
@@ -172,6 +173,24 @@ func requireLocalDocker(ctx context.Context) error {
 		return fmt.Errorf("docker points at %s: clowctl builds images with a local docker engine only (docker context use default)", endpoint)
 	}
 	return nil
+}
+
+// requireBuildx refuses the legacy builder: it ignores --platform and builds for the engine's
+// own architecture, so a Mac with Apple Silicon would push arm64 images that an amd64 server
+// cannot run. Docker Desktop ships buildx; Homebrew's docker (colima, lima) does not.
+func requireBuildx(ctx context.Context) error {
+	if exec.CommandContext(ctx, "docker", "buildx", "version").Run() == nil {
+		return nil
+	}
+	hint := "install the buildx plugin: https://docs.docker.com/go/buildx/"
+	if goruntime.GOOS == "darwin" {
+		prefix := "/opt/homebrew"
+		if goruntime.GOARCH == "amd64" {
+			prefix = "/usr/local"
+		}
+		hint = `brew install docker-buildx, then add "cliPluginsExtraDirs": ["` + prefix + `/lib/docker/cli-plugins"] to ~/.docker/config.json`
+	}
+	return fmt.Errorf("docker buildx is missing, and without it docker build ignores --platform: %s", hint)
 }
 
 func localDockerEndpoint(endpoint string) bool {

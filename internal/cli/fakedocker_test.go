@@ -41,6 +41,9 @@ func fakeDocker(dir string, args []string) int {
 		os.WriteFile(images, []byte(strings.Join(refs, "\n")+"\n"), 0o644)
 	}
 	switch {
+	case len(args) > 0 && args[0] == "buildx" && os.Getenv("FAKE_DOCKER_NO_BUILDX") != "":
+		fmt.Fprintln(os.Stderr, "docker: unknown command: docker buildx")
+		return 1
 	case len(args) > 0 && args[0] == "build":
 		// Kept oldest first; a rebuilt tag becomes the newest.
 		ref := args[slices.Index(args, "-t")+1]
