@@ -888,7 +888,7 @@ func (a *app) tokenCmd() *cobra.Command {
 		},
 	}
 	create.Flags().StringVar(&project, "project", "", "project the token is limited to")
-	create.Flags().StringVar(&env, "env", "", "env label")
+	create.Flags().StringVar(&env, "env", "", "label shown in token ls (it does not limit the token: use one server or project per env)")
 	create.Flags().StringVar(&name, "name", "", "description, e.g. ci")
 	create.Flags().BoolVar(&admin, "admin", false, "admin token (all projects, platform)")
 	cmd.AddCommand(create, &cobra.Command{
