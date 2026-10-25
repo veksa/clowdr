@@ -29,6 +29,9 @@ done
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
+case "$DOMAIN" in
+*[!a-z0-9.-]* | .* | *. | *..*) die "invalid domain $DOMAIN (lowercase, like example.com)" ;;
+esac
 [ "$(id -u)" = 0 ] || die "run as root (sudo sh)"
 [ "$(uname -s)" = Linux ] || die "the server runs on Linux"
 
