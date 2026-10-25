@@ -43,15 +43,15 @@ func withIptables(t *testing.T, f *fakeIptables) {
 func TestEnsureMetadataBlocked(t *testing.T) {
 	f := &fakeIptables{}
 	withIptables(t, f)
-	if !ensureMetadataBlocked(context.Background(), quiet) || len(f.rules) != 1 || !strings.Contains(f.rules[0], "169.254.169.254/32") {
+	if ensureMetadataBlocked(context.Background()) != nil || len(f.rules) != 1 || !strings.Contains(f.rules[0], "169.254.169.254/32") {
 		t.Fatalf("rule not added: %q", f.rules)
 	}
-	ensureMetadataBlocked(context.Background(), quiet)
+	ensureMetadataBlocked(context.Background())
 	if len(f.rules) != 1 {
 		t.Fatalf("rule added twice: %q", f.rules)
 	}
 	f.rules = nil // docker recreated the chain
-	ensureMetadataBlocked(context.Background(), quiet)
+	ensureMetadataBlocked(context.Background())
 	if len(f.rules) != 1 {
 		t.Fatalf("rule not restored: %q", f.rules)
 	}
@@ -60,10 +60,10 @@ func TestEnsureMetadataBlocked(t *testing.T) {
 func TestEnsureMetadataBlockedWithoutIptables(t *testing.T) {
 	f := &fakeIptables{fail: true}
 	withIptables(t, f)
-	if ensureMetadataBlocked(context.Background(), quiet) {
+	if ensureMetadataBlocked(context.Background()) == nil {
 		t.Fatal("reported success without iptables")
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	keepMetadataBlocked(ctx, quiet) // returns at once instead of retrying every few seconds
+	keepMetadataBlocked(ctx, quiet) // returns once ctx is done
 }

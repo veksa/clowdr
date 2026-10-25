@@ -38,23 +38,30 @@ func ensureMetadataBlocked6(ctx context.Context) {
 // ensureMetadataBlocked adds the rule unless it is there. Docker recreates DOCKER-USER empty
 // after a host reboot, a firewall reload or a docker restart, so it runs at start and then every
 // few seconds: containers started right after a docker restart must not get a window.
-func ensureMetadataBlocked(ctx context.Context, log *slog.Logger) bool {
+func ensureMetadataBlocked(ctx context.Context) error {
 	if iptables(ctx, append([]string{"-C"}, metadataRule...)...) == nil {
-		return true
+		return nil
 	}
-	if err := iptables(ctx, append([]string{"-I"}, metadataRule...)...); err != nil {
-		log.Warn("firewall: could not block cloud metadata for containers", "err", err)
-		return false
-	}
-	log.Info("firewall: containers cannot reach cloud metadata (169.254.169.254)")
-	return true
+	return iptables(ctx, append([]string{"-I"}, metadataRule...)...)
 }
 
+// keepMetadataBlocked never gives up: DOCKER-USER may appear only once docker is up, and iptables
+// may fail for a moment during a firewall reload. It logs when the block comes and goes.
 func keepMetadataBlocked(ctx context.Context, log *slog.Logger) {
-	if !ensureMetadataBlocked(ctx, log) {
-		return // no iptables or no DOCKER-USER chain: warned once, nothing to keep
+	var blocked, warned bool
+	check := func() {
+		err := ensureMetadataBlocked(ctx)
+		switch {
+		case err == nil && !blocked:
+			log.Info("firewall: containers cannot reach cloud metadata (169.254.169.254)")
+		case err != nil && (blocked || !warned):
+			log.Warn("firewall: could not block cloud metadata for containers, retrying", "err", err)
+			warned = true
+		}
+		blocked = err == nil
+		ensureMetadataBlocked6(ctx)
 	}
-	ensureMetadataBlocked6(ctx)
+	check()
 	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for {
@@ -62,8 +69,7 @@ func keepMetadataBlocked(ctx context.Context, log *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			ensureMetadataBlocked(ctx, log)
-			ensureMetadataBlocked6(ctx)
+			check()
 		}
 	}
 }
