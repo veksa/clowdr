@@ -196,16 +196,18 @@ func (e *Engine) EnsureAddon(ctx context.Context, project, addon string, progres
 		cmd = []string{"redis-server", "--maxmemory", fmt.Sprint(int64(a.Memory) * 8 / 10), "--maxmemory-policy", "allkeys-lru"}
 	}
 	id, err := e.Docker.ContainerCreate(ctx, runtime.ContainerConfig{
-		Name:    name,
-		Image:   a.Image,
-		Cmd:     cmd,
-		Labels:  labels,
-		Memory:  int64(a.Memory),
-		Restart: "unless-stopped",
-		Network: NetworkName(project),
-		Aliases: []string{addon},
-		Mounts:  mounts,
-		Log:     &runtime.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "5m", "max-file": "2"}},
+		Name:     name,
+		Image:    a.Image,
+		Cmd:      cmd,
+		Labels:   labels,
+		Memory:   int64(a.Memory),
+		Restart:  "unless-stopped",
+		Network:  NetworkName(project),
+		Aliases:  []string{addon},
+		Mounts:   mounts,
+		Log:      &runtime.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "5m", "max-file": "2"}},
+		Pids:     e.Platform().Limits.Pids,
+		Hardened: true,
 	})
 	if err != nil {
 		return err

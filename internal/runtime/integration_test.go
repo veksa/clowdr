@@ -97,17 +97,20 @@ func TestDockerEngine(t *testing.T) {
 	events, _ := d.Events(ctx, []string{"die"}, "clowdr.test="+id)
 
 	cid, err := d.ContainerCreate(ctx, ContainerConfig{
-		Name:    id,
-		Image:   testImage,
-		Cmd:     []string{"sh", "-c", `echo started; echo oops >&2; echo data > /data/f; exec httpd -f -p 8080`},
-		Env:     []string{"MODE=test"},
-		Labels:  labels,
-		Memory:  32 << 20,
-		Restart: "no",
-		Network: id,
-		Aliases: []string{"web"},
-		Mounts:  []Mount{{Type: "volume", Source: id, Target: "/data"}},
-		Tmpfs:   map[string]string{"/tmp": "size=1m"},
+		Name:     id,
+		Image:    testImage,
+		Cmd:      []string{"sh", "-c", `echo started; echo oops >&2; echo data > /data/f; exec httpd -f -p 8080`},
+		Env:      []string{"MODE=test"},
+		Labels:   labels,
+		Memory:   32 << 20,
+		Restart:  "no",
+		Network:  id,
+		Aliases:  []string{"web"},
+		Mounts:   []Mount{{Type: "volume", Source: id, Target: "/data"}},
+		Tmpfs:    map[string]string{"/tmp": "size=1m"},
+		Pids:     64,
+		NanoCPUs: 5e8,
+		Hardened: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -131,6 +134,9 @@ func TestDockerEngine(t *testing.T) {
 	out, code, err := d.Exec(ctx, cid, []string{"sh", "-c", "echo $MODE; cat /data/f"})
 	if err != nil || code != 0 || out != "test\ndata\n" {
 		t.Fatalf("exec: %q %d %v", out, code, err)
+	}
+	if out, _, err := d.Exec(ctx, cid, []string{"cat", "/sys/fs/cgroup/pids.max"}); err != nil || strings.TrimSpace(out) != "64" {
+		t.Fatalf("pids.max: %q %v", out, err)
 	}
 	if _, code, err := d.Exec(ctx, cid, []string{"sh", "-c", "exit 3"}); err != nil || code != 3 {
 		t.Fatalf("exec exit code: %d %v", code, err)

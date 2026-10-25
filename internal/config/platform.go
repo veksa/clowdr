@@ -76,6 +76,9 @@ type LimitsConf struct {
 	// whether a second instance fits.
 	ReserveMemory Bytes `yaml:"reserve_memory"`
 	DiskFreeAlert int   `yaml:"disk_free_alert"` // percent
+	// Pids caps processes per container (fork bombs); CPUs caps cores per container, 0 = no cap.
+	Pids int64   `yaml:"pids"`
+	CPUs float64 `yaml:"cpus"`
 }
 
 // DefaultPlatform is written to /etc/clowdr/platform.yml on first start.
@@ -109,6 +112,8 @@ logs:
 limits:
   reserve_memory: 150m
   disk_free_alert: 15
+  pids: 1024           # processes per container
+  # cpus: 1            # cores per container (default: no cap)
 
 # notify:
 #   telegram: { token: "...", chat_id: "..." }
@@ -149,6 +154,9 @@ func (p *Platform) defaults() {
 	}
 	if p.Nginx.WorkerShutdownTimeout == 0 {
 		p.Nginx.WorkerShutdownTimeout = Duration(30e9)
+	}
+	if p.Limits.Pids == 0 {
+		p.Limits.Pids = 1024
 	}
 	if p.Limits.ReserveMemory == 0 {
 		p.Limits.ReserveMemory = 150 << 20

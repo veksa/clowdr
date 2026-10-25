@@ -96,7 +96,7 @@ also trims the docker build cache to `--keep-cache` (20GB). `--no-gc` skips the 
 | `path`, `build`, `dockerfile`, `build_args` | local build: `build` runs with `sh -c` in `path` (`${ENV}` is replaced; on Windows the sh of Git for Windows), then `docker build` with `path` as context |
 | `image` | prebuilt image pulled by the server instead of building |
 | `port`, `health` | container port; `health: /health` or `{path, interval, timeout, successes}` gates the switch |
-| `memory`, `replicas` | container memory limit; number of copies behind one upstream |
+| `memory`, `replicas` | container memory limit (required when the project has a quota); number of copies behind one upstream. Every container also gets `limits.pids` (1024) and `limits.cpus` from platform.yml, `no-new-privileges` and no `NET_RAW` |
 | `drain`, `stop_grace`, `switch` | how long old copies keep serving; SIGTERM grace; `stop-first` for services that must not run twice |
 | `domains` | per env: `{prod: [api.example.com]}`; must be allowed for the project on the server |
 | `routes` | `{path, service, timeout, buffering, max_body}`; `service` routes a path to another service |

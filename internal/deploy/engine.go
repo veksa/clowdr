@@ -176,6 +176,10 @@ func (e *Engine) CheckSpec(project string, s spec.Service) error {
 			return fmt.Errorf("domain %s is not allowed for project %s (allowed: %s)", d, project, strings.Join(p.Domains, ", "))
 		}
 	}
+	// memory 0 is no limit: with a quota it would let the project take the whole host.
+	if p.Memory > 0 && s.Memory <= 0 && s.Replicas > 0 {
+		return fmt.Errorf("service %s: memory is required, project %s has a %s quota", s.Name, project, config.FormatBytes(p.Memory))
+	}
 	if s.NginxExtra != "" || hasRouteExtra(s) {
 		if !p.NginxExtra {
 			return fmt.Errorf("nginx_extra is not enabled for project %s (host admin: project create --nginx-extra)", project)
@@ -627,16 +631,19 @@ func (e *Engine) startContainer(ctx context.Context, project string, s spec.Serv
 		mounts = append(mounts, runtime.Mount{Type: "volume", Source: VolumeName(project, v.Name), Target: v.Target, ReadOnly: v.RO})
 	}
 	id, err := e.Docker.ContainerCreate(ctx, runtime.ContainerConfig{
-		Name:    name,
-		Image:   image,
-		Env:     env,
-		Labels:  labels,
-		Memory:  s.Memory,
-		Restart: "unless-stopped",
-		Network: NetworkName(project),
-		Aliases: []string{s.Name},
-		Mounts:  mounts,
-		Log:     e.logConfig(project, s.Name, release, replica),
+		Name:     name,
+		Image:    image,
+		Env:      env,
+		Labels:   labels,
+		Memory:   s.Memory,
+		Restart:  "unless-stopped",
+		Network:  NetworkName(project),
+		Aliases:  []string{s.Name},
+		Mounts:   mounts,
+		Log:      e.logConfig(project, s.Name, release, replica),
+		Pids:     e.Platform().Limits.Pids,
+		NanoCPUs: int64(e.Platform().Limits.CPUs * 1e9),
+		Hardened: true,
 	})
 	if err != nil {
 		return "", err

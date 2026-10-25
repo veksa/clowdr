@@ -239,6 +239,11 @@ type ContainerConfig struct {
 	Log      *LogConfig
 	ReadOnly bool
 	Tmpfs    map[string]string
+	// Pids and NanoCPUs cap processes and CPU time, 0 = none. Hardened drops NET_RAW (ARP and
+	// raw-socket tricks against neighbours in the network) and sets no-new-privileges.
+	Pids     int64
+	NanoCPUs int64
+	Hardened bool
 }
 
 type Mount struct {
@@ -279,6 +284,16 @@ func (d *Docker) ContainerCreate(ctx context.Context, c ContainerConfig) (string
 	}
 	if len(c.Tmpfs) > 0 {
 		host["Tmpfs"] = c.Tmpfs
+	}
+	if c.Pids > 0 {
+		host["PidsLimit"] = c.Pids
+	}
+	if c.NanoCPUs > 0 {
+		host["NanoCpus"] = c.NanoCPUs
+	}
+	if c.Hardened {
+		host["CapDrop"] = []string{"NET_RAW"}
+		host["SecurityOpt"] = []string{"no-new-privileges"}
 	}
 	exposed := map[string]struct{}{}
 	if len(c.Ports) > 0 {

@@ -265,6 +265,17 @@ func TestQuotaAndStopFirst(t *testing.T) {
 	if _, err := f.deploy(t, "v3", big); !errors.Is(err, ErrQuota) {
 		t.Fatalf("quota: %v", err)
 	}
+	// memory 0 means no limit: it must not slip past the quota.
+	unlimited := serverSpec()
+	unlimited.Memory = 0
+	if _, err := f.deploy(t, "v4", unlimited); err == nil || !strings.Contains(err.Error(), "memory is required") {
+		t.Fatalf("memory 0 under a quota: %v", err)
+	}
+	// Containers are capped and hardened.
+	c := f.d.ByName["shop-server-r1-1"].Config
+	if c.Pids != 1024 || !c.Hardened {
+		t.Fatalf("container limits: pids %d hardened %v", c.Pids, c.Hardened)
+	}
 }
 
 func TestAddonAndStopStart(t *testing.T) {
