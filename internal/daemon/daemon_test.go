@@ -136,6 +136,25 @@ func TestSelfSignedCert(t *testing.T) {
 	if _, fp2, _ := selfSignedCert(dir); fp2 != fp1 {
 		t.Fatal("the pinned certificate changed on restart")
 	}
+	// Trusted as a root it verifies itself, but nothing it signs for another site.
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: roots, DNSName: "127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	signer, _ := c1.PrivateKey.(*ecdsa.PrivateKey)
+	fk, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ft := &x509.Certificate{SerialNumber: big.NewInt(2), DNSNames: []string{"example.com"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}
+	fder, err := x509.CreateCertificate(rand.Reader, ft, leaf, &fk.PublicKey, signer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged, _ := x509.ParseCertificate(fder)
+	if _, err := forged.Verify(x509.VerifyOptions{Roots: roots, DNSName: "example.com"}); err == nil {
+		t.Fatal("the self-signed CA vouches for example.com")
+	}
 
 	// Close to expiry it is replaced.
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)

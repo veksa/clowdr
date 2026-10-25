@@ -36,6 +36,19 @@ func selfSignedCert(dir string) (tls.Certificate, string, error) {
 	}
 	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 120))
 	host, _ := os.Hostname()
+	names := []string{"localhost"}
+	if host != "" {
+		names = append(names, host)
+	}
+	ips := hostIPs()
+	var ranges []*net.IPNet
+	for _, ip := range ips {
+		bits := 8 * len(ip)
+		if ip.To4() != nil {
+			ip, bits = ip.To4(), 32
+		}
+		ranges = append(ranges, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: "clowdr " + host},
@@ -45,8 +58,14 @@ func selfSignedCert(dir string) (tls.Certificate, string, error) {
 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  true,
-		DNSNames:              []string{"localhost", host},
-		IPAddresses:           hostIPs(),
+		// Trusted as a CA (certs.d, the Windows store), it could sign for any site; it may only
+		// vouch for this host's own names and addresses, and for no other CA.
+		MaxPathLenZero:              true,
+		PermittedDNSDomainsCritical: true,
+		PermittedDNSDomains:         names,
+		PermittedIPRanges:           ranges,
+		DNSNames:                    names,
+		IPAddresses:                 ips,
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
