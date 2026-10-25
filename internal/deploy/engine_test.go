@@ -278,6 +278,44 @@ func TestQuotaAndStopFirst(t *testing.T) {
 	}
 }
 
+func TestQuotaInFlightAndStart(t *testing.T) {
+	f := newFixture(t)
+	p, _ := f.st.Project("shop")
+	p.Memory = 150 << 20
+	f.st.PutProject(p)
+	ctx := context.Background()
+	// A deploy in flight holds its memory: a second service does not fit next to it.
+	if _, err := f.e.planMemory(ctx, "shop", serverSpec(), nil); err != nil {
+		t.Fatal(err)
+	}
+	other := serverSpec()
+	other.Name = "worker"
+	other.Domains = nil
+	if _, err := f.e.planMemory(ctx, "shop", other, nil); !errors.Is(err, ErrQuota) {
+		t.Fatalf("parallel deploy: %v", err)
+	}
+	other.Switch = spec.SwitchStopFirst
+	if _, err := f.e.planMemory(ctx, "shop", other, nil); !errors.Is(err, ErrQuota) {
+		t.Fatalf("stop-first deploy: %v", err)
+	}
+	f.e.unreserve("shop", "server")
+
+	// A stopped service frees its share, and cannot take it back once something else has.
+	if _, err := f.deploy(t, "v1", serverSpec()); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.Stop(ctx, "shop", "server"); err != nil {
+		t.Fatal(err)
+	}
+	other.Switch = ""
+	if _, err := f.deploy(t, "v1", other); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.e.Start(ctx, "shop", "server", func(string, ...any) {}); !errors.Is(err, ErrQuota) {
+		t.Fatalf("start over quota: %v", err)
+	}
+}
+
 func TestAddonAndStopStart(t *testing.T) {
 	f := newFixture(t)
 	s := serverSpec()

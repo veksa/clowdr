@@ -97,7 +97,11 @@ type Engine struct {
 	locks   sync.Map // project/service -> *sync.Mutex
 	pushed  sync.Map // image -> time.Time of the last push
 	renderM sync.Mutex
-	drains  sync.WaitGroup
+	// quotaM guards quota checks and reserved: memory of deploys in flight, project/service -> bytes,
+	// so two deploys of a project cannot both fit a quota that holds only one.
+	quotaM   sync.Mutex
+	reserved map[string]int64
+	drains   sync.WaitGroup
 }
 
 func New(d Docker, st *store.Store, platform func() *config.Platform, ing *ingress.Controller, log *slog.Logger) *Engine {
@@ -334,6 +338,7 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 	if err != nil {
 		return fail(err)
 	}
+	defer e.unreserve(req.Project, s.Name)
 	if stopFirst && old != nil {
 		progress("stop-first: stopping r%d before starting r%d", old.ID, rel.ID)
 		for _, c := range old.Containers {
@@ -502,34 +507,33 @@ func (e *Engine) prepare(ctx context.Context, project string, s spec.Service, pr
 // planMemory decides between start-first and stop-first. Start-first needs room for one more
 // set of replicas both on the host and in the project quota.
 func (e *Engine) planMemory(ctx context.Context, project string, s spec.Service, old *store.Release) (stopFirst bool, err error) {
+	need := int64(s.Replicas) * s.Memory
+	// The check and the reservation are one step; Deploy drops the reservation once the
+	// service record holds the new spec.
+	e.quotaM.Lock()
+	used, err := e.projectMemory(project, s.Name)
+	if err != nil {
+		e.quotaM.Unlock()
+		return false, err
+	}
+	p, perr := e.Store.Project(project)
+	if perr == nil && p.Memory > 0 && used+need > p.Memory {
+		e.quotaM.Unlock()
+		return false, fmt.Errorf("%w: %s used + %s new > %s", ErrQuota,
+			config.FormatBytes(used), config.FormatBytes(need), config.FormatBytes(p.Memory))
+	}
+	e.reserve(project, s.Name, need)
+	e.quotaM.Unlock()
+
 	if s.Switch == spec.SwitchStopFirst {
 		return true, nil
 	}
 	if old == nil || len(old.Containers) == 0 {
-		// First deploy: still has to fit the quota.
-		used, err := e.projectMemory(project, s.Name)
-		if err != nil {
-			return false, err
-		}
-		if p, err := e.Store.Project(project); err == nil && p.Memory > 0 && used+int64(s.Replicas)*s.Memory > p.Memory {
-			return false, fmt.Errorf("%w: %s used + %s new > %s", ErrQuota,
-				config.FormatBytes(used), config.FormatBytes(int64(s.Replicas)*s.Memory), config.FormatBytes(p.Memory))
-		}
 		return false, nil
 	}
-	need := int64(s.Replicas) * s.Memory
 	oldMem := int64(len(old.Containers)) * old.Spec.Memory
-	used, err := e.projectMemory(project, s.Name)
-	if err != nil {
-		return false, err
-	}
-	if p, err := e.Store.Project(project); err == nil && p.Memory > 0 {
-		if used+need > p.Memory {
-			return false, fmt.Errorf("%w: needs %s, quota %s", ErrQuota, config.FormatBytes(used+need), config.FormatBytes(p.Memory))
-		}
-		if used+need+oldMem > p.Memory {
-			return true, nil
-		}
+	if perr == nil && p.Memory > 0 && used+need+oldMem > p.Memory {
+		return true, nil
 	}
 	free, err := e.freeMemory(ctx)
 	if err != nil {
@@ -541,18 +545,44 @@ func (e *Engine) planMemory(ctx context.Context, project string, s spec.Service,
 	return false, nil
 }
 
-// projectMemory sums memory limits of the project's running services except one.
+// reserve records a deploy in flight; callers hold quotaM.
+func (e *Engine) reserve(project, service string, n int64) {
+	if e.reserved == nil {
+		e.reserved = map[string]int64{}
+	}
+	e.reserved[project+"/"+service] = n
+}
+
+func (e *Engine) unreserve(project, service string) {
+	e.quotaM.Lock()
+	delete(e.reserved, project+"/"+service)
+	e.quotaM.Unlock()
+}
+
+// projectMemory sums memory limits of the project's running services except one, counting a
+// service with a deploy in flight at the larger of its current and reserved memory. Callers
+// hold quotaM.
 func (e *Engine) projectMemory(project, except string) (int64, error) {
 	svcs, err := e.Store.Services(project)
 	if err != nil {
 		return 0, err
 	}
-	var sum int64
+	mem := map[string]int64{}
 	for _, v := range svcs {
-		if v.Name == except || v.Stopped {
-			continue
+		if !v.Stopped {
+			mem[v.Name] = int64(v.Spec.Replicas) * v.Spec.Memory
 		}
-		sum += int64(v.Spec.Replicas) * v.Spec.Memory
+	}
+	for k, n := range e.reserved {
+		if name, ok := strings.CutPrefix(k, project+"/"); ok && n > mem[name] {
+			mem[name] = n
+		}
+	}
+	var sum int64
+	for name, n := range mem {
+		if name != except {
+			sum += n
+		}
 	}
 	return sum, nil
 }
@@ -883,6 +913,25 @@ func (e *Engine) Start(ctx context.Context, project, service string, progress Pr
 	cur, err := e.Store.Release(project, service, svc.Current)
 	if err != nil {
 		return errors.New("service has no active release")
+	}
+	// While stopped the service did not count against the quota; something else may use it now.
+	if svc.Stopped {
+		need := int64(len(cur.Containers)) * cur.Spec.Memory
+		e.quotaM.Lock()
+		used, err := e.projectMemory(project, service)
+		if err == nil {
+			if p, perr := e.Store.Project(project); perr == nil && p.Memory > 0 && used+need > p.Memory {
+				err = fmt.Errorf("%w: %s used + %s to start > %s", ErrQuota,
+					config.FormatBytes(used), config.FormatBytes(need), config.FormatBytes(p.Memory))
+			}
+		}
+		if err != nil {
+			e.quotaM.Unlock()
+			return err
+		}
+		e.reserve(project, service, need)
+		e.quotaM.Unlock()
+		defer e.unreserve(project, service)
 	}
 	for _, c := range cur.Containers {
 		if err := e.Docker.ContainerStart(ctx, c); err != nil {
