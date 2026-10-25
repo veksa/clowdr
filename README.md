@@ -27,7 +27,9 @@ curl -fsSL https://github.com/veksa/clowdr/releases/latest/download/install.sh |
 On first start clowdrd writes `/etc/clowdr/platform.yml`, starts nginx on :80/:443 and prints
 the admin token.
 To update the server, run `install.sh` again; it keeps the state. `clowctl self-update` updates
-the CLI from the same GitHub Releases.
+the CLI from the same GitHub Releases. Both accept a release only if its `checksums.txt` carries
+an ed25519 signature by the project's release key, which is built into `install.sh` and clowctl
+(`install.sh` verifies it with openssl 3).
 
 ```sh
 clowctl context add prod https://deploy.example.com --token <admin token>

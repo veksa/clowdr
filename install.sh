@@ -4,7 +4,12 @@
 #   --binary ./clowdrd   install a local build instead of downloading a release
 set -eu
 
+# Everything runs from main, called on the last line: a download cut short by curl | sh runs nothing.
+main() {
+
 REPO="${CLOWDR_REPO:-veksa/clowdr}"
+# RELEASE_KEY is the base64 ed25519 public key that signs checksums.txt (also in internal/cli/selfupdate.go).
+RELEASE_KEY="${CLOWDR_RELEASE_KEY:-trLPx8MgJq3bXtfnnh2STD05iZqqL8msJ8UFlUJBbDU=}"
 VERSION="latest"
 DOMAIN=""
 BINARY=""
@@ -56,6 +61,14 @@ else
 	say "downloading clowdrd ($ARCH, $VERSION)"
 	curl -fsSL "$BASE/clowdrd_linux_$ARCH" -o "$TMP/clowdrd"
 	curl -fsSL "$BASE/checksums.txt" -o "$TMP/checksums.txt"
+	# checksums.txt must be signed by the release key (the same one clowctl self-update checks),
+	# so a replaced release asset cannot get root on the server. A fork sets CLOWDR_RELEASE_KEY.
+	curl -fsSL "$BASE/checksums.txt.sig" -o "$TMP/checksums.txt.sig" || die "release $VERSION has no checksums.txt.sig"
+	command -v openssl >/dev/null 2>&1 || die "openssl is needed to verify the release signature"
+	printf -- '-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA%s\n-----END PUBLIC KEY-----\n' "$RELEASE_KEY" >"$TMP/release.pub"
+	openssl pkeyutl -verify -pubin -inkey "$TMP/release.pub" -rawin -in "$TMP/checksums.txt" \
+		-sigfile "$TMP/checksums.txt.sig" >/dev/null 2>&1 ||
+		die "checksums.txt signature does not match the release key (openssl 3 is required to verify it)"
 	EXPECTED="$(grep " clowdrd_linux_$ARCH\$" "$TMP/checksums.txt" | cut -d' ' -f1)"
 	ACTUAL="$(sha256sum "$TMP/clowdrd" | cut -d' ' -f1)"
 	[ -n "$EXPECTED" ] && [ "$EXPECTED" = "$ACTUAL" ] || die "checksum mismatch for clowdrd_linux_$ARCH"
@@ -134,3 +147,6 @@ echo "On your machine:"
 echo "  clowctl context add $(hostname) $SERVER --token $TOKEN$EXTRA"
 echo
 echo "The admin token is stored in /var/lib/clowdr/admin-token (root only)."
+}
+
+main "$@"

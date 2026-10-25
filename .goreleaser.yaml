@@ -28,6 +28,16 @@ archives:
 checksum:
   name_template: checksums.txt
 
+# checksums.txt.sig: ed25519 over checksums.txt. install.sh and `clowctl self-update` refuse a
+# release without it; the public key is in both. The release workflow puts the private key
+# (secret CLOWDR_SIGNING_KEY, PEM) into a file for openssl.
+signs:
+  - id: checksums
+    artifacts: checksum
+    signature: "${artifact}.sig"
+    cmd: openssl
+    args: ["pkeyutl", "-sign", "-rawin", "-inkey", "{{ .Env.CLOWDR_SIGNING_KEY_FILE }}", "-in", "${artifact}", "-out", "${signature}"]
+
 release:
   extra_files:
     - glob: ./install.sh

@@ -18,6 +18,14 @@ jobs:
         with:
           go-version-file: go.mod
       - run: go test ./...
+      - name: signing key
+        env:
+          KEY: ${{ secrets.CLOWDR_SIGNING_KEY }}
+        run: |
+          test -n "$KEY" || { echo "secret CLOWDR_SIGNING_KEY is not set"; exit 1; }
+          umask 077
+          printf '%s\n' "$KEY" > "$RUNNER_TEMP/signing-key.pem"
+          echo "CLOWDR_SIGNING_KEY_FILE=$RUNNER_TEMP/signing-key.pem" >> "$GITHUB_ENV"
       - uses: goreleaser/goreleaser-action@v6
         with:
           version: "~> v2"

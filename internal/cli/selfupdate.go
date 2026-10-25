@@ -3,7 +3,9 @@ package cli
 import (
 	"bufio"
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -28,13 +30,31 @@ func releasesBase() string {
 	return "https://github.com/" + repo + "/releases"
 }
 
+// releaseKey verifies checksums.txt.sig of official releases: the release workflow signs
+// checksums.txt with the matching private key, kept in the repository's CI secrets. A fork
+// (CLOWDR_REPO) signs with its own key and sets CLOWDR_RELEASE_KEY to its public half.
+const releaseKey = "trLPx8MgJq3bXtfnnh2STD05iZqqL8msJ8UFlUJBbDU="
+
+func releasePublicKey() (ed25519.PublicKey, error) {
+	k := os.Getenv("CLOWDR_RELEASE_KEY")
+	if k == "" {
+		k = releaseKey
+	}
+	b, err := base64.StdEncoding.DecodeString(k)
+	if err != nil || len(b) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("bad release key %q (base64 of a 32-byte ed25519 public key)", k)
+	}
+	return b, nil
+}
+
 func (a *app) selfUpdateCmd() *cobra.Command {
 	var version string
 	cmd := &cobra.Command{
 		Use:   "self-update",
 		Short: "Replace clowctl with the latest release (or --version) from GitHub Releases",
 		Long: `Downloads clowctl for this OS and architecture from GitHub Releases, checks its sha256
-against the release's checksums.txt and replaces the running binary. The server is updated by
+against the release's checksums.txt, whose ed25519 signature must match the key built into
+clowctl, and replaces the running binary. The server is updated by
 running install.sh again on it; it keeps the state and restarts clowdrd, nginx keeps serving.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			exe, err := os.Executable()
@@ -48,7 +68,11 @@ running install.sh again on it; it keeps the state and restarts clowdrd, nginx k
 				// On the server clowctl is a symlink to the daemon binary.
 				return fmt.Errorf("%s is the server binary: update it with install.sh (curl -fsSL %s/latest/download/install.sh | sh)", exe, releasesBase())
 			}
-			u := updater{base: releasesBase(), client: &http.Client{Timeout: 5 * time.Minute}, goos: goruntime.GOOS, goarch: goruntime.GOARCH}
+			key, err := releasePublicKey()
+			if err != nil {
+				return err
+			}
+			u := updater{base: releasesBase(), client: &http.Client{Timeout: 5 * time.Minute}, goos: goruntime.GOOS, goarch: goruntime.GOARCH, key: key}
 			v, err := u.update(cmd.Context(), exe, a.version, version)
 			switch {
 			case errors.Is(err, errUpToDate):
@@ -72,6 +96,7 @@ type updater struct {
 	base         string // https://github.com/<repo>/releases
 	client       *http.Client
 	goos, goarch string
+	key          ed25519.PublicKey // checksums.txt must carry its signature
 }
 
 // update installs release `want` ("" = latest) over exe and returns the installed version.
@@ -92,6 +117,13 @@ func (u updater) update(ctx context.Context, exe, current, want string) (string,
 	sums, err := u.get(ctx, dl+"checksums.txt")
 	if err != nil {
 		return "", err
+	}
+	sig, err := u.get(ctx, dl+"checksums.txt.sig")
+	if err != nil {
+		return "", fmt.Errorf("release %s is not signed: %w", want, err)
+	}
+	if !ed25519.Verify(u.key, sums, sig) {
+		return "", fmt.Errorf("release %s: checksums.txt signature does not match the release key", want)
 	}
 	name, sum := "", ""
 	for _, n := range u.assetNames() {
