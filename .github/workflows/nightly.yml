@@ -41,4 +41,4 @@ jobs:
         with:
           go-version-file: go.mod
       - run: CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=chaos" -o clowdrd ./cmd/clowdr
-      - run: sudo CLOWDR_BINARY=$PWD/clowdrd test/chaos/run.sh
+      - run: sudo CLOWDR_BINARY="$PWD/clowdrd" test/chaos/run.sh
