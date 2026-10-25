@@ -97,6 +97,7 @@ type Engine struct {
 	locks   sync.Map // project/service -> *sync.Mutex
 	pushed  sync.Map // image -> time.Time of the last push
 	renderM sync.Mutex
+	netM    sync.Mutex // expose_to connects vs pruneForeign
 	// quotaM guards quota checks and reserved: memory of deploys in flight, project/service -> bytes,
 	// so two deploys of a project cannot both fit a quota that holds only one.
 	quotaM   sync.Mutex
@@ -239,9 +240,27 @@ func (e *Engine) accepts(all []store.Service, project, from string) bool {
 	return false
 }
 
+// exposeTo connects a container to another project's network if that project still accepts it.
+// The check and the connect are one step under netM, as is pruneForeign, so a connect racing a
+// revoked accept_from is either refused here or undone by the prune that follows.
+func (e *Engine) exposeTo(ctx context.Context, project, other, id string, aliases []string) error {
+	e.netM.Lock()
+	defer e.netM.Unlock()
+	all, err := e.Store.Services("")
+	if err != nil {
+		return err
+	}
+	if !e.accepts(all, other, project) {
+		return fmt.Errorf("expose_to %s: project %s no longer accepts %s", other, other, project)
+	}
+	return e.Docker.NetworkConnect(ctx, NetworkName(other), id, aliases)
+}
+
 // pruneForeign disconnects other projects' containers from project's network once project no
 // longer accepts them.
 func (e *Engine) pruneForeign(ctx context.Context, project string) {
+	e.netM.Lock()
+	defer e.netM.Unlock()
 	all, err := e.Store.Services("")
 	if err != nil {
 		return
@@ -685,7 +704,7 @@ func (e *Engine) startContainer(ctx context.Context, project string, s spec.Serv
 		if err := e.Docker.NetworkEnsure(ctx, NetworkName(other), map[string]string{runtime.LabelManaged: "1", runtime.LabelProject: other}); err != nil {
 			return id, err
 		}
-		if err := e.Docker.NetworkConnect(ctx, NetworkName(other), id, []string{project + "-" + s.Name}); err != nil {
+		if err := e.exposeTo(ctx, project, other, id, []string{project + "-" + s.Name}); err != nil {
 			return id, err
 		}
 	}

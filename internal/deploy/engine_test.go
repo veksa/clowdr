@@ -420,6 +420,10 @@ func TestExposeToNeedsAcceptFrom(t *testing.T) {
 	if slices.Contains(f.d.Networks["clowdr-blog"], rel.Containers[0]) {
 		t.Fatalf("shop still in blog's network: %v", f.d.Networks)
 	}
+	// A deploy that passed the check before consent was withdrawn still cannot connect.
+	if err := f.e.exposeTo(context.Background(), "shop", "blog", rel.Containers[0], nil); err == nil {
+		t.Fatal("connected after accept_from was withdrawn")
+	}
 }
 
 func TestHostOnlyImagesAreNotRun(t *testing.T) {
