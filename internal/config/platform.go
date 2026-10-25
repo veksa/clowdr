@@ -79,6 +79,8 @@ type LimitsConf struct {
 	// Pids caps processes per container (fork bombs); CPUs caps cores per container, 0 = no cap.
 	Pids int64   `yaml:"pids"`
 	CPUs float64 `yaml:"cpus"`
+	// MaxBlob caps one pushed image layer; pushes also stop while the disk is nearly full.
+	MaxBlob Bytes `yaml:"max_blob"`
 }
 
 // DefaultPlatform is written to /etc/clowdr/platform.yml on first start.
@@ -113,6 +115,7 @@ limits:
   reserve_memory: 150m
   disk_free_alert: 15
   pids: 1024           # processes per container
+  max_blob: 10g        # largest image layer a push may upload
   # cpus: 1            # cores per container (default: no cap)
 
 # notify:
@@ -154,6 +157,9 @@ func (p *Platform) defaults() {
 	}
 	if p.Nginx.WorkerShutdownTimeout == 0 {
 		p.Nginx.WorkerShutdownTimeout = Duration(30e9)
+	}
+	if p.Limits.MaxBlob == 0 {
+		p.Limits.MaxBlob = 10 << 30
 	}
 	if p.Limits.Pids == 0 {
 		p.Limits.Pids = 1024

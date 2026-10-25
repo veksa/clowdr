@@ -406,7 +406,7 @@ func (m *Monitor) watchResources(ctx context.Context) {
 			return
 		case <-t.C:
 		}
-		if free, total, ok := diskFree(m.StateDir); ok {
+		if free, total, ok := DiskFree(m.StateDir); ok {
 			m.checkDisk(ctx, free, total)
 		}
 		if avail, total, ok := memAvailable(); ok {

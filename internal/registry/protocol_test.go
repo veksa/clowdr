@@ -314,3 +314,37 @@ func refFor(t *testing.T, srv *httptest.Server, s string) name.Reference {
 	}
 	return r
 }
+
+func TestUploadLimits(t *testing.T) {
+	p := newProto(t, &FSStore{Dir: t.TempDir()})
+	p.h.MaxBlob = func() int64 { return 8 }
+
+	// A blob over the cap is refused and its upload dropped, chunked or monolithic.
+	resp, _ := p.do("shop", "POST", "/v2/shop/web/blobs/uploads/", nil)
+	loc := resp.Header.Get("Location")
+	resp, body := p.do("shop", "PATCH", loc, []byte("12345"))
+	p.expect(resp, body, 202, "")
+	resp, body = p.do("shop", "PATCH", loc, []byte("6789"))
+	p.expect(resp, body, 413, "SIZE_INVALID")
+	resp, body = p.do("shop", "GET", loc, nil)
+	p.expect(resp, body, 404, "BLOB_UPLOAD_UNKNOWN")
+	big := []byte("123456789")
+	resp, body = p.do("shop", "POST", "/v2/shop/web/blobs/uploads/?digest="+Digest(big), big)
+	p.expect(resp, body, 413, "SIZE_INVALID")
+	p.upload("shop", "shop/web", []byte("12345678"), 4) // exactly the cap is fine
+
+	// Open uploads per project are capped; other projects are not affected.
+	for i := 0; i < maxUploads; i++ {
+		resp, body = p.do("shop", "POST", "/v2/shop/web/blobs/uploads/", nil)
+		p.expect(resp, body, 202, "")
+	}
+	resp, body = p.do("shop", "POST", "/v2/shop/web/blobs/uploads/", nil)
+	p.expect(resp, body, 429, "TOOMANYREQUESTS")
+	resp, body = p.do("blog", "POST", "/v2/blog/web/blobs/uploads/", nil)
+	p.expect(resp, body, 202, "")
+
+	// A nearly full disk pauses pushes.
+	p.h.LowDisk = func() error { return errors.New("disk almost full") }
+	resp, body = p.do("blog", "PATCH", resp.Header.Get("Location"), []byte("x"))
+	p.expect(resp, body, 507, "DENIED")
+}

@@ -5,7 +5,8 @@ import (
 	"syscall"
 )
 
-func diskFree(path string) (free, total int64, ok bool) {
+// DiskFree reports free (for unprivileged users) and total bytes of the filesystem at path.
+func DiskFree(path string) (free, total int64, ok bool) {
 	var st syscall.Statfs_t
 	if err := syscall.Statfs(path, &st); err != nil {
 		return 0, 0, false

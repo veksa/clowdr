@@ -152,7 +152,9 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 	reg := &registry.Handler{Store: regStore, Owners: st, Authorize: srv.RegistryAuthorize, Log: log,
 		OnTag: func(_ context.Context, repo, tag string, _ registry.Descriptor) {
 			eng.Pushed(registry.ImagePrefix + repo + ":" + tag)
-		}}
+		},
+		MaxBlob: func() int64 { return int64(current.Limits.MaxBlob) },
+		LowDisk: func() error { return lowDisk(o.StateDir) }}
 	srv.Registry = reg
 	handler := srv.Handler()
 
@@ -378,5 +380,22 @@ func bootstrapAdmin(st *store.Store, stateDir string, log *slog.Logger) error {
 		return err
 	}
 	log.Info("created admin token", "file", p)
+	return nil
+}
+
+// lowDisk stops pushes while the disk holding the image store (containerd's, on the same
+// filesystem as the state dir on a usual host) has less than 1GB or 5% free.
+func lowDisk(stateDir string) error {
+	dir := stateDir
+	if _, err := os.Stat("/var/lib/containerd"); err == nil {
+		dir = "/var/lib/containerd"
+	}
+	free, total, ok := monitor.DiskFree(dir)
+	if !ok || total == 0 {
+		return nil
+	}
+	if free < 1<<30 || free*100/total < 5 {
+		return fmt.Errorf("server disk is almost full (%s free): pushes are paused", config.FormatBytes(free))
+	}
 	return nil
 }

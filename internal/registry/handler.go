@@ -27,6 +27,10 @@ type Handler struct {
 	// OnTag is called after repo:tag was pushed.
 	OnTag func(ctx context.Context, repo, tag string, desc Descriptor)
 	Log   *slog.Logger
+	// MaxBlob caps one blob (nil or 0 = no cap). LowDisk, when set, refuses uploads while the disk
+	// is nearly full: a project filling it would take every project on the host down.
+	MaxBlob func() int64
+	LowDisk func() error
 
 	mu      sync.Mutex
 	uploads map[string]*upload
@@ -40,6 +44,9 @@ type upload struct {
 }
 
 const maxManifest = 4 << 20
+
+// maxUploads caps open uploads per project; docker keeps a few per push.
+const maxUploads = 64
 
 var nameRe = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$`)
 var tagRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
@@ -229,10 +236,24 @@ func (h *Handler) uploadReq(w http.ResponseWriter, r *http.Request, project, nam
 				return
 			}
 		}
+		if !h.room(w) {
+			return
+		}
 		id = newID()
 		h.mu.Lock()
 		if h.uploads == nil {
 			h.uploads = map[string]*upload{}
+		}
+		open := 0
+		for _, u := range h.uploads {
+			if u.project == project {
+				open++
+			}
+		}
+		if open >= maxUploads {
+			h.mu.Unlock()
+			writeErr(w, regError{429, "TOOMANYREQUESTS", fmt.Sprintf("%d uploads already open for %s", open, project)})
+			return
 		}
 		h.uploads[id] = &upload{project: project, repo: name, created: time.Now()}
 		h.mu.Unlock()
@@ -279,7 +300,15 @@ func (h *Handler) uploadReq(w http.ResponseWriter, r *http.Request, project, nam
 				return
 			}
 		}
-		if _, err := io.Copy(wr, r.Body); err != nil {
+		if !h.room(w) {
+			return
+		}
+		if err := h.copyBlob(wr, r.Body); errors.Is(err, errTooBig) {
+			h.Store.Abort(ctx, id)
+			h.dropUpload(id)
+			writeErr(w, errBlobTooBig)
+			return
+		} else if err != nil {
 			h.log().Warn("registry upload interrupted", "id", id, "err", err)
 		}
 		h.accepted(w, name, id, wr.Offset())
@@ -294,6 +323,44 @@ func (h *Handler) uploadReq(w http.ResponseWriter, r *http.Request, project, nam
 	default:
 		w.WriteHeader(405)
 	}
+}
+
+var (
+	errTooBig     = errors.New("blob too big")
+	errBlobTooBig = regError{413, "SIZE_INVALID", "blob is larger than the server allows (limits.max_blob)"}
+)
+
+// room refuses uploads while the disk is nearly full; false means the response is written.
+func (h *Handler) room(w http.ResponseWriter) bool {
+	if h.LowDisk == nil {
+		return true
+	}
+	if err := h.LowDisk(); err != nil {
+		writeErr(w, regError{507, "DENIED", err.Error()})
+		return false
+	}
+	return true
+}
+
+// copyBlob appends body to the upload, at most up to MaxBlob in total.
+func (h *Handler) copyBlob(wr io.Writer, body io.Reader) error {
+	limit := int64(0)
+	if h.MaxBlob != nil {
+		limit = h.MaxBlob()
+	}
+	if limit <= 0 {
+		_, err := io.Copy(wr, body)
+		return err
+	}
+	off := int64(0)
+	if o, ok := wr.(interface{ Offset() int64 }); ok {
+		off = o.Offset()
+	}
+	n, err := io.Copy(wr, io.LimitReader(body, limit-off+1))
+	if off+n > limit {
+		return errTooBig
+	}
+	return err
 }
 
 func (h *Handler) accepted(w http.ResponseWriter, name, id string, off int64) {
@@ -316,7 +383,15 @@ func (h *Handler) finish(w http.ResponseWriter, r *http.Request, project, name, 
 		return
 	}
 	defer wr.Close()
-	if _, err := io.Copy(wr, r.Body); err != nil {
+	if !h.room(w) {
+		return
+	}
+	if err := h.copyBlob(wr, r.Body); errors.Is(err, errTooBig) {
+		h.Store.Abort(ctx, id)
+		h.dropUpload(id)
+		writeErr(w, errBlobTooBig)
+		return
+	} else if err != nil {
 		writeErr(w, regError{400, "BLOB_UPLOAD_INVALID", err.Error()})
 		return
 	}

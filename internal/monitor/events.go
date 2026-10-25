@@ -159,6 +159,6 @@ func HostStats(dir string) Host {
 	var h Host
 	h.MemAvail, h.MemTotal, _ = memAvailable()
 	h.SwapFree, h.SwapTotal, _ = swapFree()
-	h.DiskFree, h.DiskTotal, _ = diskFree(dir)
+	h.DiskFree, h.DiskTotal, _ = DiskFree(dir)
 	return h
 }
