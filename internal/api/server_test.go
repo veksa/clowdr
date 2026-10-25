@@ -178,6 +178,13 @@ func TestEndToEnd(t *testing.T) {
 	if err := blog.Do(ctx, "POST", Path("projects", "blog", "services", "server", "deploy"), DeployRequest{Spec: ks, Tag: "v1"}, nil); err == nil {
 		t.Fatal("blog deployed on shop's domain")
 	}
+	// A tag is a tag: no digest or path smuggled into the image reference.
+	ks.Domains = nil
+	for _, tag := range []string{"v1@sha256:" + strings.Repeat("a", 64), "../shop/server:v1", "v1 x"} {
+		if err := blog.Do(ctx, "POST", Path("projects", "blog", "services", "server", "deploy"), DeployRequest{Spec: ks, Tag: tag}, nil); !errors.As(err, &se) || se.Status != 400 {
+			t.Fatalf("tag %q: %v", tag, err)
+		}
+	}
 	// Overlapping project domains are refused.
 	if err := e.admin.Do(ctx, "POST", "/v1/projects", ProjectRequest{Name: "evil", Domains: []string{"api.example.com"}}, nil); err == nil {
 		t.Fatal("overlapping domain accepted")

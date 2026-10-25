@@ -538,6 +538,9 @@ func (s *Server) deploy(w http.ResponseWriter, r *http.Request) {
 	case req.Tag != "" && req.Image != "":
 		writeErr(w, 400, "tag and image are exclusive")
 		return
+	case req.Tag != "" && !registry.ValidTag(req.Tag):
+		writeErr(w, 400, "invalid tag "+req.Tag)
+		return
 	case req.Tag != "":
 		image = registry.ImagePrefix + project + "/" + service + ":" + req.Tag
 	case req.Image == "":

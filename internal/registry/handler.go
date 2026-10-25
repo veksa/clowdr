@@ -44,6 +44,9 @@ const maxManifest = 4 << 20
 var nameRe = regexp.MustCompile(`^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$`)
 var tagRe = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$`)
 
+// ValidTag reports whether s is a tag as the distribution spec defines it (no digest, no path).
+func ValidTag(s string) bool { return tagRe.MatchString(s) }
+
 const (
 	mtManifestV2   = "application/vnd.docker.distribution.manifest.v2+json"
 	mtManifestList = "application/vnd.docker.distribution.manifest.list.v2+json"
@@ -350,7 +353,7 @@ func (h *Handler) ExpireUploads(ctx context.Context, ttl time.Duration) {
 	h.mu.Lock()
 	var old []string
 	for id, u := range h.uploads {
-		if time.Since(u.created) > ttl {
+		if time.Since(u.created) >= ttl {
 			old = append(old, id)
 			delete(h.uploads, id)
 		}
