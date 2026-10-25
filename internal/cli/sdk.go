@@ -99,6 +99,10 @@ func (a *app) sdkInstall(cmd *cobra.Command, version string) error {
 	if file == "" {
 		return fmt.Errorf("the server has no clowdr-node %q", version)
 	}
+	// The name comes from the server and becomes a local path: "../../.bashrc" must not work.
+	if !sdkFile.MatchString(file) {
+		return fmt.Errorf("server sent a bad package file name %q", file)
+	}
 	t, err := a.target(false)
 	if err != nil {
 		return err
@@ -163,6 +167,8 @@ func (a *app) sdkInstall(cmd *cobra.Command, version string) error {
 	fmt.Fprintln(a.out, "Wiring and reading traces: node_modules/clowdr-node/README.md, or clowctl trace --help")
 	return nil
 }
+
+var sdkFile = regexp.MustCompile(`^clowdr-node-\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?\.tgz$`)
 
 var depValue = regexp.MustCompile(`("clowdr-node"\s*:\s*)"[^"]*"`)
 

@@ -43,3 +43,16 @@ func TestSetDependency(t *testing.T) {
 		t.Fatal("no dependencies block accepted")
 	}
 }
+
+func TestSDKFileName(t *testing.T) {
+	for _, f := range []string{"clowdr-node-0.3.0.tgz", "clowdr-node-1.2.3-rc.1.tgz"} {
+		if !sdkFile.MatchString(f) {
+			t.Errorf("%q refused", f)
+		}
+	}
+	for _, f := range []string{"../../.bashrc", "clowdr-node-0.3.0.tgz/../../x", `..\clowdr-node-0.3.0.tgz`, "x/clowdr-node-0.3.0.tgz", "clowdr-node-0.3.0.tgz\n"} {
+		if sdkFile.MatchString(f) {
+			t.Errorf("%q accepted", f)
+		}
+	}
+}
