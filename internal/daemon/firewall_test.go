@@ -65,5 +65,5 @@ func TestEnsureMetadataBlockedWithoutIptables(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	keepMetadataBlocked(ctx, quiet) // returns at once instead of retrying every minute
+	keepMetadataBlocked(ctx, quiet) // returns at once instead of retrying every few seconds
 }

@@ -15,13 +15,29 @@ import (
 // touched).
 var metadataRule = []string{"DOCKER-USER", "-d", "169.254.169.254/32", "-m", "comment", "--comment", "clowdr: no cloud metadata for containers", "-j", "REJECT"}
 
+// metadataRule6 covers the IPv6 metadata address (AWS fd00:ec2::254) where docker has IPv6 on;
+// without ip6tables or an IPv6 DOCKER-USER chain there is nothing to block.
+var metadataRule6 = []string{"DOCKER-USER", "-d", "fd00:ec2::254/128", "-m", "comment", "--comment", "clowdr: no cloud metadata for containers", "-j", "REJECT"}
+
 // iptables runs iptables; swapped in tests.
 var iptables = func(ctx context.Context, args ...string) error {
 	return exec.CommandContext(ctx, "iptables", args...).Run()
 }
 
+var ip6tables = func(ctx context.Context, args ...string) error {
+	return exec.CommandContext(ctx, "ip6tables", args...).Run()
+}
+
+// ensureMetadataBlocked6 is best effort and silent: most hosts run docker without IPv6.
+func ensureMetadataBlocked6(ctx context.Context) {
+	if ip6tables(ctx, append([]string{"-C"}, metadataRule6...)...) != nil {
+		ip6tables(ctx, append([]string{"-I"}, metadataRule6...)...)
+	}
+}
+
 // ensureMetadataBlocked adds the rule unless it is there. Docker recreates DOCKER-USER empty
-// after a host reboot or a firewall reload, so it runs at start and then every minute.
+// after a host reboot, a firewall reload or a docker restart, so it runs at start and then every
+// few seconds: containers started right after a docker restart must not get a window.
 func ensureMetadataBlocked(ctx context.Context, log *slog.Logger) bool {
 	if iptables(ctx, append([]string{"-C"}, metadataRule...)...) == nil {
 		return true
@@ -38,7 +54,8 @@ func keepMetadataBlocked(ctx context.Context, log *slog.Logger) {
 	if !ensureMetadataBlocked(ctx, log) {
 		return // no iptables or no DOCKER-USER chain: warned once, nothing to keep
 	}
-	t := time.NewTicker(time.Minute)
+	ensureMetadataBlocked6(ctx)
+	t := time.NewTicker(5 * time.Second)
 	defer t.Stop()
 	for {
 		select {
@@ -46,6 +63,7 @@ func keepMetadataBlocked(ctx context.Context, log *slog.Logger) {
 			return
 		case <-t.C:
 			ensureMetadataBlocked(ctx, log)
+			ensureMetadataBlocked6(ctx)
 		}
 	}
 }
