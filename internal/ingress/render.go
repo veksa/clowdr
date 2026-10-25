@@ -351,7 +351,7 @@ var cloudflareIPs = []string{
 func RenderMain(o Options) string {
 	var b strings.Builder
 	b.WriteString(generatedHeader)
-	b.WriteString("worker_processes auto;\n")
+	b.WriteString("worker_processes auto;\nworker_rlimit_nofile 65535;\n")
 	if o.WorkerShutdownTimeout > 0 {
 		fmt.Fprintf(&b, "worker_shutdown_timeout %ds;\n", int(o.WorkerShutdownTimeout/time.Second))
 	}
@@ -363,7 +363,7 @@ func RenderMain(o Options) string {
 	}
 	b.WriteString(`
 events {
-    worker_connections 1024;
+    worker_connections 16384;
 }
 
 http {
@@ -373,6 +373,12 @@ http {
     tcp_nopush on;
     keepalive_timeout 65;
     server_tokens off;
+    # One shared nginx serves every project: slow or piled-up connections from one client
+    # must not use up its connections. The limit counts real client IPs (after real_ip).
+    client_header_timeout 15s;
+    limit_conn_zone $binary_remote_addr zone=clowdr_conn:10m;
+    limit_conn clowdr_conn 256;
+    limit_conn_status 429;
     server_names_hash_bucket_size 128;
 
     # Docker's embedded DNS: upstream container names are re-resolved, so a missing
