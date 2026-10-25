@@ -184,6 +184,31 @@ func TestReplicas(t *testing.T) {
 	}
 }
 
+func TestRenderDropsRevokedRights(t *testing.T) {
+	f := newFixture(t)
+	p, _ := f.st.Project("shop")
+	p.NginxExtra = true
+	f.st.PutProject(p)
+	s := serverSpec()
+	s.NginxExtra = "add_header X-Extra 1;"
+	if _, err := f.deploy(t, "v1", s); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.conf(t); !strings.Contains(c, "X-Extra") || !strings.Contains(c, "api.example.com") {
+		t.Fatal(c)
+	}
+	// The admin takes nginx_extra and the domain away: the next render leaves both out.
+	p.NginxExtra = false
+	p.Domains = []string{"example.org"}
+	f.st.PutProject(p)
+	if err := f.e.RenderProject(context.Background(), "shop"); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.conf(t); strings.Contains(c, "X-Extra") || strings.Contains(c, "api.example.com") {
+		t.Fatal(c)
+	}
+}
+
 func TestChecks(t *testing.T) {
 	f := newFixture(t)
 	s := serverSpec()

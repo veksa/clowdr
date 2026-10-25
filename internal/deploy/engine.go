@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1044,9 +1045,24 @@ func (e *Engine) renderProject(project string) (string, error) {
 	if len(svcs) == 0 {
 		return "", nil
 	}
+	p, err := e.Store.Project(project)
+	if err != nil {
+		return "", err
+	}
 	var views []ingress.ServiceView
 	for _, v := range svcs {
-		view := ingress.ServiceView{Spec: v.Spec}
+		// The spec was checked at deploy time; an admin may have taken a domain or nginx_extra
+		// away from the project since. Render only what the project is allowed now.
+		s := v.Spec
+		s.Domains = slices.DeleteFunc(slices.Clone(s.Domains), func(d string) bool { return !auth.DomainAllowed(p.Domains, d) })
+		if !p.NginxExtra {
+			s.NginxExtra = ""
+			s.Routes = slices.Clone(s.Routes)
+			for i := range s.Routes {
+				s.Routes[i].NginxExtra = ""
+			}
+		}
+		view := ingress.ServiceView{Spec: s}
 		if !v.Stopped && v.Current != 0 && v.Spec.Port != 0 {
 			if r, err := e.Store.Release(project, v.Name, v.Current); err == nil {
 				for _, c := range r.Containers {
@@ -1086,11 +1102,13 @@ func (e *Engine) RenderAll(ctx context.Context) error {
 	}
 	known := map[string]bool{}
 	for _, p := range projects {
+		known[ingress.ProjectFile(p.Name)] = true
 		content, err := e.renderProject(p.Name)
 		if err != nil {
-			return fmt.Errorf("project %s: %w", p.Name, err)
+			// One broken project keeps its last config instead of taking every other one down.
+			e.Log.Error("render project", "project", p.Name, "err", err)
+			continue
 		}
-		known[ingress.ProjectFile(p.Name)] = true
 		files = append(files, ingress.File{Path: ingress.ProjectFile(p.Name), Content: content})
 	}
 	if es, err := os.ReadDir(filepath.Join(e.Ingress.Dir, "conf.d")); err == nil {
@@ -1122,8 +1140,17 @@ func (e *Engine) CertDomains() []string {
 	}
 	svcs, _ := e.Store.Services("")
 	for _, v := range svcs {
-		if v.Spec.TLS == spec.TLSDirect {
-			out = append(out, v.Spec.Domains...)
+		if v.Spec.TLS != spec.TLSDirect {
+			continue
+		}
+		p, err := e.Store.Project(v.Project)
+		if err != nil {
+			continue
+		}
+		for _, d := range v.Spec.Domains {
+			if auth.DomainAllowed(p.Domains, d) {
+				out = append(out, d)
+			}
 		}
 	}
 	return out
