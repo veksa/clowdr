@@ -240,10 +240,12 @@ func (f *Docker) NetworkRemove(_ context.Context, network string) error {
 func (f *Docker) VolumeEnsure(_ context.Context, name string, labels map[string]string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.Vols[name]; !ok {
+	old, ok := f.Vols[name]
+	if !ok {
 		f.Vols[name] = labels
+		return nil
 	}
-	return nil
+	return runtime.CheckVolumeLabels(runtime.Volume{Name: name, Labels: old}, labels)
 }
 
 func (f *Docker) Volumes(_ context.Context, labels ...string) ([]runtime.Volume, error) {

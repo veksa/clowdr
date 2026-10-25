@@ -89,6 +89,12 @@ func TestDockerEngine(t *testing.T) {
 	if err := d.VolumeEnsure(ctx, id, labels); err != nil {
 		t.Fatal(err)
 	}
+	if err := d.VolumeEnsure(ctx, id, labels); err != nil {
+		t.Fatalf("ensure an existing volume again: %v", err)
+	}
+	if err := d.VolumeEnsure(ctx, id, map[string]string{LabelProject: "other"}); err == nil {
+		t.Fatal("reused a volume that belongs to someone else")
+	}
 	vols, err := d.Volumes(ctx, "clowdr.test="+id)
 	if err != nil || len(vols) != 1 || vols[0].Name != id {
 		t.Fatalf("volumes: %+v %v", vols, err)

@@ -407,3 +407,14 @@ func TestHostOnlyImagesAreNotRun(t *testing.T) {
 		t.Fatalf("redeploy with the registry down: %v", err)
 	}
 }
+
+func TestForeignVolumeIsNotMounted(t *testing.T) {
+	f := newFixture(t)
+	// A compose project called shop made shop_uploads on this host before clowdr.
+	f.d.Vols["shop_uploads"] = map[string]string{"com.docker.compose.project": "shop"}
+	s := serverSpec()
+	s.Volumes = []spec.Volume{{Name: "uploads", Target: "/app/uploads"}}
+	if _, err := f.deploy(t, "v1", s); err == nil || !strings.Contains(err.Error(), "not created by clowdr") {
+		t.Fatalf("mounted a foreign volume: %v", err)
+	}
+}

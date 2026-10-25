@@ -561,8 +561,25 @@ type Volume struct {
 	CreatedAt string
 }
 
+// VolumeEnsure creates a volume or reuses one created with the same labels. Docker returns an
+// existing volume of that name as it is, so a volume someone else made (a compose project
+// named like <project>_<name>) is refused instead of being mounted into the project.
 func (d *Docker) VolumeEnsure(ctx context.Context, name string, labels map[string]string) error {
-	return d.call(ctx, "POST", "/volumes/create", nil, map[string]any{"Name": name, "Labels": labels}, nil)
+	var v Volume
+	if err := d.call(ctx, "POST", "/volumes/create", nil, map[string]any{"Name": name, "Labels": labels}, &v); err != nil {
+		return err
+	}
+	return CheckVolumeLabels(v, labels)
+}
+
+// CheckVolumeLabels compares the ownership labels; others (an addon's memory) may change.
+func CheckVolumeLabels(v Volume, labels map[string]string) error {
+	for _, k := range []string{LabelManaged, LabelProject} {
+		if want, ok := labels[k]; ok && v.Labels[k] != want {
+			return fmt.Errorf("volume %s already exists and was not created by clowdr for this project (label %s=%q); rename or remove it", v.Name, k, v.Labels[k])
+		}
+	}
+	return nil
 }
 
 func (d *Docker) Volumes(ctx context.Context, labels ...string) ([]Volume, error) {
