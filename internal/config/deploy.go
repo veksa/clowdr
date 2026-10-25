@@ -19,11 +19,12 @@ import (
 var DeployFile = []string{"deploy.yml", "deploy.yaml", "clowdr.yml"}
 
 type Deploy struct {
-	Project  string             `yaml:"project"`
-	Envs     map[string]EnvConf `yaml:"envs"`
-	Addons   []string           `yaml:"addons"`
-	Services map[string]Service `yaml:"services"`
-	Logs     *LogsConf          `yaml:"logs"`
+	Project    string             `yaml:"project"`
+	Envs       map[string]EnvConf `yaml:"envs"`
+	Addons     []string           `yaml:"addons"`
+	AcceptFrom []string           `yaml:"accept_from"` // projects whose services may join this project's network (expose_to)
+	Services   map[string]Service `yaml:"services"`
+	Logs       *LogsConf          `yaml:"logs"`
 
 	// Dir is the directory deploy.yml was loaded from; service paths are relative to it.
 	Dir string `yaml:"-"`
@@ -276,6 +277,7 @@ func (d *Deploy) Spec(name, env string) (spec.Service, error) {
 		Env:        s.Env,
 		Uses:       s.Uses,
 		ExposeTo:   s.ExposeTo,
+		AcceptFrom: d.AcceptFrom,
 		Health: spec.Health{
 			Path:      s.Health.Path,
 			Interval:  s.Health.Interval.D(),

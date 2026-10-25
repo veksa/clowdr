@@ -127,6 +127,14 @@ func (f *Docker) ContainerInspect(_ context.Context, id string) (runtime.Contain
 		IPAddress string
 		Aliases   []string
 	}{c.Config.Network: {IPAddress: id}}
+	for n, members := range f.Networks {
+		if slices.Contains(members, id) {
+			ci.NetworkSettings.Networks[n] = struct {
+				IPAddress string
+				Aliases   []string
+			}{IPAddress: id}
+		}
+	}
 	return ci, nil
 }
 

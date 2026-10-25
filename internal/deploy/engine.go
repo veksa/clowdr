@@ -195,6 +195,16 @@ func (e *Engine) CheckSpec(project string, s spec.Service) error {
 	if err != nil {
 		return err
 	}
+	// expose_to puts the container into the other project's network, next to its services
+	// and addons: only with that project's consent (accept_from in its deploy.yml).
+	for _, other := range s.ExposeTo {
+		if other == project {
+			return fmt.Errorf("expose_to %s: the service is already in its own project's network", other)
+		}
+		if !e.accepts(all, other, project) {
+			return fmt.Errorf("expose_to %s: project %s does not accept %s (accept_from in its deploy.yml)", other, other, project)
+		}
+	}
 	for _, o := range all {
 		if o.Project == project && o.Name == s.Name {
 			continue
@@ -209,6 +219,48 @@ func (e *Engine) CheckSpec(project string, s spec.Service) error {
 		return fmt.Errorf("domain %s is reserved for clowdr", d)
 	}
 	return nil
+}
+
+// accepts reports whether a deployed service of project lists from in accept_from.
+func (e *Engine) accepts(all []store.Service, project, from string) bool {
+	for _, o := range all {
+		if o.Project == project && contains(o.Spec.AcceptFrom, from) {
+			return true
+		}
+	}
+	return false
+}
+
+// pruneForeign disconnects other projects' containers from project's network once project no
+// longer accepts them.
+func (e *Engine) pruneForeign(ctx context.Context, project string) {
+	all, err := e.Store.Services("")
+	if err != nil {
+		return
+	}
+	cs, err := e.Docker.Containers(ctx, runtime.LabelManaged, runtime.LabelRole+"=service")
+	if err != nil {
+		return
+	}
+	net := NetworkName(project)
+	for _, c := range cs {
+		from := c.Labels[runtime.LabelProject]
+		if from == project || e.accepts(all, project, from) {
+			continue
+		}
+		ci, err := e.Docker.ContainerInspect(ctx, c.ID)
+		if err != nil {
+			continue
+		}
+		if _, ok := ci.NetworkSettings.Networks[net]; !ok {
+			continue
+		}
+		if err := e.Docker.NetworkDisconnect(ctx, net, c.ID); err != nil {
+			e.Log.Warn("disconnect foreign container", "network", net, "container", c.Name(), "err", err)
+		} else {
+			e.Log.Info("disconnected container no longer accepted", "network", net, "container", c.Name())
+		}
+	}
 }
 
 func hasRouteExtra(s spec.Service) bool {
@@ -348,6 +400,7 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 		cleanup()
 		return fail(err)
 	}
+	e.pruneForeign(ctx, req.Project)
 	if s.Port != 0 {
 		progress("traffic switched to r%d", rel.ID)
 	} else {
@@ -833,6 +886,7 @@ func (e *Engine) Remove(ctx context.Context, project, service string) error {
 	for _, c := range cs {
 		e.Docker.ContainerRemove(ctx, c.ID)
 	}
+	e.pruneForeign(ctx, project)
 	for _, r := range rels {
 		if strings.HasPrefix(r.Image, "clowdr.local/") {
 			e.Docker.ImageRemove(ctx, r.Image)

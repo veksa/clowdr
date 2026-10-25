@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -330,5 +331,44 @@ func TestScaleAndExec(t *testing.T) {
 	}
 	if svc, _ := f.st.Service("shop", "server"); !svc.Stopped {
 		t.Fatal("scale 0 must stop")
+	}
+}
+
+func TestExposeToNeedsAcceptFrom(t *testing.T) {
+	f := newFixture(t)
+	if err := f.st.PutProject(store.Project{Name: "blog"}); err != nil {
+		t.Fatal(err)
+	}
+	deployBlog := func(accept ...string) {
+		t.Helper()
+		ref := "clowdr.local/blog/web:v1"
+		f.d.Local[ref] = true
+		web := spec.Service{Name: "web", AcceptFrom: accept, Drain: time.Millisecond,
+			Health: spec.Health{Interval: time.Millisecond, Successes: 1}}
+		web.Defaults()
+		if _, err := f.e.Deploy(context.Background(), Request{Project: "blog", Spec: web, Image: ref, Author: "test"}, nil); err != nil {
+			t.Fatal(err)
+		}
+		f.e.WaitDrains()
+	}
+	s := serverSpec()
+	s.ExposeTo = []string{"blog"}
+
+	// Without blog's consent shop cannot join blog's network.
+	if _, err := f.deploy(t, "v1", s); err == nil || !strings.Contains(err.Error(), "does not accept") {
+		t.Fatalf("expose_to without accept_from: %v", err)
+	}
+	deployBlog("shop")
+	rel, err := f.deploy(t, "v2", s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.d.Networks["clowdr-blog"], rel.Containers[0]) {
+		t.Fatalf("shop not in blog's network: %v", f.d.Networks)
+	}
+	// Withdrawing consent disconnects the running container.
+	deployBlog()
+	if slices.Contains(f.d.Networks["clowdr-blog"], rel.Containers[0]) {
+		t.Fatalf("shop still in blog's network: %v", f.d.Networks)
 	}
 }

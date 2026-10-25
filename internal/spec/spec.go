@@ -5,30 +5,34 @@ package spec
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 )
 
 // Service is one service of a project, resolved for one env.
 type Service struct {
-	Name       string            `json:"name"`
-	Port       int               `json:"port,omitempty"`
-	Health     Health            `json:"health"`
-	Memory     int64             `json:"memory,omitempty"` // bytes, 0 = unlimited
-	Replicas   int               `json:"replicas"`
-	Drain      time.Duration     `json:"drain"`
-	StopGrace  time.Duration     `json:"stop_grace"`
-	Switch     string            `json:"switch,omitempty"` // "" (start-first) | "stop-first"
-	Domains    []string          `json:"domains,omitempty"`
-	Routes     []Route           `json:"routes,omitempty"`
-	TLS        string            `json:"tls,omitempty"` // "" (behind Cloudflare) | "direct"
-	MaxBody    *int64            `json:"max_body,omitempty"`
-	Timeout    time.Duration     `json:"timeout,omitempty"`
-	NginxExtra string            `json:"nginx_extra,omitempty"`
-	Volumes    []Volume          `json:"volumes,omitempty"`
-	Env        []string          `json:"env,omitempty"` // names whose values come from `clowctl env set`
-	Uses       []string          `json:"uses,omitempty"`
-	ExposeTo   []string          `json:"expose_to,omitempty"`
+	Name       string        `json:"name"`
+	Port       int           `json:"port,omitempty"`
+	Health     Health        `json:"health"`
+	Memory     int64         `json:"memory,omitempty"` // bytes, 0 = unlimited
+	Replicas   int           `json:"replicas"`
+	Drain      time.Duration `json:"drain"`
+	StopGrace  time.Duration `json:"stop_grace"`
+	Switch     string        `json:"switch,omitempty"` // "" (start-first) | "stop-first"
+	Domains    []string      `json:"domains,omitempty"`
+	Routes     []Route       `json:"routes,omitempty"`
+	TLS        string        `json:"tls,omitempty"` // "" (behind Cloudflare) | "direct"
+	MaxBody    *int64        `json:"max_body,omitempty"`
+	Timeout    time.Duration `json:"timeout,omitempty"`
+	NginxExtra string        `json:"nginx_extra,omitempty"`
+	Volumes    []Volume      `json:"volumes,omitempty"`
+	Env        []string      `json:"env,omitempty"` // names whose values come from `clowctl env set`
+	Uses       []string      `json:"uses,omitempty"`
+	ExposeTo   []string      `json:"expose_to,omitempty"`
+	// AcceptFrom lists projects whose services may join this project's network (their
+	// expose_to). It is project-wide in deploy.yml and copied into every service.
+	AcceptFrom []string          `json:"accept_from,omitempty"`
 	Labels     map[string]string `json:"labels,omitempty"`
 }
 
@@ -166,7 +170,7 @@ func (s *Service) Validate() error {
 			return errf("invalid env name %q", e)
 		}
 	}
-	for _, u := range append(append([]string{}, s.Uses...), s.ExposeTo...) {
+	for _, u := range slices.Concat(s.Uses, s.ExposeTo, s.AcceptFrom) {
 		if !ValidName(u) {
 			return errf("invalid name %q", u)
 		}

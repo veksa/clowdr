@@ -104,7 +104,8 @@ also trims the docker build cache to `--keep-cache` (20GB). `--no-gc` skips the 
 | `max_body`, `timeout`, `nginx_extra` | nginx limits; raw snippet (only if the admin allowed it) |
 | `volumes` | named volumes `name:/path[:ro]`, never removed automatically |
 | `env` | names whose values are set with `clowctl env set` |
-| `uses`, `expose_to` | addons the service sees; projects that may reach it internally |
+| `uses`, `expose_to` | addons the service sees; projects whose network the service joins, so their services reach it as `<project>-<service>` |
+| `accept_from` (top level) | projects allowed to join this project's network with `expose_to`; without it their deploy is refused, and dropping a project from the list disconnects its running containers |
 
 All commands: `clowctl --help`.
 
