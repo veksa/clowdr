@@ -73,6 +73,7 @@ services:
 
 ```sh
 export CLOWDR_TOKEN=<project token>    # or put it in .clowdr/token.prod (gitignored)
+export CLOWDR_SERVER=https://deploy.example.com   # CI: send the token only to this server, whatever deploy.yml says
 clowctl deploy api -e prod             # build → push new layers → start → health → switch → drain
 clowctl diff -e prod                   # deploy.yml vs the server; clowctl apply applies it
 clowctl ps -e prod

@@ -151,6 +151,11 @@ func (a *app) target(needProject bool) (*target, error) {
 	if server == "" {
 		return nil, errors.New("no server: run in a project directory with deploy.yml, or add a context (clowctl context add)")
 	}
+	// CI pins the server its CLOWDR_TOKEN belongs to: a deploy.yml from an untrusted branch
+	// could otherwise point envs.<env>.server at a host that collects the token.
+	if pin := os.Getenv("CLOWDR_SERVER"); pin != "" && strings.TrimRight(pin, "/") != strings.TrimRight(server, "/") {
+		return nil, fmt.Errorf("server %s is not CLOWDR_SERVER (%s): refusing to send the token there", server, pin)
+	}
 
 	token := os.Getenv("CLOWDR_TOKEN")
 	if token == "" {

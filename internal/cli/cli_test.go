@@ -59,6 +59,16 @@ func TestTargetResolution(t *testing.T) {
 		t.Fatal("env token must win")
 	}
 	a.contextName = ""
+	// CLOWDR_SERVER pins where the env token may go.
+	t.Setenv("CLOWDR_SERVER", "https://deploy.example.net/")
+	if _, err := a.target(true); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLOWDR_SERVER", "https://deploy.example.com")
+	if _, err := a.target(true); err == nil || !strings.Contains(err.Error(), "CLOWDR_SERVER") {
+		t.Fatalf("token sent to an unpinned server: %v", err)
+	}
+	t.Setenv("CLOWDR_SERVER", "")
 
 	// prod uses a context that does not exist yet.
 	a.env = "prod"
