@@ -383,8 +383,9 @@ func bootstrapAdmin(st *store.Store, stateDir string, log *slog.Logger) error {
 	return nil
 }
 
-// lowDisk stops pushes while the disk holding the image store (containerd's, on the same
-// filesystem as the state dir on a usual host) has less than 1GB or 5% free.
+// lowDisk stops pushes before the disk holding the image store (containerd's, on the same
+// filesystem as the state dir on a usual host) runs out: under 256MB or 2% free. A disk at 95%
+// still takes deploys (the monitor alerts at disk_free_alert); a push that would empty it does not.
 func lowDisk(stateDir string) error {
 	dir := stateDir
 	if _, err := os.Stat("/var/lib/containerd"); err == nil {
@@ -394,7 +395,7 @@ func lowDisk(stateDir string) error {
 	if !ok || total == 0 {
 		return nil
 	}
-	if free < 1<<30 || free*100/total < 5 {
+	if free < 256<<20 || free*100/total < 2 {
 		return fmt.Errorf("server disk is almost full (%s free): pushes are paused", config.FormatBytes(free))
 	}
 	return nil
