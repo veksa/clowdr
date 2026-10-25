@@ -101,7 +101,7 @@ also trims the docker build cache to `--keep-cache` (20GB). `--no-gc` skips the 
 | `domains` | per env: `{prod: [api.example.com]}`; must be allowed for the project on the server |
 | `routes` | `{path, service, timeout, buffering, max_body}`; `service` routes a path to another service |
 | `tls: direct` | domain not behind Cloudflare: clowdr gets a Let's Encrypt certificate. Without it the domain answers only connections from `trusted_proxies` (Cloudflare by default), so the site cannot be reached past Cloudflare by the server's IP |
-| `max_body`, `timeout`, `nginx_extra` | nginx limits; raw snippet (only if the admin allowed it) |
+| `max_body`, `timeout`, `nginx_extra` | nginx limits; raw snippet (only if the admin allowed it): headers, `proxy_*` tuning, `return`/`rewrite`/`set`, `location`/`if` blocks; `proxy_pass` only to `http://<project>__<service>`; file directives (`root`, `alias`, `include`, logs, certificates) are refused |
 | `volumes` | named volumes `name:/path[:ro]`, never removed automatically |
 | `env` | names whose values are set with `clowctl env set` |
 | `uses`, `expose_to` | addons the service sees; projects whose network the service joins, so their services reach it as `<project>-<service>` |

@@ -84,11 +84,11 @@ func RenderProject(project string, services []ServiceView, o Options) (string, e
 	}
 
 	for _, s := range services {
-		if err := checkExtra(s.Spec.NginxExtra); err != nil {
+		if err := checkExtra(project, s.Spec.NginxExtra); err != nil {
 			return "", fmt.Errorf("service %s: nginx_extra: %w", s.Spec.Name, err)
 		}
 		for _, r := range s.Spec.Routes {
-			if err := checkExtra(r.NginxExtra); err != nil {
+			if err := checkExtra(project, r.NginxExtra); err != nil {
 				return "", fmt.Errorf("service %s route %s: nginx_extra: %w", s.Spec.Name, r.Path, err)
 			}
 		}
@@ -201,45 +201,141 @@ func writeExtra(b *strings.Builder, indent, extra string) {
 	}
 }
 
-// checkExtra keeps a raw snippet inside the block it is placed in: braces must balance and
-// never close the enclosing block, and it cannot include files or load modules.
-func checkExtra(s string) error {
+// checkExtra keeps a raw snippet inside the block it is placed in and limited to directives
+// that only shape this project's own traffic. Snippets are tokenized the way nginx reads them,
+// and only allowed directives pass: a denylist missed `{alias ...}` and quoted directive names,
+// and nginx can read every certificate key on the host. proxy_pass may only point at the
+// project's own upstreams: nginx sits in every project network.
+func checkExtra(project, s string) error {
+	toks, err := extraTokens(s)
+	if err != nil {
+		return err
+	}
 	depth := 0
-	inQuote := byte(0)
-	for i := 0; i < len(s); i++ {
-		c := s[i]
+	var stmt []string
+	for _, t := range toks {
 		switch {
-		case inQuote != 0:
-			if c == '\\' {
-				i++
-			} else if c == inQuote {
-				inQuote = 0
+		case t.punct && t.v != "}":
+			if len(stmt) == 0 {
+				return fmt.Errorf("unexpected %q", t.v)
 			}
-		case c == '"' || c == '\'':
-			inQuote = c
-		case c == '#':
-			for i < len(s) && s[i] != '\n' {
-				i++
+			if err := checkDirective(project, stmt, t.v == "{"); err != nil {
+				return err
 			}
-		case c == '{':
-			depth++
-		case c == '}':
+			if t.v == "{" {
+				depth++
+			}
+			stmt = nil
+		case t.punct:
+			if len(stmt) > 0 {
+				return fmt.Errorf("missing ';' after %s", stmt[0])
+			}
 			depth--
 			if depth < 0 {
 				return fmt.Errorf("unbalanced '}'")
 			}
+		default:
+			stmt = append(stmt, t.v)
 		}
 	}
-	if depth != 0 || inQuote != 0 {
-		return fmt.Errorf("unbalanced braces or quotes")
+	if depth != 0 {
+		return fmt.Errorf("unbalanced braces")
 	}
-	for _, f := range strings.Fields(s) {
-		switch strings.TrimSuffix(f, ";") {
-		case "include", "load_module", "alias", "root", "ssl_certificate", "ssl_certificate_key", "access_log", "error_log":
-			return fmt.Errorf("directive %q is not allowed", strings.TrimSuffix(f, ";"))
+	if len(stmt) > 0 {
+		return fmt.Errorf("missing ';' after %s", stmt[0])
+	}
+	return nil
+}
+
+// extraTok is a word of a snippet (quotes removed) or one of the punctuation { } ;.
+type extraTok struct {
+	v     string
+	punct bool
+}
+
+// extraTokens splits a snippet the way nginx's config parser does.
+func extraTokens(s string) ([]extraTok, error) {
+	var out []extraTok
+	for i := 0; i < len(s); {
+		c := s[i]
+		switch {
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			i++
+		case c == '#':
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+		case c == '{' || c == '}' || c == ';':
+			out = append(out, extraTok{string(c), true})
+			i++
+		case c == '"' || c == '\'':
+			var w strings.Builder
+			j := i + 1
+			for ; j < len(s) && s[j] != c; j++ {
+				if s[j] == '\\' && j+1 < len(s) {
+					j++
+				}
+				w.WriteByte(s[j])
+			}
+			if j >= len(s) {
+				return nil, fmt.Errorf("unbalanced quotes")
+			}
+			out = append(out, extraTok{v: w.String()})
+			i = j + 1
+		default:
+			j := i
+			for ; j < len(s) && !strings.ContainsRune(" \t\r\n{};\"'#", rune(s[j])); j++ {
+			}
+			w := s[i:j]
+			// nginx keeps ${var} and quotes inside a word; we would split them differently.
+			if strings.HasSuffix(w, "$") && j < len(s) && s[j] == '{' || j < len(s) && (s[j] == '"' || s[j] == '\'') {
+				return nil, fmt.Errorf("%q: use $var, not ${var}, and quote whole words", w+string(s[j]))
+			}
+			out = append(out, extraTok{v: w})
+			i = j
+		}
+	}
+	return out, nil
+}
+
+var (
+	extraDirectives = map[string]bool{
+		"add_header": true, "add_trailer": true, "expires": true, "etag": true, "charset": true, "default_type": true,
+		"gzip": true, "gzip_types": true, "gzip_min_length": true, "gzip_comp_level": true, "gzip_vary": true, "gzip_proxied": true,
+		"proxy_pass": true, "proxy_set_header": true, "proxy_hide_header": true, "proxy_pass_header": true, "proxy_ignore_headers": true,
+		"proxy_read_timeout": true, "proxy_send_timeout": true, "proxy_connect_timeout": true,
+		"proxy_buffering": true, "proxy_request_buffering": true, "proxy_buffer_size": true, "proxy_buffers": true,
+		"proxy_busy_buffers_size": true, "proxy_max_temp_file_size": true, "proxy_http_version": true, "proxy_redirect": true,
+		"proxy_cookie_path": true, "proxy_cookie_domain": true, "proxy_cookie_flags": true, "proxy_intercept_errors": true,
+		"proxy_next_upstream": true, "proxy_next_upstream_tries": true, "proxy_next_upstream_timeout": true,
+		"client_max_body_size": true, "client_body_buffer_size": true, "client_body_timeout": true,
+		"send_timeout": true, "keepalive_timeout": true, "chunked_transfer_encoding": true,
+		"return": true, "rewrite": true, "break": true, "set": true, "error_page": true, "internal": true,
+		"allow": true, "deny": true, "sub_filter": true, "sub_filter_once": true, "sub_filter_types": true,
+	}
+	extraBlocks = map[string]bool{"location": true, "if": true, "limit_except": true}
+)
+
+func checkDirective(project string, stmt []string, block bool) error {
+	name := stmt[0]
+	if block != extraBlocks[name] || !block && !extraDirectives[name] {
+		return fmt.Errorf("directive %q is not allowed in nginx_extra", name)
+	}
+	if name == "proxy_pass" {
+		if len(stmt) != 2 || !ownUpstream(project, stmt[1]) {
+			return fmt.Errorf("proxy_pass may only point at this project's services (http://%s)", UpstreamName(project, "<service>"))
 		}
 	}
 	return nil
+}
+
+func ownUpstream(project, target string) bool {
+	rest, ok := strings.CutPrefix(target, "http://"+UpstreamName(project, ""))
+	if !ok {
+		return false
+	}
+	svc, path, _ := strings.Cut(rest, "/")
+	return spec.ValidName(svc) && !strings.Contains(path, "$")
 }
 
 // cloudflareIPs from https://www.cloudflare.com/ips/.

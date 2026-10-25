@@ -135,22 +135,37 @@ func TestCheckExtra(t *testing.T) {
 		"add_header X 1;",
 		"location /a { return 200 '}'; }",
 		"# } comment\nadd_header a b;",
+		"location /hls/ { proxy_pass http://p__stream; }",
+		"location /api/ { proxy_pass http://p__api/v2/; }",
+		"if ($http_x_a){ return 403; }",
+		`add_header "X-A" "b c";`,
 	}
 	bad := []string{
 		"} server { listen 80; server_name victim.com; }",
 		"location /a {",
 		"include /etc/passwd;",
 		"location /x { alias /var/lib/clowdr/certs/; }",
+		"location /k {alias /var/lib/clowdr/certs/;}",
+		`location /k { "alias" /var/lib/clowdr/certs/; }`,
+		"location /k { root /; }",
 		"access_log /tmp/x;",
 		"return 200 'x",
+		"add_header X 1",
+		"proxy_pass http://other__web;",
+		"proxy_pass http://p-admin__web;",
+		"proxy_pass http://169.254.169.254/;",
+		"proxy_pass http://p__web/$uri;",
+		"add_header X ${a};",
+		"add_header {;",
+		"mirror /m;",
 	}
 	for _, s := range ok {
-		if err := checkExtra(s); err != nil {
+		if err := checkExtra("p", s); err != nil {
 			t.Errorf("%q: %v", s, err)
 		}
 	}
 	for _, s := range bad {
-		if err := checkExtra(s); err == nil {
+		if err := checkExtra("p", s); err == nil {
 			t.Errorf("%q accepted", s)
 		}
 	}
