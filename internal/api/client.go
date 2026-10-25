@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -72,6 +73,11 @@ func (c *Client) req(ctx context.Context, method, path string, body any) (*http.
 	req, err := http.NewRequestWithContext(ctx, method, c.Server+path, rd)
 	if err != nil {
 		return nil, err
+	}
+	// The token would cross the network in clear: plain http only to this machine (tests, an
+	// ssh tunnel).
+	if req.URL.Scheme != "https" && !isLoopback(req.URL.Hostname()) {
+		return nil, fmt.Errorf("%s: use https (plain http only to localhost)", c.Server)
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -183,4 +189,12 @@ func (c *Client) Raw(ctx context.Context, method, path string) (io.ReadCloser, e
 		return nil, err
 	}
 	return resp.Body, nil
+}
+
+func isLoopback(host string) bool {
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
