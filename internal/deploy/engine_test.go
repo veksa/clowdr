@@ -229,6 +229,15 @@ func TestCheckImage(t *testing.T) {
 		"CLOWDR.LOCAL/blog/web:v1":                                false,
 		"clowdr.local/shopx/web:v1":                               false, // a project named like a prefix of another
 		"clowdr.local/shop":                                       false,
+		"registry.example.com:5000/team/app:v1":                   true,
+		"library/nginx":                                           true,
+		"nginx:alpine/../../containers/x":                         false, // not a reference: it ends up in API paths
+		"nginx?x=1":                                               false,
+		"localhost:5000/app:v1":                                   false, // registries on the host or its networks
+		"127.0.0.1:7070/app":                                      false,
+		"10.0.0.5/app":                                            false,
+		"169.254.169.254/latest:v1":                               false,
+		"[::1]:5000/app":                                          false,
 		"64d5d947aea7":                                            false, // image ID, or a prefix of one
 		"64d5d9":                                                  false,
 		"a":                                                       false,

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -151,7 +152,13 @@ func containerName(project, service string, release uint64, replica int) string 
 	return fmt.Sprintf("%s-%s-r%d-%d", project, service, release, replica)
 }
 
-var imageID = regexp.MustCompile(`^(sha256:)?[0-9a-f]+$`)
+var (
+	imageID = regexp.MustCompile(`^(sha256:)?[0-9a-f]+$`)
+	// imageRef is docker's reference grammar: [host[:port]/]path[:tag][@sha256:digest].
+	imageRef = regexp.MustCompile(`^(?:([a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)*(?::[0-9]+)?)/)?` +
+		`[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*(?:/[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*)*` +
+		`(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$`)
+)
 
 // CheckImage rejects image references that would run another project's image: pushed images
 // live in docker as clowdr.local/<project>/..., and docker also resolves a bare image ID, or
@@ -163,6 +170,23 @@ func CheckImage(project, ref string) error {
 	}
 	if strings.HasPrefix(r, registry.ImagePrefix) && !strings.HasPrefix(r, registry.ImagePrefix+project+"/") {
 		return fmt.Errorf("image %s belongs to another project", ref)
+	}
+	// The ref goes into docker API paths and makes dockerd connect to its registry: it has to
+	// be a plain reference, from a registry outside the host and its private networks
+	// (docker talks plain http to 127.0.0.0/8).
+	if !imageRef.MatchString(ref) {
+		return fmt.Errorf("image %q is not a valid image reference", ref)
+	}
+	if first, _, ok := strings.Cut(r, "/"); ok && (strings.ContainsAny(first, ".:") || first == "localhost") {
+		host := first
+		if h, _, err := net.SplitHostPort(first); err == nil {
+			host = h
+		}
+		ip := net.ParseIP(host)
+		if host == "localhost" || strings.HasSuffix(host, ".localhost") ||
+			ip != nil && (ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsUnspecified()) {
+			return fmt.Errorf("image %s: registry %s is on the host or a private network", ref, first)
+		}
 	}
 	return nil
 }
