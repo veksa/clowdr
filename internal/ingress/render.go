@@ -363,7 +363,7 @@ func RenderMain(o Options) string {
 	}
 	b.WriteString(`
 events {
-    worker_connections 16384;
+    worker_connections 8192;
 }
 
 http {
