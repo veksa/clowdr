@@ -19,7 +19,7 @@ func TestSelfUpdate(t *testing.T) {
 	sum := sha256.Sum256(bin)
 	pub, priv, _ := ed25519.GenerateKey(nil)
 	sums := fmt.Sprintf("%s  clowdrd_linux_amd64\n%s  clowctl_linux_amd64\n", hex.EncodeToString(sum[:]), hex.EncodeToString(sum[:]))
-	sig := ed25519.Sign(priv, []byte(sums))
+	sig := ed25519.Sign(priv, []byte("v0.4.0\n"+sums))
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /releases/latest", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/releases/tag/v0.4.0", http.StatusFound)
@@ -71,7 +71,7 @@ func TestSelfUpdateNeedsSignature(t *testing.T) {
 	bin := []byte("evil clowctl")
 	sum := sha256.Sum256(bin)
 	sums := hex.EncodeToString(sum[:]) + "  clowctl_linux_amd64\n"
-	pub, _, _ := ed25519.GenerateKey(nil)
+	pub, priv, _ := ed25519.GenerateKey(nil)
 	_, other, _ := ed25519.GenerateKey(nil)
 	var sig []byte // nil = no signature file
 	mux := http.NewServeMux()
@@ -87,10 +87,16 @@ func TestSelfUpdateNeedsSignature(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	defer srv.Close()
 
-	// A release whose checksums match its binary is still refused unless the release key signed them.
+	// A release whose checksums match its binary is still refused unless the release key signed
+	// them for this tag: an older release's files, signed for that release, do not pass.
 	u := updater{base: srv.URL + "/releases", client: srv.Client(), goos: "linux", goarch: "amd64", key: pub}
 	exe := filepath.Join(t.TempDir(), "clowctl")
-	for _, s := range [][]byte{nil, ed25519.Sign(other, []byte(sums))} {
+	for _, s := range [][]byte{
+		nil,
+		ed25519.Sign(other, []byte("v9.9.9\n"+sums)),
+		ed25519.Sign(priv, []byte("v0.1.0\n"+sums)),
+		ed25519.Sign(priv, []byte(sums)),
+	} {
 		sig = s
 		os.WriteFile(exe, []byte("old"), 0o755)
 		if _, err := u.update(context.Background(), exe, "v0.3.0", "v9.9.9"); err == nil {

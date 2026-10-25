@@ -122,7 +122,8 @@ func (u updater) update(ctx context.Context, exe, current, want string) (string,
 	if err != nil {
 		return "", fmt.Errorf("release %s is not signed: %w", want, err)
 	}
-	if !ed25519.Verify(u.key, sums, sig) {
+	// The tag is signed with the checksums: an older release's files cannot pass for this one.
+	if !ed25519.Verify(u.key, append([]byte(want+"\n"), sums...), sig) {
 		return "", fmt.Errorf("release %s: checksums.txt signature does not match the release key", want)
 	}
 	name, sum := "", ""
