@@ -245,11 +245,21 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	if req.Name == "clowdr" {
+		writeErr(w, 400, "project name clowdr is reserved")
+		return
+	}
 	// A domain pattern belongs to one project only.
 	others, _ := s.Store.Projects()
 	for _, o := range others {
 		if o.Name == req.Name {
 			continue
+		}
+		// Container names are <project>-<service>-r<n>-<i> and <project>-<addon>: with projects
+		// a and a-b, a's service b-c and a-b's service c would claim the same names.
+		if strings.HasPrefix(o.Name, req.Name+"-") || strings.HasPrefix(req.Name, o.Name+"-") {
+			writeErr(w, 409, fmt.Sprintf("project name %s clashes with project %s: one must not start with the other followed by '-'", req.Name, o.Name))
+			return
 		}
 		for _, d := range req.Domains {
 			for _, od := range o.Domains {

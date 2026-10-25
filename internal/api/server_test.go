@@ -182,6 +182,12 @@ func TestEndToEnd(t *testing.T) {
 	if err := e.admin.Do(ctx, "POST", "/v1/projects", ProjectRequest{Name: "evil", Domains: []string{"api.example.com"}}, nil); err == nil {
 		t.Fatal("overlapping domain accepted")
 	}
+	// Names that would share container names with shop's, and the reserved one, are refused.
+	for _, name := range []string{"shop-admin", "clowdr"} {
+		if err := e.admin.Do(ctx, "POST", "/v1/projects", ProjectRequest{Name: name}, nil); err == nil {
+			t.Fatalf("project %s accepted", name)
+		}
+	}
 	// Bad token.
 	bad := NewClient(e.srv.URL, "clw_nope_nope", "")
 	if err := bad.Do(ctx, "GET", "/v1/version", nil, nil); !errors.As(err, &se) || se.Status != 401 {

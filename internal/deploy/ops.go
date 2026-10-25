@@ -76,11 +76,30 @@ func (e *Engine) AddonExec(ctx context.Context, project, addon string, cmd []str
 	if len(cmd) == 0 {
 		return "", -1, errors.New("no command")
 	}
-	name := AddonContainer(project, addon)
-	if _, err := e.Docker.ContainerInspect(ctx, name); err != nil {
-		return "", -1, fmt.Errorf("addon %s is not running for %s", addon, project)
+	name, err := e.addonContainer(ctx, project, addon)
+	if err != nil {
+		return "", -1, err
 	}
 	return e.Docker.Exec(ctx, name, cmd)
+}
+
+// addonContainer resolves the container of a project's addon. Container names are
+// <project>-<addon>, so without the label check project shop could reach shop-admin's
+// containers by asking for addon "admin-web-r3-1".
+func (e *Engine) addonContainer(ctx context.Context, project, addon string) (string, error) {
+	if _, ok := e.Platform().Addons[addon]; !ok {
+		return "", fmt.Errorf("addon %s is not configured on this host", addon)
+	}
+	name := AddonContainer(project, addon)
+	ci, err := e.Docker.ContainerInspect(ctx, name)
+	if err != nil {
+		return "", fmt.Errorf("addon %s is not running for %s", addon, project)
+	}
+	l := ci.Config.Labels
+	if l[runtime.LabelProject] != project || l[runtime.LabelRole] != "addon" || l[runtime.LabelAddon] != addon {
+		return "", fmt.Errorf("addon %s is not running for %s", addon, project)
+	}
+	return name, nil
 }
 
 // Volume is a project volume as shown by `clowctl volume ls`.
@@ -164,8 +183,21 @@ func (e *Engine) RemoveAddon(ctx context.Context, project, addon string, volumes
 			return fmt.Errorf("service %s uses %s; remove it from `uses` and redeploy first", s.Name, addon)
 		}
 	}
-	if err := e.Docker.ContainerRemove(ctx, AddonContainer(project, addon)); err != nil {
+	if _, ok := e.Platform().Addons[addon]; !ok {
+		return fmt.Errorf("addon %s: %w", addon, store.ErrNotFound)
+	}
+	name := AddonContainer(project, addon)
+	ci, err := e.Docker.ContainerInspect(ctx, name)
+	switch {
+	case errors.Is(err, runtime.ErrNotFound): // already gone; the volume may still be asked for
+	case err != nil:
 		return err
+	case ci.Config.Labels[runtime.LabelProject] != project || ci.Config.Labels[runtime.LabelAddon] != addon:
+		return fmt.Errorf("addon %s: %w", addon, store.ErrNotFound)
+	default:
+		if err := e.Docker.ContainerRemove(ctx, name); err != nil {
+			return err
+		}
 	}
 	if volumes {
 		if err := e.Docker.VolumeRemove(ctx, VolumeName(project, addon+"-data")); err != nil && !errors.Is(err, runtime.ErrNotFound) {

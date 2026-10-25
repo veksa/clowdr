@@ -126,6 +126,13 @@ func TestVolumesAndAddons(t *testing.T) {
 	if _, _, err := f.e.AddonExec(ctx, "shop", "redis", nil); err == nil {
 		t.Fatal("exec without a command")
 	}
+	// <project>-<addon> must not reach other containers whose names happen to match.
+	if _, _, err := f.e.AddonExec(ctx, "shop", "server-r1-1", []string{"env"}); err == nil {
+		t.Fatal("addon exec reached a service container")
+	}
+	if err := f.e.RemoveAddon(ctx, "shop", "server-r1-1", false); err == nil || f.d.ByName["shop-server-r1-1"] == nil {
+		t.Fatalf("addon remove reached a service container: %v", err)
+	}
 	if err := f.e.RemoveAddon(ctx, "shop", "redis", true); err == nil || !strings.Contains(err.Error(), "uses redis") {
 		t.Fatalf("removed an addon in use: %v", err)
 	}
