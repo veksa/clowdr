@@ -68,6 +68,8 @@ var (
 	nameRe   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,30}[a-z0-9])?$`)
 	domainRe = regexp.MustCompile(`^(\*\.)?([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
 	envRe    = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+	// pathRe: URL path characters that mean the same to nginx and in an HTTP request line.
+	pathRe = regexp.MustCompile(`^/[A-Za-z0-9._~!&()*+,=:@%/-]*$`)
 )
 
 // ValidName reports whether s can be used as a project, service, env or volume name.
@@ -115,8 +117,8 @@ func (s *Service) Validate() error {
 	if (len(s.Domains) > 0 || len(s.Routes) > 0) && s.Port == 0 {
 		return errf("port is required when domains or routes are set")
 	}
-	if s.Health.Path != "" && !strings.HasPrefix(s.Health.Path, "/") {
-		return errf("health path must start with /")
+	if p, q, _ := strings.Cut(s.Health.Path, "?"); s.Health.Path != "" && (!pathRe.MatchString(p) || strings.ContainsAny(q, " \t\r\n#")) {
+		return errf("health path must be a URL path starting with /")
 	}
 	if s.Health.Path != "" && s.Port == 0 {
 		return errf("port is required for an http health check")
@@ -146,7 +148,7 @@ func (s *Service) Validate() error {
 	}
 	paths := map[string]bool{}
 	for _, r := range s.Routes {
-		if !strings.HasPrefix(r.Path, "/") || strings.ContainsAny(r.Path, " ;{}\"'\n") {
+		if !pathRe.MatchString(r.Path) {
 			return errf("invalid route path %q", r.Path)
 		}
 		if paths[r.Path] {
