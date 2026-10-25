@@ -153,6 +153,11 @@ func TestVolumesAndAddons(t *testing.T) {
 	if err := f.e.RemoveAddon(ctx, "shop", "redis", true); err != nil || f.d.Vols["shop_redis-data"] != nil {
 		t.Fatalf("addon data not removed: %v", err)
 	}
+	// A volume of that name that clowdr did not make for shop stays.
+	f.d.Vols["shop_redis-data"] = map[string]string{"com.docker.compose.project": "shop"}
+	if err := f.e.RemoveAddon(ctx, "shop", "redis", true); err != nil || f.d.Vols["shop_redis-data"] == nil {
+		t.Fatalf("foreign volume removed: %v", err)
+	}
 }
 
 func TestEnsureNginx(t *testing.T) {

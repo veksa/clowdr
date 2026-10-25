@@ -200,8 +200,18 @@ func (e *Engine) RemoveAddon(ctx context.Context, project, addon string, volumes
 		}
 	}
 	if volumes {
-		if err := e.Docker.VolumeRemove(ctx, VolumeName(project, addon+"-data")); err != nil && !errors.Is(err, runtime.ErrNotFound) {
+		// Only a volume labelled as this project's: one of that name may belong to someone else.
+		vs, err := e.Docker.Volumes(ctx, runtime.LabelManaged, runtime.LabelProject+"="+project)
+		if err != nil {
 			return err
+		}
+		for _, v := range vs {
+			if v.Name != VolumeName(project, addon+"-data") {
+				continue
+			}
+			if err := e.Docker.VolumeRemove(ctx, v.Name); err != nil && !errors.Is(err, runtime.ErrNotFound) {
+				return err
+			}
 		}
 	}
 	return nil
