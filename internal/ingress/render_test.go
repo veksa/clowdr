@@ -158,6 +158,11 @@ func TestCheckExtra(t *testing.T) {
 		"add_header X ${a};",
 		"add_header {;",
 		"mirror /m;",
+		"add_header X a#; } location ~ ^/k { alias /var/lib/clowdr/certs/; } location /z { add_header Y b\n;",
+		"add_header X a}; root /;",
+		`add_header X a\; root /;`,
+		`add_header X "a"b;`,
+		`add_header X "a\"; root /; #";`,
 	}
 	for _, s := range ok {
 		if err := checkExtra("p", s); err != nil {

@@ -272,24 +272,32 @@ func extraTokens(s string) ([]extraTok, error) {
 			var w strings.Builder
 			j := i + 1
 			for ; j < len(s) && s[j] != c; j++ {
-				if s[j] == '\\' && j+1 < len(s) {
-					j++
+				// nginx unescapes only some \x pairs: refused rather than guessed.
+				if s[j] == '\\' {
+					return nil, fmt.Errorf("no backslashes in quoted words")
 				}
 				w.WriteByte(s[j])
 			}
 			if j >= len(s) {
 				return nil, fmt.Errorf("unbalanced quotes")
 			}
+			// nginx wants whitespace, ';' or '{' after a quoted word.
+			if j+1 < len(s) && !strings.ContainsRune(" \t\r\n;{", rune(s[j+1])) {
+				return nil, fmt.Errorf("unexpected %q after a quoted word", s[j+1])
+			}
 			out = append(out, extraTok{v: w.String()})
 			i = j + 1
 		default:
+			// As in nginx, a bare word ends only at whitespace, ';' or '{': '#', '}', quotes and
+			// '\' inside it are part of the word ("a#;" is the word "a#", not a comment). Words
+			// holding any of them, or ${, are refused rather than read one way here and another
+			// way by nginx.
 			j := i
-			for ; j < len(s) && !strings.ContainsRune(" \t\r\n{};\"'#", rune(s[j])); j++ {
+			for ; j < len(s) && !strings.ContainsRune(" \t\r\n;{", rune(s[j])); j++ {
 			}
 			w := s[i:j]
-			// nginx keeps ${var} and quotes inside a word; we would split them differently.
-			if strings.HasSuffix(w, "$") && j < len(s) && s[j] == '{' || j < len(s) && (s[j] == '"' || s[j] == '\'') {
-				return nil, fmt.Errorf("%q: use $var, not ${var}, and quote whole words", w+string(s[j]))
+			if strings.ContainsAny(w, "#}\"'\\") || strings.HasSuffix(w, "$") && j < len(s) && s[j] == '{' {
+				return nil, fmt.Errorf("%q: quote words with # } \\ or quotes in them, and use $var, not ${var}", w)
 			}
 			out = append(out, extraTok{v: w})
 			i = j
