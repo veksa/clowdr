@@ -10,6 +10,27 @@ health-gated switching, a token per project. No SSH and no Docker Hub.
 - **nginx** handles traffic; clowdrd only rewrites its config and reloads it gracefully. If clowdrd
   stops, sites keep working.
 
+## Compared to other self-hosted deploy tools
+
+clowdr is for one small server (1 vCPU, 1 GB) that runs several projects, possibly of different
+people. What it costs on the server and what a deploy needs:
+
+| | Idle memory on the server | Deploy setup | Several projects on one host |
+|---|---|---|---|
+| **clowdr** | clowdrd ~22 MB + nginx ~12 MB (one worker per core, 1 core) | one `deploy.yml` next to the code, `clowctl deploy`; local build, only new layers are pushed; no SSH, no external registry | token, domains, memory quota and network per project |
+| Kamal 2 | kamal-proxy ~15 MB | `config/deploy.yml` per app; SSH to the host, an external registry | one config per app; deploy access is SSH access to the host |
+| Dokku | small (nginx + shell plugins) | `git push` builds on the server, or `git:from-image` | apps share the host, access by SSH keys |
+| Dokploy | 300–400 MB | web UI, builds on the server | yes, through the UI |
+| Coolify | 0.5–1.2 GB | web UI, builds on the server | yes, through the UI |
+| Nomad | 100 MB+ per agent | job files (HCL), external registry and ingress | namespaces, ACLs |
+| k3s | 512 MB minimum, ~1.6 GB with the usual components | Deployment + Service + Ingress manifests, external registry | namespaces, RBAC |
+
+The clowdr numbers are RSS measured with no deploys running (Docker 29.9, nginx:alpine); a
+worker of the shared nginx adds ~6 MB per CPU core. The others are their documented minimums or
+published idle measurements and depend on the configuration. Kubernetes or Nomad pay off with
+several machines; Coolify and Dokploy if you want a UI and build on the server; clowdr builds on
+your machine, so the small server never compiles anything.
+
 ## Server
 
 Requirements: Linux, Docker 29+ with the containerd image store (the default on new installs:
