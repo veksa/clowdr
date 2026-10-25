@@ -319,7 +319,7 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 		}
 	}
 
-	if err := e.ensureImage(ctx, req.Image, progress); err != nil {
+	if err := e.ensureImage(ctx, req.Project, req.Image, progress); err != nil {
 		return fail(err)
 	}
 	if err := e.prepare(ctx, req.Project, s, progress); err != nil {
@@ -437,15 +437,40 @@ func (e *Engine) event(ctx context.Context, project, service, kind string, faile
 	}
 }
 
-func (e *Engine) ensureImage(ctx context.Context, ref string, progress Progress) error {
-	if _, err := e.Docker.ImageInspect(ctx, ref); err == nil {
+// ensureImage makes ref available. Pushed images must already be there. Any other reference is
+// pulled every time, even when docker has an image of that name: a local copy may have been
+// built on the host by someone else (a compose project, another tool) and carry their code and
+// secrets. A local copy is used only if the pull fails and this project ran that image before.
+func (e *Engine) ensureImage(ctx context.Context, project, ref string, progress Progress) error {
+	if strings.HasPrefix(ref, registry.ImagePrefix) {
+		if _, err := e.Docker.ImageInspect(ctx, ref); err != nil {
+			return fmt.Errorf("image %s is not on the server (push it first)", ref)
+		}
 		return nil
 	}
-	if strings.HasPrefix(ref, "clowdr.local/") {
-		return fmt.Errorf("image %s is not on the server (push it first)", ref)
-	}
 	progress("pulling %s", ref)
-	return e.Docker.ImagePull(ctx, ref)
+	err := e.Docker.ImagePull(ctx, ref)
+	if err == nil {
+		return nil
+	}
+	if _, ierr := e.Docker.ImageInspect(ctx, ref); ierr == nil && e.ranImage(project, ref) {
+		progress("pull failed (%v), using the local copy this project ran before", err)
+		return nil
+	}
+	return fmt.Errorf("pull %s: %w", ref, err)
+}
+
+func (e *Engine) ranImage(project, ref string) bool {
+	svcs, _ := e.Store.Services(project)
+	for _, s := range svcs {
+		rels, _ := e.Store.Releases(project, s.Name)
+		for _, r := range rels {
+			if r.Image == ref {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // prepare creates the project network, volumes and addons the service needs.

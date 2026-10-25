@@ -372,3 +372,27 @@ func TestExposeToNeedsAcceptFrom(t *testing.T) {
 		t.Fatalf("shop still in blog's network: %v", f.d.Networks)
 	}
 }
+
+func TestHostOnlyImagesAreNotRun(t *testing.T) {
+	f := newFixture(t)
+	run := func(ref string) error {
+		s := serverSpec()
+		_, err := f.e.Deploy(context.Background(), Request{Project: "shop", Spec: s, Image: ref, Author: "test"}, nil)
+		f.e.WaitDrains()
+		return err
+	}
+	// Built on the host by something else: docker has it, no registry does.
+	f.d.Local["infra-server:latest"] = true
+	f.d.NoPull["infra-server:latest"] = true
+	if err := run("infra-server:latest"); err == nil {
+		t.Fatal("ran an image that only exists on the host")
+	}
+	// An image the project pulled before still runs when the registry is down.
+	if err := run("nginx:alpine"); err != nil {
+		t.Fatal(err)
+	}
+	f.d.NoPull["nginx:alpine"] = true
+	if err := run("nginx:alpine"); err != nil {
+		t.Fatalf("redeploy with the registry down: %v", err)
+	}
+}

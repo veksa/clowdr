@@ -35,10 +35,12 @@ type Docker struct {
 	Execs  []string
 	// Crash makes containers of these images exit right after start.
 	Crash map[string]bool
+	// NoPull makes pulls of these references fail, as for images that exist only locally.
+	NoPull map[string]bool
 }
 
 func NewDocker() *Docker {
-	return &Docker{ByName: map[string]*Container{}, Local: map[string]bool{}, Crash: map[string]bool{},
+	return &Docker{ByName: map[string]*Container{}, Local: map[string]bool{}, Crash: map[string]bool{}, NoPull: map[string]bool{},
 		Vols: map[string]map[string]string{}, Networks: map[string][]string{}}
 }
 
@@ -58,6 +60,9 @@ func (f *Docker) ImageInspect(_ context.Context, ref string) (runtime.ImageInspe
 func (f *Docker) ImagePull(_ context.Context, ref string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.NoPull[ref] {
+		return &runtime.APIError{Status: 404, Message: "pull access denied for " + ref}
+	}
 	f.Local[ref] = true
 	return nil
 }
