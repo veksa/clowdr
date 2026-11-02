@@ -62,6 +62,7 @@ has() { # has PATTERN CMD...: CMD's output matches PATTERN
 
 not_served() { [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "Host: $DOMAIN" http://127.0.0.1/release.txt)" != 200 ]; }
 no_containers() { [ -z "$(docker ps -aq --filter label=clowdr.project=shop --filter label=clowdr.role=service)" ]; }
+no_store_containers() { [ -z "$(docker ps -aq --filter label=clowdr.project=store --filter label=clowdr.role=service)" ]; }
 
 # Background load: one request at a time against the site, counting failures, until
 # $WORK/stop appears. The result lands in $WORK/load as "<requests> <failures>".

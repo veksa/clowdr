@@ -194,7 +194,10 @@ func TestProjectLifeCycle(t *testing.T) {
 	t.Setenv("CLOWDR_TOKEN", "")
 	h.ok("gc")
 	h.ok("token", "revoke", tokenID(t, h))
-	h.ok("project", "rm", "shop", "--yes")
+	contains(t, h.ok("project", "rename", "shop", "store", "--yes"), "project shop is now store", "change project: in deploy.yml")
+	contains(t, h.fails("project", "rename", "shop", "other", "--yes"), "not found")
+	contains(t, h.ok("project", "ls"), "store")
+	h.ok("project", "rm", "store", "--yes")
 }
 
 func tokenID(t *testing.T, h *harness) string {

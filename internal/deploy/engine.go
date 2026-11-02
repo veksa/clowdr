@@ -34,6 +34,7 @@ type Docker interface {
 	ImageInspect(ctx context.Context, ref string) (runtime.ImageInspect, error)
 	ImagePull(ctx context.Context, ref string) error
 	ImageRemove(ctx context.Context, ref string) error
+	ImageTag(ctx context.Context, ref, target string) error
 	ContainerCreate(ctx context.Context, c runtime.ContainerConfig) (string, error)
 	ContainerStart(ctx context.Context, id string) error
 	ContainerStop(ctx context.Context, id string, grace time.Duration) error
@@ -95,8 +96,13 @@ type Engine struct {
 	LogTail func(project, service string, release uint64, replica, n int) []string
 	// Syslog makes nginx send access and error logs to clowdrd.
 	Syslog bool
+	// MoveLogs moves a renamed project's logs, traces and metrics to its new name. Optional.
+	MoveLogs func(old, name string)
 
 	locks   sync.Map // project/service -> *sync.Mutex
+	gates   sync.Map // project -> *sync.RWMutex: operations hold it shared, a rename exclusively
+	renames sync.Map // new project name -> old, while a rename is under way
+	renameM sync.Mutex
 	pushed  sync.Map // image -> time.Time of the last push
 	renderM sync.Mutex
 	netM    sync.Mutex // expose_to connects vs pruneForeign
@@ -119,10 +125,20 @@ func New(d Docker, st *store.Store, platform func() *config.Platform, ing *ingre
 }
 
 func (e *Engine) lock(project, service string) func() {
+	g := e.gate(project)
+	g.RLock()
 	m, _ := e.locks.LoadOrStore(project+"/"+service, &sync.Mutex{})
 	mu := m.(*sync.Mutex)
 	mu.Lock()
-	return mu.Unlock
+	return func() {
+		mu.Unlock()
+		g.RUnlock()
+	}
+}
+
+func (e *Engine) gate(project string) *sync.RWMutex {
+	g, _ := e.gates.LoadOrStore(project, &sync.RWMutex{})
+	return g.(*sync.RWMutex)
 }
 
 // Progress receives human-readable deploy steps, streamed to the CLI.
@@ -257,8 +273,13 @@ func (e *Engine) CheckSpec(project string, s spec.Service) error {
 
 // accepts reports whether a deployed service of project lists from in accept_from.
 func (e *Engine) accepts(all []store.Service, project, from string) bool {
+	// Before a rename's switch the specs still name the project by its old name.
+	old, renaming := e.renames.Load(from)
 	for _, o := range all {
-		if o.Project == project && contains(o.Spec.AcceptFrom, from) {
+		if o.Project != project {
+			continue
+		}
+		if contains(o.Spec.AcceptFrom, from) || (renaming && contains(o.Spec.AcceptFrom, old.(string))) {
 			return true
 		}
 	}
@@ -332,14 +353,15 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 	}
 	s := req.Spec
 	s.Defaults()
+	// The lock comes first: a deploy that waited for a rename has to see the names it left behind.
+	unlock := e.lock(req.Project, s.Name)
+	defer unlock()
 	if err := e.CheckSpec(req.Project, s); err != nil {
 		return store.Release{}, err
 	}
 	if err := CheckImage(req.Project, req.Image); err != nil {
 		return store.Release{}, err
 	}
-	unlock := e.lock(req.Project, s.Name)
-	defer unlock()
 
 	rel := store.Release{
 		Project: req.Project, Service: s.Name, Image: req.Image, Digest: req.Digest,

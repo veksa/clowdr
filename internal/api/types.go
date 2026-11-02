@@ -42,6 +42,10 @@ type Event struct {
 	Done    bool           `json:"done,omitempty"`
 }
 
+type RenameProjectRequest struct {
+	Name string `json:"name"`
+}
+
 type ProjectRequest struct {
 	Name       string   `json:"name"`
 	Domains    []string `json:"domains"`

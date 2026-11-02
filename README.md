@@ -58,7 +58,15 @@ clowctl context add prod https://deploy.example.com --token <admin token>
 clowctl project create shop --domains example.com,*.example.com --platform redis --memory 600m
 clowctl token create --project shop --env prod      # give this to the project / CI
 clowctl platform status                             # nginx, certificates, memory and disk, projects
+clowctl project rename shop store                   # tokens, releases, images and logs move along
 ```
+
+`project rename` starts every service's current release in new containers next to the old ones and
+moves traffic when they are healthy, like a deploy. It refuses a project with volumes, addons or a
+stopped service, and one declared in `platform.yml`. Afterwards change `project:` in `deploy.yml`,
+and `expose_to` / `accept_from` in the `deploy.yml` of other projects: the server rewrote its copy,
+but their next deploy would bring the old name back. Anything outside clowdr (a database, a bucket,
+secrets) keeps its name.
 
 ## Project
 

@@ -63,6 +63,7 @@ func (s *Server) Handler() http.Handler {
 	admin("GET /v1/projects", s.listProjects)
 	admin("POST /v1/projects", s.createProject)
 	admin("DELETE /v1/projects/{project}", s.deleteProject)
+	admin("POST /v1/projects/{project}/rename", s.renameProject)
 	admin("GET /v1/tokens", s.listTokens)
 	admin("POST /v1/tokens", s.createToken)
 	admin("DELETE /v1/tokens/{id}", s.deleteToken)
@@ -255,9 +256,11 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		if o.Name == req.Name {
 			continue
 		}
-		// Container names are <project>-<service>-r<n>-<i> and <project>-<addon>: with projects
-		// a and a-b, a's service b-c and a-b's service c would claim the same names.
-		if strings.HasPrefix(o.Name, req.Name+"-") || strings.HasPrefix(req.Name, o.Name+"-") {
+		if o.RenamedFrom == req.Name {
+			writeErr(w, 409, fmt.Sprintf("project %s was renamed to %s a moment ago and its containers are still draining", req.Name, o.Name))
+			return
+		}
+		if spec.NamesClash(o.Name, req.Name) {
 			writeErr(w, 409, fmt.Sprintf("project name %s clashes with project %s: one must not start with the other followed by '-'", req.Name, o.Name))
 			return
 		}
@@ -326,6 +329,21 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	s.Engine.RenderAll(r.Context())
 	w.WriteHeader(204)
+}
+
+func (s *Server) renameProject(w http.ResponseWriter, r *http.Request) {
+	var req RenameProjectRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	project := r.PathValue("project")
+	if _, err := s.Store.Project(project); err != nil {
+		writeErr(w, errStatus(err), err.Error())
+		return
+	}
+	s.stream(w, r, func(ctx context.Context, p deploy.Progress) (*store.Release, error) {
+		return nil, s.Engine.RenameProject(ctx, project, req.Name, author(r, ""), p)
+	})
 }
 
 func (s *Server) listTokens(w http.ResponseWriter, r *http.Request) {

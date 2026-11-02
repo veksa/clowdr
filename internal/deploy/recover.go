@@ -20,7 +20,18 @@ import (
 //   - Containers of the current release are started when they are not running (a stop-first
 //     deploy stopped them, or the host rebooted), and stopped for services that are stopped.
 //   - Containers of the previous release are drained: the switch happened, the drain did not.
+//   - What still carries a project's old name after a rename is removed: traffic has moved.
 func (e *Engine) Recover(ctx context.Context) error {
+	projects, err := e.Store.Projects()
+	if err != nil {
+		return err
+	}
+	for _, p := range projects {
+		if p.RenamedFrom != "" {
+			e.Log.Info("recover: finishing a rename", "project", p.Name, "old", p.RenamedFrom)
+			e.finishRename(ctx, p.RenamedFrom, p.Name)
+		}
+	}
 	svcs, err := e.Store.Services("")
 	if err != nil {
 		return err

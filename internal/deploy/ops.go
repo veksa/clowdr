@@ -318,6 +318,10 @@ func (e *Engine) GC(ctx context.Context) (GCResult, error) {
 	}
 	for _, c := range cs {
 		l := c.Labels
+		// A rename starts its containers before the state knows about them.
+		if _, renaming := e.renames.Load(l[runtime.LabelProject]); renaming {
+			continue
+		}
 		if !keepC[c.Name()] && !deploying[l[runtime.LabelProject]+"/"+l[runtime.LabelService]+"/"+l[runtime.LabelRelease]] {
 			if err := e.Docker.ContainerRemove(ctx, c.ID); err == nil {
 				res.Containers = append(res.Containers, c.Name())

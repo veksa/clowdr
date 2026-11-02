@@ -85,6 +85,23 @@ step "diff and gc"
 cc diff || true
 CLOWDR_TOKEN= clowctl --context e2e gc
 
+step "rename the project under load: no failed requests"
+served="$(get release.txt)"
+load_start
+CLOWDR_TOKEN= clowctl --context e2e project rename shop store --yes
+load_stop "rename"
+[ "$(get release.txt)" = "$served" ] || fail "$served is not served after the rename"
+eventually no_containers || fail "containers of the old name left after the rename"
+sed -i 's/^project: shop/project: store/' deploy.yml
+has web cc ps || fail "the project token does not see the service under the new name"
+[ "$(cc releases web -o json | jq length)" -ge 2 ] || fail "release history lost in the rename"
+cc logs web --tail 1 >/dev/null || fail "no logs under the new name"
+release v-renamed
+[ "$(get release.txt)" = v-renamed ] || fail "a deploy under the new name is not served"
+eventually env CLOWDR_TOKEN= clowctl --context e2e project rename store shop --yes || fail "rename back"
+eventually no_store_containers || fail "containers of the new name left after renaming back"
+sed -i 's/^project: store/project: shop/' deploy.yml
+
 step "remove the service"
 cc rm web --yes
 eventually not_served || fail "a removed service still answers"

@@ -508,6 +508,86 @@ func (s *Store) Remove(k Key) {
 	os.RemoveAll(filepath.Join(s.DataDir, p))
 }
 
+// RenameProject moves everything stored for a project to a new name, the buffers included. It
+// can run twice: lines may still arrive under the old name while old containers drain.
+func (s *Store) RenameProject(old, name string) {
+	s.mu.Lock()
+	for k, st := range s.streams {
+		if k.Project != old {
+			continue
+		}
+		st.mu.Lock()
+		st.wal.Close()
+		s.bufTotal -= st.size
+		st.size = 0
+		st.mu.Unlock()
+		delete(s.streams, k)
+	}
+	s.mu.Unlock()
+
+	// Buffers go to the old segments first and travel with them.
+	root := filepath.Join(s.BufDir, old)
+	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, p)
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if len(parts) != 2 {
+			return nil
+		}
+		k := Key{Project: old, Kind: parts[0], Name: strings.TrimSuffix(strings.TrimSuffix(parts[1], ".wal"), ".flushing")}
+		if err := s.writeSegment(k, p); err != nil {
+			s.Log.Error("logs: rename: flush buffer", "file", p, "err", err)
+		}
+		return nil
+	})
+
+	root = filepath.Join(s.DataDir, old)
+	failed := false
+	filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		rel, _ := filepath.Rel(root, p)
+		if err := moveSegment(p, filepath.Join(s.DataDir, name, rel)); err != nil {
+			failed = true
+			s.Log.Error("logs: rename: move segment", "file", p, "err", err)
+		}
+		return nil
+	})
+	if !failed {
+		os.RemoveAll(root)
+	}
+}
+
+// moveSegment moves a segment, appending to one of the same hour: segments are concatenated zstd
+// frames, which read back as one stream.
+func moveSegment(from, to string) error {
+	if err := os.MkdirAll(filepath.Dir(to), 0o750); err != nil {
+		return err
+	}
+	if _, err := os.Stat(to); os.IsNotExist(err) {
+		return os.Rename(from, to)
+	}
+	raw, err := os.ReadFile(from)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(to, os.O_WRONLY|os.O_APPEND, 0o640)
+	if err != nil {
+		return err
+	}
+	_, err = f.Write(raw)
+	if cerr := f.Close(); err == nil {
+		err = cerr
+	}
+	if err != nil {
+		return err
+	}
+	return os.Remove(from)
+}
+
 // DiskUsage returns bytes used by a stream on disk.
 func (s *Store) DiskUsage(k Key) int64 {
 	var n int64

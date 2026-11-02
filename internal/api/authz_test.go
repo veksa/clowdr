@@ -22,6 +22,7 @@ var routes = []struct {
 	{"GET /v1/projects", true},
 	{"POST /v1/projects", true},
 	{"DELETE /v1/projects/{project}", true},
+	{"POST /v1/projects/{project}/rename", true},
 	{"GET /v1/tokens", true},
 	{"POST /v1/tokens", true},
 	{"DELETE /v1/tokens/{id}", true},

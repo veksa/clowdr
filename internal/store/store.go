@@ -35,6 +35,9 @@ type Project struct {
 	Seeded  bool      `json:"seeded,omitempty"` // from platform.yml
 	// NginxExtra allows raw nginx snippets in the project's deploy.yml (trusted projects only).
 	NginxExtra bool `json:"nginx_extra,omitempty"`
+	// RenamedFrom is the old name while containers, network and images of a rename are being
+	// removed; Recover finishes the job after a restart.
+	RenamedFrom string `json:"renamed_from,omitempty"`
 }
 
 type Token struct {

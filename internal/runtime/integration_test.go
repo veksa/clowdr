@@ -12,6 +12,36 @@ import (
 
 const testImage = "busybox:1.37"
 
+func TestImageTag(t *testing.T) {
+	d := realDocker(t)
+	ctx := context.Background()
+	if err := d.ImagePull(ctx, testImage); err != nil {
+		t.Fatal(err)
+	}
+	var b [4]byte
+	rand.Read(b[:])
+	target := "clowdr.local/rename-" + hex.EncodeToString(b[:]) + "/web:v1"
+	if err := d.ImageTag(ctx, testImage, target); err != nil {
+		t.Fatal(err)
+	}
+	defer d.ImageRemove(ctx, target)
+	if _, err := d.ImageInspect(ctx, target); err != nil {
+		t.Fatalf("the new name does not resolve: %v", err)
+	}
+	if err := d.ImageRemove(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.ImageInspect(ctx, testImage); err != nil {
+		t.Fatalf("removing one name took the image: %v", err)
+	}
+	if err := d.ImageTag(ctx, "clowdr.local/no/such:image", target); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing image: %v", err)
+	}
+	if err := d.ImageTag(ctx, testImage, "clowdr.local/no-tag"); err == nil {
+		t.Fatal("a target without a tag must be refused")
+	}
+}
+
 // realDocker returns a client for the local docker engine, or skips the test.
 func realDocker(t *testing.T) *Docker {
 	t.Helper()

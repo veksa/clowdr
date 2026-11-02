@@ -76,6 +76,13 @@ var (
 // Names end up in container names, nginx upstream names and URL paths.
 func ValidName(s string) bool { return nameRe.MatchString(s) }
 
+// NamesClash reports whether two project names could claim the same container names, which are
+// <project>-<service>-r<n>-<i> and <project>-<addon>: with projects a and a-b, a's service b-c
+// and a-b's service c would.
+func NamesClash(a, b string) bool {
+	return strings.HasPrefix(a, b+"-") || strings.HasPrefix(b, a+"-")
+}
+
 func ValidDomain(s string) bool { return domainRe.MatchString(s) }
 
 func ValidEnvName(s string) bool { return envRe.MatchString(s) }

@@ -75,6 +75,16 @@ func (f *Docker) ImageRemove(_ context.Context, ref string) error {
 	return nil
 }
 
+func (f *Docker) ImageTag(_ context.Context, ref, target string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.Local[ref] {
+		return &runtime.APIError{Status: 404, Message: "no such image"}
+	}
+	f.Local[target] = true
+	return nil
+}
+
 func (f *Docker) ContainerCreate(_ context.Context, c runtime.ContainerConfig) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -204,9 +214,12 @@ func (p Prober) Probe(_ context.Context, u string) error {
 	return nil
 }
 
-type Nginx struct{ Reloads int }
+type Nginx struct {
+	Reloads int
+	TestErr error // makes the config check fail
+}
 
-func (n *Nginx) Test(context.Context) (string, error) { return "", nil }
+func (n *Nginx) Test(context.Context) (string, error) { return "", n.TestErr }
 func (n *Nginx) Reload(context.Context) error         { n.Reloads++; return nil }
 
 func (f *Docker) NetworkEnsure(context.Context, string, map[string]string) error { return nil }

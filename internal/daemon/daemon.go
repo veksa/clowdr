@@ -108,6 +108,7 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 	defer stopLogs()
 	eng.Syslog = true
 	eng.LogTail = logStore.Tail
+	eng.MoveLogs = logStore.RenameProject
 	eng.LogConfig = fluentdLogConfig
 	events := &monitor.Events{Logs: logStore}
 	if tg := plat.Notify.Telegram; tg.Token != "" && tg.ChatID != "" {

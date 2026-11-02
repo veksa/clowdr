@@ -204,6 +204,15 @@ func (d *Docker) ImageRemove(ctx context.Context, ref string) error {
 	return d.call(ctx, "DELETE", "/images/"+ref, nil, nil, nil)
 }
 
+// ImageTag gives an image a second name; target is repository:tag.
+func (d *Docker) ImageTag(ctx context.Context, ref, target string) error {
+	i := strings.LastIndex(target, ":")
+	if i <= strings.LastIndex(target, "/") {
+		return fmt.Errorf("image %s has no tag", target)
+	}
+	return d.call(ctx, "POST", "/images/"+ref+"/tag", url.Values{"repo": {target[:i]}, "tag": {target[i+1:]}}, nil, nil)
+}
+
 type ImageSummary struct {
 	ID          string
 	RepoTags    []string

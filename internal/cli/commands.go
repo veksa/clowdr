@@ -838,7 +838,36 @@ func (a *app) projectCmd() *cobra.Command {
 	}
 	rm.Flags().BoolVarP(&yes, "yes", "y", false, "do not ask")
 	rm.Flags().BoolVar(&rmVolumes, "volumes", false, "also delete the project's volumes (addon data included)")
-	cmd.AddCommand(create, rm, &cobra.Command{
+	var renameYes bool
+	rename := &cobra.Command{
+		Use:   "rename <name> <new-name>",
+		Short: "Rename a project: new containers come up next to the old ones, tokens and history stay",
+		Long: `Rename a project on the server. Every service gets new containers of its current release; traffic
+moves when they are healthy, in one nginx reload. Tokens, releases, images, logs, traces and metrics
+move to the new name, and expose_to / accept_from of other projects are rewritten on the server.
+
+A project with volumes, addons or a stopped service is refused. Databases, buckets and anything else
+outside clowdr keep their names. Afterwards change "project:" in deploy.yml, and expose_to /
+accept_from in the deploy.yml of other projects, or their next deploy brings the old name back.`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			t, err := a.target(false)
+			if err != nil {
+				return err
+			}
+			if !renameYes && !confirm(fmt.Sprintf("Rename project %s to %s on %s?", args[0], args[1], t.client.Server)) {
+				return errors.New("aborted")
+			}
+			if _, err := t.client.Stream(cmd.Context(), "POST", api.Path("projects", args[0], "rename"), api.RenameProjectRequest{Name: args[1]}, a.progress); err != nil {
+				return err
+			}
+			fmt.Fprintf(a.err, "✓ project %s is now %s\n", args[0], args[1])
+			fmt.Fprintf(a.err, "  change project: in deploy.yml, and expose_to / accept_from in other projects' deploy.yml\n")
+			return nil
+		},
+	}
+	rename.Flags().BoolVarP(&renameYes, "yes", "y", false, "do not ask")
+	cmd.AddCommand(create, rm, rename, &cobra.Command{
 		Use:   "ls",
 		Short: "List projects",
 		RunE: func(cmd *cobra.Command, args []string) error {
