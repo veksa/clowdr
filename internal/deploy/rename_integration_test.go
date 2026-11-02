@@ -73,6 +73,9 @@ func TestRenameProjectRealDocker(t *testing.T) {
 		for _, img := range []string{oldImage, newImage, sharedImage} {
 			d.ImageRemove(ctx, img)
 		}
+		for _, v := range []string{VolumeName(old, "data"), VolumeName(old, "logs"), VolumeName(name, "data"), VolumeName(name, "logs")} {
+			d.VolumeRemove(ctx, v)
+		}
 	})
 
 	dockerCmd(t, "FROM busybox:1.37\nCMD [\"sleep\",\"3600\"]\n", "build", "-q", "-t", oldImage, "-t", sharedImage, "-")
@@ -95,8 +98,18 @@ func TestRenameProjectRealDocker(t *testing.T) {
 	}
 
 	health := spec.Health{Interval: 100 * time.Millisecond, Timeout: 30 * time.Second, Successes: 2}
-	web := spec.Service{Name: "web", Health: health, Drain: time.Millisecond, StopGrace: time.Second, AcceptFrom: []string{shared}}
+	web := spec.Service{Name: "web", Health: health, Drain: time.Millisecond, StopGrace: time.Second, AcceptFrom: []string{shared},
+		Volumes: []spec.Volume{{Name: "data", Target: "/data"}}}
 	web.Defaults()
+	// One volume with data a service mounts, one nothing mounts, with an owner and a nested file.
+	volLabels := map[string]string{runtime.LabelManaged: "1", runtime.LabelProject: old}
+	for _, v := range []string{"data", "logs"} {
+		if err := d.VolumeEnsure(ctx, VolumeName(old, v), volLabels); err != nil {
+			t.Fatal(err)
+		}
+		dockerCmd(t, "", "run", "--rm", "-v", VolumeName(old, v)+":/v", sharedImage, "sh", "-c",
+			"mkdir -p /v/sub && echo content-"+v+" > /v/sub/file && chown 1234 /v/sub/file")
+	}
 	rel, err := e.Deploy(ctx, Request{Project: old, Spec: web, Image: oldImage, Author: "test"}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -116,6 +129,20 @@ func TestRenameProjectRealDocker(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.WaitDrains()
+
+	if out := dockerCmd(t, "", "exec", containerName(name, "web", rel.ID, 1), "cat", "/data/sub/file"); !strings.Contains(out, "content-data") {
+		t.Errorf("mounted volume in the new container: %q", out)
+	}
+	out := dockerCmd(t, "", "run", "--rm", "-v", VolumeName(name, "logs")+":/v:ro", sharedImage, "sh", "-c", "cat /v/sub/file; stat -c %u /v/sub/file")
+	if !strings.Contains(out, "content-logs") || !strings.Contains(out, "1234") {
+		t.Errorf("copied volume, content and owner: %q", out)
+	}
+	if vols, err := d.Volumes(ctx, runtime.LabelProject+"="+old); err != nil || len(vols) != 0 {
+		t.Errorf("old volumes left: %+v, %v", vols, err)
+	}
+	if cs, _ := d.Containers(ctx, runtime.LabelProject+"="+name, runtime.LabelService+"=rename-copy"); len(cs) != 0 {
+		t.Errorf("helper container left: %+v", cs)
+	}
 
 	if _, err := d.ContainerInspect(ctx, rel.Containers[0]); !errors.Is(err, runtime.ErrNotFound) {
 		t.Fatalf("old container: %v", err)

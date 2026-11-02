@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -22,8 +21,10 @@ import (
 // ones. Only when all of them are healthy does the state move, in one transaction, and nginx
 // switch, in one reload. A failure before that leaves the old project serving as it was.
 //
-// A project with volumes or addons is refused: docker cannot rename a volume, and copying data
-// is not something to do behind a rename.
+// Docker cannot rename a volume either, so each one is copied to its new name and the old one goes
+// only after the switch. A service that mounts a volume is stopped for the copy: what it wrote
+// afterwards would be lost. A project with addons is refused, as their containers and data are
+// tied to the project name in ways a copy does not cover.
 func (e *Engine) RenameProject(ctx context.Context, old, name, author string, progress Progress) error {
 	if progress == nil {
 		progress = func(string, ...any) {}
@@ -50,7 +51,7 @@ func (e *Engine) RenameProject(ctx context.Context, old, name, author string, pr
 		defer g.Unlock()
 	}
 
-	svcs, current, err := e.checkRename(ctx, old, name)
+	svcs, current, vols, err := e.checkRename(ctx, old, name)
 	if err != nil {
 		return err
 	}
@@ -62,12 +63,19 @@ func (e *Engine) RenameProject(ctx context.Context, old, name, author string, pr
 		tagged     []string
 		started    []string
 		stopped    []store.Release
+		newVols    []string
 		stopFirsts = map[string]bool{}
 	)
 	cleanup := func() {
 		ctx := context.WithoutCancel(ctx)
 		for _, c := range started {
 			e.Docker.ContainerRemove(ctx, c)
+		}
+		// The old containers come back on their old volumes, which nothing has changed.
+		for _, v := range newVols {
+			if err := e.Docker.VolumeRemove(ctx, v); err != nil && !errors.Is(err, runtime.ErrNotFound) {
+				e.Log.Warn("rename: remove new volume", "volume", v, "err", err)
+			}
 		}
 		for _, r := range stopped {
 			progress("starting %s again", strings.Join(r.Containers, ", "))
@@ -131,6 +139,28 @@ func (e *Engine) RenameProject(ctx context.Context, old, name, author string, pr
 		cleanup()
 		return err
 	}
+	stopOld := func(service string, r store.Release) {
+		stopFirsts[service] = true
+		stopped = append(stopped, r)
+		for _, c := range r.Containers {
+			e.Docker.ContainerStop(ctx, c, r.Spec.StopGrace)
+		}
+	}
+	// Nothing may write to a volume while it is copied.
+	for _, v := range svcs {
+		if r, ok := current[v.Name]; ok && len(r.Spec.Volumes) > 0 {
+			progress("stopping %s: its volumes are copied while it is down", v.Name)
+			stopOld(v.Name, r)
+		}
+	}
+	for _, v := range vols {
+		to := VolumeName(name, strings.TrimPrefix(v.Name, old+"_"))
+		newVols = append(newVols, to)
+		if err := e.copyVolume(ctx, old, name, v.Name, to, progress); err != nil {
+			cleanup()
+			return fmt.Errorf("copy volume %s: %w", v.Name, err)
+		}
+	}
 	containers := map[uint64][]string{}
 	for _, v := range svcs {
 		r, ok := current[v.Name]
@@ -139,13 +169,11 @@ func (e *Engine) RenameProject(ctx context.Context, old, name, author string, pr
 		}
 		s := r.Spec
 		need := int64(len(r.Containers)) * s.Memory
-		if s.Switch == spec.SwitchStopFirst || (quota > 0 && used+need > quota) || (free >= 0 && need > free) {
-			stopFirsts[v.Name] = true
+		if stopFirsts[v.Name] {
+			// Stopped above, for its volumes.
+		} else if s.Switch == spec.SwitchStopFirst || (quota > 0 && used+need > quota) || (free >= 0 && need > free) {
 			progress("stop-first: stopping %s before starting it under the new name", v.Name)
-			stopped = append(stopped, r)
-			for _, c := range r.Containers {
-				e.Docker.ContainerStop(ctx, c, s.StopGrace)
-			}
+			stopOld(v.Name, r)
 		} else {
 			used += need
 			if free >= 0 {
@@ -229,73 +257,73 @@ func (e *Engine) RenameProject(ctx context.Context, old, name, author string, pr
 }
 
 // checkRename refuses a rename that would lose data or break something, before anything changed.
-// It returns the project's services and their current releases by service name.
-func (e *Engine) checkRename(ctx context.Context, old, name string) ([]store.Service, map[string]store.Release, error) {
+// It returns the project's services, their current releases by service name, and its volumes.
+func (e *Engine) checkRename(ctx context.Context, old, name string) ([]store.Service, map[string]store.Release, []runtime.Volume, error) {
+	fail := func(format string, args ...any) ([]store.Service, map[string]store.Release, []runtime.Volume, error) {
+		return nil, nil, nil, fmt.Errorf(format, args...)
+	}
 	if !spec.ValidName(name) {
-		return nil, nil, fmt.Errorf("invalid project name %q", name)
+		return fail("invalid project name %q", name)
 	}
 	if name == "clowdr" {
-		return nil, nil, errors.New("project name clowdr is reserved")
+		return fail("project name clowdr is reserved")
 	}
 	if name == old {
-		return nil, nil, fmt.Errorf("the project is already called %s", name)
+		return fail("the project is already called %s", name)
 	}
 	p, err := e.Store.Project(old)
 	if err != nil {
-		return nil, nil, fmt.Errorf("project %s: %w", old, err)
+		return fail("project %s: %w", old, err)
 	}
 	if p.RenamedFrom != "" {
-		return nil, nil, fmt.Errorf("the rename from %s is still finishing: the old containers are draining", p.RenamedFrom)
+		return fail("the rename from %s is still finishing: the old containers are draining", p.RenamedFrom)
 	}
 	// platform.yml would create the old project again on the next start of clowdrd.
 	if p.Seeded {
-		return nil, nil, fmt.Errorf("project %s comes from platform.yml: rename it there", old)
+		return fail("project %s comes from platform.yml: rename it there", old)
 	}
 	if _, err := e.Store.Project(name); err == nil {
-		return nil, nil, fmt.Errorf("project %s already exists", name)
+		return fail("project %s already exists", name)
 	} else if !errors.Is(err, store.ErrNotFound) {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	others, err := e.Store.Projects()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	for _, o := range others {
 		if o.Name != old && spec.NamesClash(o.Name, name) {
-			return nil, nil, fmt.Errorf("project name %s clashes with project %s: one must not start with the other followed by '-'", name, o.Name)
+			return fail("project name %s clashes with project %s: one must not start with the other followed by '-'", name, o.Name)
 		}
 		if o.RenamedFrom == name {
-			return nil, nil, fmt.Errorf("project %s was renamed to %s a moment ago and its containers are still draining", name, o.Name)
+			return fail("project %s was renamed to %s a moment ago and its containers are still draining", name, o.Name)
 		}
 	}
 	for _, ext := range e.Platform().External {
 		if _, ok := ext.Share[old]; ok {
-			return nil, nil, fmt.Errorf("platform.yml shares an external service with project %s: change it there first", old)
+			return fail("platform.yml shares an external service with project %s: change it there first", old)
 		}
 	}
 
 	svcs, err := e.Store.Services(old)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	current := map[string]store.Release{}
 	for _, v := range svcs {
 		if v.Stopped {
-			return nil, nil, fmt.Errorf("service %s is stopped: start or remove it first", v.Name)
-		}
-		if len(v.Spec.Volumes) > 0 {
-			return nil, nil, fmt.Errorf("service %s has volumes: docker cannot rename a volume, its data would be left behind", v.Name)
+			return fail("service %s is stopped: start or remove it first", v.Name)
 		}
 		if len(v.Spec.Uses) > 0 {
-			return nil, nil, fmt.Errorf("service %s uses addons (%s): their data and containers carry the project name", v.Name, strings.Join(v.Spec.Uses, ", "))
+			return fail("service %s uses addons (%s): their data and containers carry the project name", v.Name, strings.Join(v.Spec.Uses, ", "))
 		}
 		rels, err := e.Store.Releases(old, v.Name)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		for _, r := range rels {
 			if r.Status == store.StatusDeploying {
-				return nil, nil, fmt.Errorf("release r%d of %s is still deploying", r.ID, v.Name)
+				return fail("release r%d of %s is still deploying", r.ID, v.Name)
 			}
 			if r.ID == v.Current {
 				current[v.Name] = r
@@ -303,47 +331,115 @@ func (e *Engine) checkRename(ctx context.Context, old, name string) ([]store.Ser
 		}
 	}
 
-	vols, err := e.Docker.Volumes(ctx, runtime.LabelProject+"="+old)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(vols) > 0 {
-		return nil, nil, fmt.Errorf("project %s has volumes (%s): docker cannot rename a volume, remove them first if they are not needed", old, volumeNames(vols))
-	}
 	addons, err := e.Docker.Containers(ctx, runtime.LabelProject+"="+old, runtime.LabelRole+"=addon")
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if len(addons) > 0 {
-		return nil, nil, fmt.Errorf("project %s runs addons: remove them first if they are not needed", old)
+		return fail("project %s runs addons: remove them first if they are not needed", old)
+	}
+	vols, err := e.Docker.Volumes(ctx, runtime.LabelProject+"="+old)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, v := range vols {
+		if !strings.HasPrefix(v.Name, old+"_") {
+			return fail("volume %s is labelled for project %s but is not named after it", v.Name, old)
+		}
 	}
 
 	// Whatever carries the new name already belongs to a removed project or an interrupted rename.
-	left, err := e.LeftoverVolumes(ctx, name)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(left) > 0 {
-		return nil, nil, fmt.Errorf("volumes of a removed project %s are still on the host (%s)", name, strings.Join(left, ", "))
-	}
 	cs, err := e.Docker.Containers(ctx, runtime.LabelProject+"="+name)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	if len(cs) > 0 {
-		return nil, nil, fmt.Errorf("containers labelled for project %s are on the host (%s): clowctl gc removes what an interrupted rename left", name, cs[0].Name())
+		return fail("containers labelled for project %s are on the host (%s): clowctl gc removes what an interrupted rename left", name, cs[0].Name())
 	}
-	return svcs, current, nil
+	left, err := e.Docker.Volumes(ctx, runtime.LabelProject+"="+name)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	for _, v := range left {
+		// A partial copy of an interrupted rename: the original is intact, as the old volumes go
+		// only after the switch, and that did not happen, or the new project would exist.
+		if v.Labels[labelRenamedFrom] != old {
+			return fail("volumes of a removed project %s are still on the host (%s)", name, v.Name)
+		}
+		if err := e.Docker.VolumeRemove(ctx, v.Name); err != nil {
+			return fail("remove %s, left by an interrupted rename: %w", v.Name, err)
+		}
+	}
+	return svcs, current, vols, nil
 }
 
-func volumeNames(vols []runtime.Volume) string {
-	names := make([]string, 0, len(vols))
-	for _, v := range vols {
-		names = append(names, v.Name)
+// labelRenamedFrom marks a volume copied by a rename with the project it came from.
+const labelRenamedFrom = "clowdr.renamed-from"
+
+// copyVolume copies a volume in a helper container, which runs the image of nginx: it is always on
+// the host, and has a shell with cp. Refused up front when the disk cannot hold the copy, and the
+// file count is compared after it.
+func (e *Engine) copyVolume(ctx context.Context, old, name, from, to string, progress Progress) error {
+	labels := map[string]string{runtime.LabelManaged: "1", runtime.LabelProject: name, labelRenamedFrom: old}
+	if err := e.Docker.VolumeEnsure(ctx, to, labels); err != nil {
+		return err
 	}
-	slices.Sort(names)
-	return strings.Join(names, ", ")
+	image := e.Platform().Nginx.Image
+	if _, err := e.Docker.ImageInspect(ctx, image); err != nil {
+		if err := e.Docker.ImagePull(ctx, image); err != nil {
+			return fmt.Errorf("pull %s: %w", image, err)
+		}
+	}
+	helper := "clowdr-rename-" + to
+	id, err := e.Docker.ContainerCreate(ctx, runtime.ContainerConfig{
+		Name:  helper,
+		Image: image,
+		Cmd:   []string{"sleep", "86400"},
+		// As a service container, so `clowctl gc` removes one left by a clowdrd that died here.
+		Labels: map[string]string{
+			runtime.LabelManaged: "1", runtime.LabelProject: name, runtime.LabelRole: "service", runtime.LabelService: "rename-copy",
+		},
+		Restart: "no",
+		Network: "none",
+		Mounts: []runtime.Mount{
+			{Type: "volume", Source: from, Target: "/from", ReadOnly: true},
+			{Type: "volume", Source: to, Target: "/to"},
+		},
+	})
+	if err != nil {
+		return err
+	}
+	defer e.Docker.ContainerRemove(context.WithoutCancel(ctx), id)
+	if err := e.Docker.ContainerStart(ctx, id); err != nil {
+		return err
+	}
+	progress("copying volume %s to %s", from, to)
+	out, code, err := e.Docker.Exec(ctx, id, []string{"sh", "-c", copyVolumeScript})
+	if err != nil {
+		return err
+	}
+	if code != 0 {
+		return fmt.Errorf("exit code %d: %s", code, strings.TrimSpace(out))
+	}
+	progress("copied %s: %s", from, strings.TrimSpace(out))
+	return nil
 }
+
+const copyVolumeScript = `set -e
+need=$(du -sk /from | cut -f1)
+avail=$(df -Pk /to | awk 'NR==2 {print $4}')
+if [ "$need" -ge "$avail" ]; then
+	echo "not enough disk: the volume takes ${need}K, ${avail}K is free"
+	exit 1
+fi
+cp -a /from/. /to/
+files=$(find /from | wc -l)
+if [ "$files" != "$(find /to | wc -l)" ]; then
+	echo "the copy has a different number of files"
+	exit 1
+fi
+echo "$((files - 1)) files, ${need}K"
+`
 
 // retagImages gives the project's pushed images their name under the new project: CheckImage
 // and the registry look for them there. It returns the new reference of every image of the
@@ -444,6 +540,16 @@ func (e *Engine) finishRename(ctx context.Context, old, name string) {
 	e.Docker.NetworkDisconnect(ctx, NetworkName(old), NginxContainer)
 	if err := e.Docker.NetworkRemove(ctx, NetworkName(old)); err != nil && !errors.Is(err, runtime.ErrNotFound) {
 		e.Log.Warn("rename: remove old network", "network", NetworkName(old), "err", err)
+	}
+	// Their data is in the new volumes: the state moved only after the copies were complete.
+	vols, err := e.Docker.Volumes(ctx, runtime.LabelProject+"="+old)
+	if err != nil {
+		e.Log.Warn("rename: list old volumes", "err", err)
+	}
+	for _, v := range vols {
+		if err := e.Docker.VolumeRemove(ctx, v.Name); err != nil && !errors.Is(err, runtime.ErrNotFound) {
+			e.Log.Warn("rename: remove old volume", "volume", v.Name, "err", err)
+		}
 	}
 	if lister, ok := e.Docker.(interface {
 		Images(ctx context.Context, reference string) ([]runtime.ImageSummary, error)

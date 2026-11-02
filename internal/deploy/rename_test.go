@@ -143,16 +143,9 @@ func TestRenameProjectRefuses(t *testing.T) {
 			p.Seeded = true
 			f.st.PutProject(p)
 		}, "store", "platform.yml"},
-		{"service volume", func(t *testing.T, f *fixture) {
-			s := serverSpec()
-			s.Volumes = []spec.Volume{{Name: "uploads", Target: "/app/uploads"}}
-			if _, err := f.deploy(t, "v1", s); err != nil {
-				t.Fatal(err)
-			}
-		}, "store", "has volumes"},
-		{"leftover volume", func(t *testing.T, f *fixture) {
-			f.d.VolumeEnsure(context.Background(), "shop_old", map[string]string{runtime.LabelProject: "shop"})
-		}, "store", "has volumes"},
+		{"volume not named after the project", func(t *testing.T, f *fixture) {
+			f.d.VolumeEnsure(context.Background(), "odd", map[string]string{runtime.LabelProject: "shop"})
+		}, "store", "not named after it"},
 		{"addon", func(t *testing.T, f *fixture) {
 			s := serverSpec()
 			s.Uses = []string{"redis"}
@@ -376,6 +369,135 @@ func TestRenameProjectStopFirstService(t *testing.T) {
 	}
 	if c := f.d.ByName[containerName("store", "server", rel.ID, 1)]; c == nil || !c.Running {
 		t.Fatalf("new container %+v", c)
+	}
+}
+
+// A volume nothing mounts is copied while the service keeps running; one a service mounts is copied
+// with the service down, so nothing it writes is lost. The originals go only after the switch.
+func TestRenameProjectCopiesVolumes(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	labels := map[string]string{runtime.LabelManaged: "1", runtime.LabelProject: "shop"}
+	mounted := serverSpec()
+	mounted.Name, mounted.Domains = "files", []string{"files.example.com"}
+	mounted.Volumes = []spec.Volume{{Name: "uploads", Target: "/uploads"}}
+	filesRel, err := f.deploy(t, "v1", mounted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiRel, err := f.deploy(t, "v1", serverSpec())
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.d.VolumeEnsure(ctx, "shop_logs", labels)
+
+	var copies []string
+	runningDuringCopy := map[string]bool{}
+	var oldVolumesDuringCopy int
+	f.d.ExecFn = func(c string, cmd []string) (string, int, error) {
+		copies = append(copies, c)
+		runningDuringCopy[filesRel.Containers[0]] = f.d.ByName[filesRel.Containers[0]].Running
+		runningDuringCopy[apiRel.Containers[0]] = f.d.ByName[apiRel.Containers[0]].Running
+		vols, _ := f.d.Volumes(ctx, runtime.LabelProject+"=shop")
+		oldVolumesDuringCopy = len(vols)
+		return "3 files, 12K\n", 0, nil
+	}
+
+	if err := f.e.RenameProject(ctx, "shop", "store", "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.e.WaitDrains()
+
+	if len(copies) != 2 {
+		t.Fatalf("copies %v", copies)
+	}
+	if oldVolumesDuringCopy != 2 {
+		t.Errorf("old volumes during the copy: %d", oldVolumesDuringCopy)
+	}
+	if runningDuringCopy[filesRel.Containers[0]] {
+		t.Error("a service was running while its volume was copied")
+	}
+	if !runningDuringCopy[apiRel.Containers[0]] {
+		t.Error("a service without volumes was stopped for the copy")
+	}
+	if vols, _ := f.d.Volumes(ctx, runtime.LabelProject+"=shop"); len(vols) != 0 {
+		t.Fatalf("old volumes left: %+v", vols)
+	}
+	vols, _ := f.d.Volumes(ctx, runtime.LabelProject+"=store")
+	if len(vols) != 2 || vols[0].Name != "store_logs" || vols[1].Name != "store_uploads" {
+		t.Fatalf("new volumes %+v", vols)
+	}
+	for c := range f.d.ByName {
+		if strings.HasPrefix(c, "clowdr-rename-") {
+			t.Errorf("helper container left: %s", c)
+		}
+	}
+	c := f.d.ByName[containerName("store", "files", filesRel.ID, 1)]
+	if c == nil || !c.Running {
+		t.Fatalf("new container %+v", c)
+	}
+	if len(c.Config.Mounts) != 1 || c.Config.Mounts[0].Source != "store_uploads" {
+		t.Fatalf("mounts %+v", c.Config.Mounts)
+	}
+	// A later deploy finds the copy as its own volume.
+	if _, err := f.e.Deploy(ctx, Request{Project: "store", Spec: mounted, Image: "clowdr.local/store/server:v1", Author: "test"}, nil); err != nil {
+		t.Fatalf("deploy with the copied volume: %v", err)
+	}
+	f.e.WaitDrains()
+}
+
+func TestRenameProjectFailedCopyLeavesItAsItWas(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	s := serverSpec()
+	s.Volumes = []spec.Volume{{Name: "uploads", Target: "/uploads"}}
+	rel, err := f.deploy(t, "v1", s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.d.ExecFn = func(string, []string) (string, int, error) { return "not enough disk\n", 1, nil }
+
+	err = f.e.RenameProject(ctx, "shop", "store", "test", nil)
+	if err == nil || !strings.Contains(err.Error(), "not enough disk") {
+		t.Fatalf("got %v", err)
+	}
+	if _, err := f.st.Project("shop"); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.d.ByName[rel.Containers[0]]; c == nil || !c.Running {
+		t.Fatalf("the service did not come back: %+v", c)
+	}
+	if f.d.Vols["shop_uploads"] == nil {
+		t.Error("the original volume is gone")
+	}
+	if f.d.Vols["store_uploads"] != nil {
+		t.Error("the partial copy is left")
+	}
+	for c := range f.d.ByName {
+		if strings.HasPrefix(c, "clowdr-rename-") {
+			t.Errorf("helper container left: %s", c)
+		}
+	}
+}
+
+// A partial copy left by a clowdrd that died mid-rename does not block the next try, but a volume
+// of someone else under the new name does.
+func TestRenameProjectInterruptedCopy(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	f.d.VolumeEnsure(ctx, "shop_logs", map[string]string{runtime.LabelManaged: "1", runtime.LabelProject: "shop"})
+	f.d.VolumeEnsure(ctx, "store_logs", map[string]string{runtime.LabelManaged: "1", runtime.LabelProject: "store", labelRenamedFrom: "shop"})
+	f.d.VolumeEnsure(ctx, "other_logs", map[string]string{runtime.LabelManaged: "1", runtime.LabelProject: "other", labelRenamedFrom: "elsewhere"})
+
+	if err := f.e.RenameProject(ctx, "shop", "other", "test", nil); err == nil || !strings.Contains(err.Error(), "removed project") {
+		t.Fatalf("a volume from another rename: %v", err)
+	}
+	if err := f.e.RenameProject(ctx, "shop", "store", "test", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.e.WaitDrains()
+	if f.d.Vols["store_logs"] == nil || f.d.Vols["shop_logs"] != nil {
+		t.Fatalf("volumes %v", f.d.Vols)
 	}
 }
 

@@ -62,8 +62,10 @@ clowctl project rename shop store                   # tokens, releases, images a
 ```
 
 `project rename` starts every service's current release in new containers next to the old ones and
-moves traffic when they are healthy, like a deploy. It refuses a project with volumes, addons or a
-stopped service, and one declared in `platform.yml`. Afterwards change `project:` in `deploy.yml`,
+moves traffic when they are healthy, like a deploy. Volumes are copied to their new names, and the
+old ones removed after the switch, so the disk needs room for a second copy; a service that mounts a
+volume is down during its copy. It refuses a project with addons or a stopped service, and one
+declared in `platform.yml`. Afterwards change `project:` in `deploy.yml`,
 and `expose_to` / `accept_from` in the `deploy.yml` of other projects: the server rewrote its copy,
 but their next deploy would bring the old name back. Anything outside clowdr (a database, a bucket,
 secrets) keeps its name.

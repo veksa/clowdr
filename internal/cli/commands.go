@@ -846,8 +846,9 @@ func (a *app) projectCmd() *cobra.Command {
 moves when they are healthy, in one nginx reload. Tokens, releases, images, logs, traces and metrics
 move to the new name, and expose_to / accept_from of other projects are rewritten on the server.
 
-A project with volumes, addons or a stopped service is refused. Databases, buckets and anything else
-outside clowdr keep their names. Afterwards change "project:" in deploy.yml, and expose_to /
+Volumes are copied to their new names and the old ones removed after the switch; a service that mounts
+a volume is down during its copy. A project with addons or a stopped service is refused. Databases,
+buckets and anything else outside clowdr keep their names. Afterwards change "project:" in deploy.yml, and expose_to /
 accept_from in the deploy.yml of other projects, or their next deploy brings the old name back.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
