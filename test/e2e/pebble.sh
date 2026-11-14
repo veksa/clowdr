@@ -3,7 +3,8 @@
 # Shared by test/e2e/npm.sh and the local stand (test/stand). Needs root and docker.
 # shellcheck shell=bash
 
-PEBBLE_IMAGE="${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble:latest}"
+# pinned by digest (the multi-arch index of the image `latest` pointed at on 2026-11-14)
+PEBBLE_IMAGE="${PEBBLE_IMAGE:-ghcr.io/letsencrypt/pebble@sha256:0c81f05db371f436c97fb894bd6d2ab8fc9c8e2ce40f8bef8a8e15941bcd75ef}"
 # PEBBLE_ROOT is the root that signs the certificates Pebble issues (new on every Pebble start).
 PEBBLE_ROOT=/usr/local/share/ca-certificates/clowdr-test-pebble-root.crt
 

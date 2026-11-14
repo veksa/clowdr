@@ -24,20 +24,51 @@ export HOME="$WORK/home"
 mkdir -p "$HOME"
 TOKENS=() # every token handed out, for the log check
 
-for c in node npm corepack zstdcat; do command -v "$c" >/dev/null || fail "$c is required"; done
+for c in node npm corepack zstdcat ip; do command -v "$c" >/dev/null || fail "$c is required"; done
 grep -q " $HOST\$" /etc/hosts || echo "127.0.0.1 $HOST" >>/etc/hosts
 
 admin() { clowctl --context npm "$@"; }
-# status TOKEN URL [curl args]: HTTP status of a GET through nginx ("" = no token); the body
-# goes to $WORK/body.
+# FROM=() sends requests from this host's address; FROM=("${NS[@]}") from a second network
+# namespace with its own address, which nginx sees as another client.
+FROM=()
+NS_NAME=clowdr-e2e-client
+NS=(ip netns exec "$NS_NAME" curl --resolve "$HOST:443:10.213.0.1" --resolve "$HOST:80:10.213.0.1")
+# status TOKEN URL [curl args]: HTTP status through nginx ("" = no token; 000 = connection
+# closed); the body goes to $WORK/body and the headers to $WORK/headers.
 status() {
 	local tok=$1 url=$2
 	shift 2
-	if [ -n "$tok" ]; then
-		curl -s -o "$WORK/body" -w '%{http_code}' -H "Authorization: Bearer $tok" "$@" "$url"
-	else
-		curl -s -o "$WORK/body" -w '%{http_code}' "$@" "$url"
-	fi
+	local cmd=(curl)
+	[ ${#FROM[@]} -eq 0 ] || cmd=("${FROM[@]}")
+	[ -z "$tok" ] || set -- -H "Authorization: Bearer $tok" "$@"
+	"${cmd[@]}" -s -o "$WORK/body" -D "$WORK/headers" -w '%{http_code}' "$@" "$url" || true
+}
+# same_as_missing WHAT TOKEN URL MISSING_URL [curl args]: URL answers exactly like a package that
+# does not exist: status, headers (but Date) and body, byte for byte.
+same_as_missing() {
+	local what=$1 tok=$2 url=$3 missing=$4 a b
+	shift 4
+	a="$(status "$tok" "$url" "$@")"
+	grep -iv '^date:' "$WORK/headers" >"$WORK/h1"
+	cp "$WORK/body" "$WORK/b1"
+	b="$(status "$tok" "$missing" "$@")"
+	grep -iv '^date:' "$WORK/headers" >"$WORK/h2"
+	[ "$a" = 404 ] || fail "$what: $url answered $a, want 404"
+	[ "$a" = "$b" ] && cmp -s "$WORK/h1" "$WORK/h2" && cmp -s "$WORK/b1" "$WORK/body" ||
+		fail "$what: differs from a missing package: $(diff "$WORK/h1" "$WORK/h2"; diff "$WORK/b1" "$WORK/body")"
+	echo "  ok  $what → 404, same as a missing package"
+}
+ns_up() {
+	ip netns add "$NS_NAME"
+	ON_EXIT+=("ip netns del $NS_NAME; ip link del clowdr-e2e-h 2>/dev/null")
+	ip link add clowdr-e2e-h type veth peer name clowdr-e2e-n
+	ip link set clowdr-e2e-n netns "$NS_NAME"
+	ip addr add 10.213.0.1/30 dev clowdr-e2e-h
+	ip link set clowdr-e2e-h up
+	ip netns exec "$NS_NAME" ip addr add 10.213.0.2/30 dev clowdr-e2e-n
+	ip netns exec "$NS_NAME" ip link set clowdr-e2e-n up
+	ip netns exec "$NS_NAME" ip link set lo up
+	ip netns exec "$NS_NAME" ip route add default via 10.213.0.1
 }
 # denied WHAT TOKEN URL WANT [curl args]: the request gets a status matching WANT (e.g. 404 or
 # "301|404") and no package data.
@@ -115,6 +146,15 @@ yarn add @e2e/hello@1.0.0 >/dev/null
 [ "$(node -p 'require("@e2e/hello")')" = hello ] || fail "yarn 4 install"
 YARN_NPM_AUDIT_REGISTRY="$REG" yarn npm audit --environment production || fail "yarn npm audit"
 admin npm check
+# a project pinned to a yarn before 4.17, which rejects the scoped age gate setting
+mkdir -p "$WORK/app-414" && cd "$WORK/app-414"
+echo '{"name": "app-414", "private": true, "packageManager": "yarn@4.14.0"}' >package.json
+printf 'nodeLinker: node-modules\nenableTelemetry: false\n' >.yarnrc.yml
+admin npm setup --scope @e2e
+[ "$(yarn --version)" = 4.14.0 ] || fail "corepack did not run yarn 4.14.0"
+grep -q '"@e2e/\*"' .yarnrc.yml || fail "npm setup did not preapprove @e2e for yarn 4.14: $(cat .yarnrc.yml)"
+yarn add @e2e/hello@1.0.1 >/dev/null || fail "yarn 4.14 install (a minute-old version, preapproved scope)"
+[ "$(node -p 'require("@e2e/hello")')" = hello ] || fail "yarn 4.14 install"
 mkdir -p "$WORK/app-npm" && cd "$WORK/app-npm"
 printf '@e2e:registry=%s\n' "$REG" >.npmrc
 npm init -y >/dev/null
@@ -170,8 +210,12 @@ DOC="${REG}@e2e%2fhello"
 TGZ="${REG}@e2e/hello/-/hello-1.3.0.tgz"
 [ "$(status "$READER" "$DOC")" = 200 ] || fail "the reader cannot read its own scope"
 [ "$(status "$READER" "$TGZ")" = 200 ] || fail "the reader cannot download its own scope"
-# Failed authentications are limited to 20 per address in 10 minutes: 3 so far (rotation and
-# revocation), 16 here, then the limit itself.
+
+# Refused tokens come from a second client address: failed authentications are limited per
+# address, and this host's address must stay usable whatever the count below.
+ns_up
+FROM=("${NS[@]}")
+[ "$(status "$READER" "$DOC")" = 200 ] || fail "the second client address cannot reach the registry"
 for target in "$DOC" "$TGZ"; do
 	denied "no token" "" "$target" 401
 	denied "garbage token" "garbage" "$target" 401
@@ -183,8 +227,14 @@ for target in "$DOC" "$TGZ"; do
 done
 denied "no token: whoami" "" "${REG}-/whoami" 401
 denied "garbage token: whoami" "garbage" "${REG}-/whoami" 401
-denied "wrong scope: document" "$OTHER_PUB" "$DOC" 404
-denied "wrong scope: tarball" "$OTHER_PUB" "$TGZ" 404
+FROM=()
+
+# A token without rights on a package gets exactly what a missing package gets.
+same_as_missing "wrong scope: document" "$OTHER_PUB" "$DOC" "${REG}@other%2fnope"
+same_as_missing "wrong scope: HEAD" "$OTHER_PUB" "$DOC" "${REG}@other%2fnope" -I
+same_as_missing "wrong scope: abbreviated document" "$OTHER_PUB" "$DOC" "${REG}@other%2fnope" -H "Accept: application/vnd.npm.install-v1+json"
+same_as_missing "wrong scope: tarball" "$OTHER_PUB" "$TGZ" "${REG}@other/nope/-/nope-1.3.0.tgz"
+same_as_missing "wrong scope: dist-tags" "$OTHER_PUB" "${REG}-/package/@e2e%2fhello/dist-tags" "${REG}-/package/@other%2fnope/dist-tags"
 denied "other scope by %2f" "$READER" "${REG}@other%2fsecret" 404
 denied "other scope by path" "$READER" "${REG}@other/secret" 404
 denied "guessed tarball of another scope" "$READER" "${REG}@other/secret/-/secret-1.0.0.tgz" 404
@@ -195,18 +245,33 @@ denied "dot segments" "$READER" "${REG}@e2e/hello/-/../../@other/secret/-/secret
 denied "dot segments, redirect followed" "$READER" "${REG}@e2e/hello/-/../../@other/secret/-/secret-1.0.0.tgz" "400|404" --path-as-is -L
 denied "encoded dot segments" "$READER" "${REG}@e2e%2f..%2f..%2f@other%2fsecret" "400|404"
 denied "npm token on the API" "$READER" "$API/v1/version" 401
-denied "ACME path traversal" "$READER" "http://$HOST/.well-known/acme-challenge/../../npm/@other%2fsecret" "301|400|404" --path-as-is
-denied "ACME encoded traversal" "$READER" "http://$HOST/.well-known/acme-challenge/..%2f..%2fnpm%2f@other%2fsecret" "301|400|404" --path-as-is
-code="$(status "" "http://$HOST/.well-known/acme-challenge/..%2f..%2f..%2fetc%2fpasswd" --path-as-is)"
-! grep -q 'root:' "$WORK/body" || fail "ACME path traversal read a file ($code)"
-echo "  ok  ACME traversal to /etc/passwd → $code"
+
+# The ACME location on port 80: "/npm/x/..%2F..%2F.well-known/acme-challenge/t" matches it in
+# nginx, which must not let it reach the registry with a client-chosen X-Forwarded-For (the npm
+# 401 body, failures counted against the forged address). Two layers stop it: nginx passes only
+# the normalised challenge path, and Go's mux cleans the path before routing, so even the older
+# nginx block that forwarded the raw URI got the challenge handler's 404, not the registry.
+# This guards the outcome if either layer changes.
+ACME_PROBE="http://$HOST/npm/x/..%2F..%2F.well-known/acme-challenge/t"
+code="$(status "" "$ACME_PROBE" --path-as-is -H "X-Forwarded-For: 203.0.113.9")"
+[[ $code =~ ^(000|400|404)$ ]] || fail "ACME traversal answered $code: $(head -c 300 "$WORK/body")"
+! grep -q "clowctl npm login" "$WORK/body" || fail "ACME traversal reached the registry"
+echo "  ok  ACME traversal with a forged X-Forwarded-For → $code, not the registry"
+for _ in $(seq 20); do status "" "$ACME_PROBE" --path-as-is -H "X-Forwarded-For: 203.0.113.9" >/dev/null; done
+[ "$(status "$READER" "$DOC")" = 200 ] || fail "requests through the ACME location counted against this address"
+echo "  ok  20 more through the ACME location: this address is not limited"
+
+# Brute force, from the second address: refused until the limit, then even a valid token.
+FROM=("${NS[@]}")
 blocked=""
-for _ in 1 2 3 4 5; do
+for _ in $(seq 30); do
 	if [ "$(status garbage "$DOC")" = 429 ]; then blocked=1 && break; fi
 done
 [ -n "$blocked" ] || fail "failed authentications are not limited"
 denied "a valid token from a blocked address" "$READER" "$DOC" 429
-echo "  ok  brute force: the address is blocked after 20 failures"
+FROM=()
+[ "$(status "$READER" "$DOC")" = 200 ] || fail "the limit of another address blocked this one"
+echo "  ok  brute force: the address is blocked after its failures, others are not"
 
 step "no token in the logs"
 systemctl restart clowdrd # flushes the log store
