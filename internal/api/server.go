@@ -22,6 +22,7 @@ import (
 	"github.com/veksa/clowdr/internal/ingress"
 	"github.com/veksa/clowdr/internal/logs"
 	"github.com/veksa/clowdr/internal/monitor"
+	"github.com/veksa/clowdr/internal/npm"
 	"github.com/veksa/clowdr/internal/registry"
 	"github.com/veksa/clowdr/internal/runtime"
 	"github.com/veksa/clowdr/internal/sdk"
@@ -43,6 +44,8 @@ type Server struct {
 	Events *monitor.Events
 	// StateDir is used for the host disk figures in `clowctl top`.
 	StateDir string
+	// NPM serves the private npm registry at /npm/; nil leaves it out.
+	NPM *npm.Handler
 }
 
 type ctxKey struct{}
@@ -70,6 +73,11 @@ func (s *Server) Handler() http.Handler {
 	admin("GET /v1/platform/status", s.platformStatus)
 	admin("POST /v1/platform/reconcile", s.reconcile)
 	admin("POST /v1/gc", s.gc)
+	admin("GET /v1/npm/tokens", s.listNPMTokens)
+	admin("POST /v1/npm/tokens", s.createNPMToken)
+	admin("DELETE /v1/npm/tokens/{name}", s.revokeNPMToken)
+	admin("POST /v1/npm/tokens/{name}/rotate", s.rotateNPMToken)
+	admin("GET /v1/npm/audit", s.npmAudit)
 
 	a("GET /v1/projects/{project}", s.getProject)
 	a("GET /v1/projects/{project}/services", s.listServices)
@@ -98,6 +106,10 @@ func (s *Server) Handler() http.Handler {
 	if s.Registry != nil {
 		mux.Handle("/v2/", s.Registry)
 	}
+	if s.NPM != nil {
+		// Its own tokens and its own body limits: none of the API's middleware applies.
+		mux.Handle("/npm/", s.NPM)
+	}
 	// Client packages (docs/tracing.md): open source, no token.
 	mux.Handle("GET /sdk/node/", sdk.Handler(writeJSON))
 	mux.HandleFunc("GET "+ingress.ACMEChallenge, func(w http.ResponseWriter, r *http.Request) {
@@ -119,8 +131,8 @@ func (s *Server) logRequests(h http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: 200}
 		h.ServeHTTP(sw, r)
-		if strings.HasPrefix(r.URL.Path, "/v2/") && sw.status < 400 {
-			return // registry is chatty
+		if (strings.HasPrefix(r.URL.Path, "/v2/") || strings.HasPrefix(r.URL.Path, "/npm/")) && sw.status < 400 {
+			return // registries are chatty; /npm/ keeps its own audit log
 		}
 		s.Log.Info("http", "method", r.Method, "path", r.URL.Path, "status", sw.status, "dur", time.Since(start).Round(time.Millisecond))
 	})
@@ -142,6 +154,7 @@ func (w *statusWriter) Flush() {
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // TokenFromRequest reads "Authorization: Bearer <token>" or basic auth (password = token).
+// npm tokens never pass auth.Check, so they work on no route but /npm/.
 func TokenFromRequest(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if t, ok := strings.CutPrefix(h, "Bearer "); ok {
@@ -214,6 +227,9 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 
 func (s *Server) version(w http.ResponseWriter, r *http.Request) {
 	v := Version{Version: s.Version, Registry: s.RegistryKind, Principal: principal(r).Name()}
+	if s.NPM != nil {
+		v.Features = append(v.Features, "npm")
+	}
 	if info, err := s.Engine.Docker.Info(r.Context()); err == nil {
 		v.Docker = info.ServerVersion
 	}

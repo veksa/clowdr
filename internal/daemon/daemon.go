@@ -23,6 +23,7 @@ import (
 	"github.com/veksa/clowdr/internal/ingress"
 	"github.com/veksa/clowdr/internal/monitor"
 	"github.com/veksa/clowdr/internal/notify"
+	"github.com/veksa/clowdr/internal/npm"
 	"github.com/veksa/clowdr/internal/registry"
 	"github.com/veksa/clowdr/internal/runtime"
 	"github.com/veksa/clowdr/internal/store"
@@ -157,6 +158,8 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 		MaxBlob: func() int64 { return int64(current.Limits.MaxBlob) },
 		LowDisk: func() error { return lowDisk(o.StateDir) }}
 	srv.Registry = reg
+	srv.NPM = &npm.Handler{Store: st, Dir: filepath.Join(o.StateDir, "npm"), Log: log,
+		Config: func() config.NPMConf { return current.NPM }}
 	handler := srv.Handler()
 
 	errc := make(chan error, 3)
@@ -272,6 +275,7 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 				return
 			case <-t.C:
 				reg.ExpireUploads(ctx, time.Hour)
+				srv.NPM.Sweep(ctx)
 				if _, err := eng.GC(ctx); err != nil {
 					log.Warn("gc", "err", err)
 				}

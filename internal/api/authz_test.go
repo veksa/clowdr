@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/veksa/clowdr/internal/npm"
 	"github.com/veksa/clowdr/internal/spec"
 )
 
@@ -29,6 +30,11 @@ var routes = []struct {
 	{"GET /v1/platform/status", true},
 	{"POST /v1/platform/reconcile", true},
 	{"POST /v1/gc", true},
+	{"GET /v1/npm/tokens", true},
+	{"POST /v1/npm/tokens", true},
+	{"DELETE /v1/npm/tokens/{name}", true},
+	{"POST /v1/npm/tokens/{name}/rotate", true},
+	{"GET /v1/npm/audit", true},
 	{"GET /v1/projects/{project}", false},
 	{"GET /v1/projects/{project}/services", false},
 	{"POST /v1/projects/{project}/apply", false},
@@ -100,6 +106,10 @@ func TestAuthorization(t *testing.T) {
 	if err := e.admin.Do(context.Background(), "DELETE", "/v1/tokens/"+revokedID, nil, nil); err != nil {
 		t.Fatal(err)
 	}
+	var npmTok npm.TokenResponse
+	if err := e.admin.Do(context.Background(), "POST", "/v1/npm/tokens", NPMTokenRequest{Name: "laptop", Scopes: []string{"npm:publish:@shop/*", "plugins:read"}}, &npmTok); err != nil {
+		t.Fatal(err)
+	}
 
 	callers := []struct {
 		name  string
@@ -110,6 +120,8 @@ func TestAuthorization(t *testing.T) {
 		{"anonymous", "", func(bool) int { return 401 }},
 		{"garbage", "clw_nope_nope", func(bool) int { return 401 }},
 		{"revoked", revoked.Token, func(bool) int { return 401 }},
+		// npm tokens work on /npm/ only.
+		{"npm token", npmTok.Token, func(bool) int { return 401 }},
 		{"other project", blog.Token, func(bool) int { return 403 }},
 		{"own project", shop.Token, func(admin bool) int {
 			if admin {

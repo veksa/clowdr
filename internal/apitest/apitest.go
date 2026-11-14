@@ -20,6 +20,7 @@ import (
 	"github.com/veksa/clowdr/internal/ingress"
 	"github.com/veksa/clowdr/internal/logs"
 	"github.com/veksa/clowdr/internal/monitor"
+	"github.com/veksa/clowdr/internal/npm"
 	"github.com/veksa/clowdr/internal/registry"
 	"github.com/veksa/clowdr/internal/store"
 )
@@ -82,6 +83,8 @@ func start(t testing.TB, tls bool) *Server {
 			d.AddImage(registry.ImagePrefix + repo + ":" + tag)
 		},
 	}
+	s.NPM = &npm.Handler{Store: st, Dir: filepath.Join(dir, "npm"), Log: log,
+		Config: func() config.NPMConf { return plat.NPM }}
 	srv := httptest.NewUnstartedServer(s.Handler())
 	srv.Config.ErrorLog = stdlog.New(io.Discard, "", 0) // rejected TLS handshakes are expected in tests
 	if tls {

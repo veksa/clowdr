@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"errors"
-	"io"
 	"log/slog"
 	"net/http/httptest"
 	"path/filepath"
@@ -21,6 +20,7 @@ import (
 	"github.com/veksa/clowdr/internal/deploy"
 	"github.com/veksa/clowdr/internal/deploy/fake"
 	"github.com/veksa/clowdr/internal/ingress"
+	"github.com/veksa/clowdr/internal/npm"
 	"github.com/veksa/clowdr/internal/registry"
 	"github.com/veksa/clowdr/internal/spec"
 	"github.com/veksa/clowdr/internal/store"
@@ -33,6 +33,7 @@ type env struct {
 	st    *store.Store
 	d     *fake.Docker
 	dir   string
+	logs  *lockedBuf // everything clowdrd logged
 }
 
 func newEnv(t *testing.T) *env {
@@ -45,7 +46,9 @@ func newEnv(t *testing.T) *env {
 	t.Cleanup(func() { st.Close() })
 	plat, _ := config.ParsePlatform([]byte(config.DefaultPlatform))
 	d := fake.NewDocker()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	logs := &lockedBuf{}
+	log := slog.New(slog.NewTextHandler(logs, nil))
+	plat.NPM.Publish = true
 	eng := deploy.New(d, st, func() *config.Platform { return plat }, &ingress.Controller{Dir: dir, Nginx: &fake.Nginx{}}, log)
 	eng.Prober = fake.Prober{D: d, Sick: map[string]bool{}}
 	eng.CertExists = func(string) bool { return false }
@@ -57,13 +60,14 @@ func newEnv(t *testing.T) *env {
 			d.AddImage(registry.ImagePrefix + repo + ":" + tag)
 		},
 	}
+	s.NPM = &npm.Handler{Store: st, Dir: filepath.Join(dir, "npm"), Log: log, Config: func() config.NPMConf { return plat.NPM }}
 	srv := httptest.NewServer(s.Handler())
 	t.Cleanup(srv.Close)
 	secret, tok := auth.New("", "", "bootstrap", true)
 	if err := st.PutToken(tok); err != nil {
 		t.Fatal(err)
 	}
-	return &env{srv: srv, api: s, admin: NewClient(srv.URL, secret, ""), st: st, d: d, dir: dir}
+	return &env{srv: srv, api: s, admin: NewClient(srv.URL, secret, ""), st: st, d: d, dir: dir, logs: logs}
 }
 
 func (e *env) projectClient(t *testing.T, project string, domains ...string) *Client {

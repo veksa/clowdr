@@ -68,6 +68,14 @@ type TokenResponse struct {
 	Info  store.Token `json:"info"`
 }
 
+// NPMTokenRequest creates an npm token.
+type NPMTokenRequest struct {
+	Name   string   `json:"name"`
+	Scopes []string `json:"scopes"`
+	// ExpiresIn is a duration such as "90d" or "720h"; empty means one year.
+	ExpiresIn string `json:"expires_in,omitempty"`
+}
+
 type EnvRequest struct {
 	Set   map[string]string `json:"set,omitempty"`
 	Unset []string          `json:"unset,omitempty"`
@@ -107,6 +115,9 @@ type Version struct {
 	Docker    string `json:"docker,omitempty"`
 	Registry  string `json:"registry"`
 	Principal string `json:"principal,omitempty"`
+	// Features lists what this server supports beyond the base API ("npm"), so a newer CLI can
+	// tell an old server apart from a failure.
+	Features []string `json:"features,omitempty"`
 }
 
 type Error struct {
