@@ -4,7 +4,7 @@ FROM ubuntu:24.04
 ARG GO_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        systemd systemd-sysv dbus ca-certificates curl jq openssl iptables gnupg git zstd psmisc \
+        systemd systemd-sysv dbus ca-certificates curl jq openssl iptables iproute2 gnupg git zstd psmisc \
     && curl -fsSL https://get.docker.com | sh \
     && mkdir -p /etc/docker && echo '{"features": {"containerd-snapshotter": true}}' >/etc/docker/daemon.json \
     && systemctl mask systemd-resolved.service getty.target console-getty.service

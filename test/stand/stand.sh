@@ -12,6 +12,9 @@
 # volumes clowdr-stand-docker, clowdr-stand-containerd and clowdr-stand-gomod, and the image
 # clowdr-stand-ubuntu. It never stops the Docker runtime or other containers. Ports, on
 # 127.0.0.1 only: 11500 HTTPS, 11501 HTTP, 11502 the self-signed API port.
+#
+# One run at a time: a second one is refused while the first holds the lock. Ctrl-C removes the
+# stand (KEEP=1 keeps it); a run that fails leaves it up to look at.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -20,7 +23,41 @@ IMAGE=clowdr-stand-ubuntu
 VOLUMES=(clowdr-stand-docker clowdr-stand-containerd clowdr-stand-gomod)
 BASE=127-0-0-1.sslip.io
 
+LOCK="${TMPDIR:-/tmp}/clowdr-stand.lock"
+
 say() { printf '\033[1m%s\033[0m\n' "$*"; }
+
+# lock: one stand command at a time on this machine. A lock whose process is gone is taken over.
+lock() {
+	if ! mkdir "$LOCK" 2>/dev/null; then
+		local pid
+		pid="$(cat "$LOCK/pid" 2>/dev/null || true)"
+		if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+			say "another stand run is in progress (pid $pid): wait for it, or stop it first" >&2
+			exit 1
+		fi
+		rm -f "$LOCK/pid"
+		rmdir "$LOCK" 2>/dev/null || true
+		mkdir "$LOCK" || { say "cannot take $LOCK" >&2; exit 1; }
+	fi
+	echo $$ >"$LOCK/pid"
+	trap unlock EXIT
+	trap interrupted INT TERM
+}
+unlock() {
+	rm -f "$LOCK/pid"
+	rmdir "$LOCK" 2>/dev/null || true
+}
+interrupted() {
+	trap - INT TERM
+	if [ "${KEEP:-}" = 1 ]; then
+		say "interrupted: the stand stays (KEEP=1)"
+	else
+		say "interrupted: removing the stand (KEEP=1 keeps it)"
+		down
+	fi
+	exit 130
+}
 
 down() {
 	if docker container inspect "$NAME" >/dev/null 2>&1; then
@@ -73,11 +110,11 @@ scenario() {
 }
 
 case "${1:-run}" in
-run) up && scenario ;;
-up) up ;;
-scenario) scenario ;;
+run) lock && up && scenario ;;
+up) lock && up ;;
+scenario) lock && scenario ;;
 shell) docker exec -it "$NAME" bash ;;
-down) down ;;
+down) lock && down ;;
 *)
 	echo "usage: $0 [run|up|scenario|shell|down]" >&2
 	exit 2

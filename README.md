@@ -238,11 +238,16 @@ upgrades to a build of the working tree and checks that releases, tokens, images
 survive, logs in to npm, publishes and installs with yarn 4 and npm, runs a full `clowctl deploy`
 with the package check, rotates the token, rolls back to the release and upgrades again. Two
 things the rollback shows: a release before npm refuses the `npm:` section of `platform.yml`
-(unknown keys are an error), so remove it before going back; and the old release rewrites a
-service's history on its next deploy with the fields it knows, so `allow-outdated` marks of
-that service are gone. The stand touches only what it names: the container
-`clowdr-stand-host`, the volumes `clowdr-stand-docker`, `clowdr-stand-containerd` and
-`clowdr-stand-gomod`, and the image `clowdr-stand-ubuntu`; it never stops Docker or other
-containers. Its Docker build cache stays with your other build cache.
+(unknown keys are an error), so remove it before going back; and on its next deploy of a
+service the old release rewrites the releases it touches (the one it replaces and the ones it
+garbage-collects) with the fields it knows, so their `allow-outdated` marks are gone; older
+entries keep theirs. One run at a time (a second is refused while the first holds the lock);
+Ctrl-C removes the stand unless `KEEP=1`, a failed run leaves it up to look at. The stand
+touches only what it names: the container `clowdr-stand-host`, the volumes
+`clowdr-stand-docker`, `clowdr-stand-containerd` and `clowdr-stand-gomod`, and the image
+`clowdr-stand-ubuntu`; it never stops Docker or other containers. The base image
+`ubuntu:24.04` and the build cache stay with the rest of your Docker cache. The container runs
+`--privileged` (systemd, Docker and iptables inside it need that), so it can change kernel
+state of the VM that runs your Docker, such as sysctls and loaded modules.
 
 License: Apache-2.0.

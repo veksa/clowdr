@@ -117,7 +117,8 @@ cat >"$W/pkg/package.json" <<EOF
 EOF
 echo 'module.exports = "hello from the stand";' >"$W/pkg/index.js"
 (cd "$W/pkg" && clowctl --context stand npm publish)
-if (cd "$W/pkg" && clowctl --context stand npm publish 2>/dev/null); then fail "a re-publish of 1.0.0 was accepted"; fi
+if (cd "$W/pkg" && clowctl --context stand npm publish >"$W/out" 2>&1); then fail "a re-publish of 1.0.0 was accepted"; fi
+grep -q "already published" "$W/out" || fail "re-publish: $(cat "$W/out")"
 (cd "$W/pkg" && jq '.version = "1.0.1"' package.json >p.json && mv p.json package.json && npm publish --loglevel=warn >/dev/null)
 
 step "install with yarn 4 and with npm"
@@ -136,6 +137,15 @@ npm init -y >/dev/null
 npm install @stand/hello --no-audit --no-fund >/dev/null
 [ "$(node -p 'require("@stand/hello")')" = "hello from the stand" ] || fail "npm did not install the package"
 
+step "a project pinned to yarn 4.14"
+mkdir -p "$W/app-414"
+cd "$W/app-414"
+echo '{"name": "app-414", "private": true, "packageManager": "yarn@4.14.0"}' >package.json
+printf 'nodeLinker: node-modules\nenableTelemetry: false\n' >.yarnrc.yml
+clowctl --context stand npm setup --scope @stand
+[ "$(yarn --version)" = 4.14.0 ] || fail "corepack did not run yarn 4.14.0"
+yarn add @stand/hello@^1.0.0 >/dev/null || fail "yarn 4.14 with the settings npm setup wrote"
+
 step "a full clowctl deploy checks the packages"
 cd "$W/shop"
 echo '{"name": "shop", "private": true}' >package.json
@@ -147,9 +157,11 @@ echo v4 >web/public/release.txt
 cc deploy --tag v4
 within 30 served v4 || fail "v4 is not served"
 for v in 1.1.0 1.2.0 1.3.0; do publish_version "$v" >/dev/null; done
-if cc npm check >/dev/null 2>&1; then fail "npm check passed with a deprecated version locked"; fi
+if cc npm check >"$W/out" 2>&1; then fail "npm check passed with a deprecated version locked"; fi
+grep -q "@stand/hello@1.0.0 is deprecated.*yarn up @stand/hello" "$W/out" || fail "npm check: $(cat "$W/out")"
 echo v5 >web/public/release.txt
-if cc deploy --tag v5 2>/dev/null; then fail "deploy went ahead with a deprecated version locked"; fi
+if cc deploy --tag v5 >"$W/out" 2>&1; then fail "deploy went ahead with a deprecated version locked"; fi
+grep -q "deploy anyway with --allow-outdated" "$W/out" || fail "deploy: $(cat "$W/out")"
 cc deploy --tag v5 --allow-outdated
 within 30 served v5 || fail "v5 is not served"
 cc releases web | grep -q "v5.*(allow-outdated)" || fail "the release does not show --allow-outdated"
