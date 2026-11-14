@@ -1,4 +1,5 @@
-// Package npm serves a private npm registry at /npm/ on the deploy host.
+// Package npm serves a private npm registry at /npm/ on the deploy host, and the Claude Code
+// plugin marketplace built from it at /plugins/ (plugins.go).
 //
 // Every route needs an npm token (auth.CheckNPM); admin and project tokens do not work here,
 // and npm tokens do not work anywhere else. A token without rights on a package gets the same
@@ -36,7 +37,10 @@ type Handler struct {
 	// Dir holds the registry's files: tarballs in Dir/tarballs/<sha512 hex>.
 	Dir    string
 	Config func() config.NPMConf
-	Log    *slog.Logger
+	// Plugins and Domain name the plugin marketplace (MarketplaceName); nil means defaults.
+	Plugins func() config.PluginsConf
+	Domain  func() string
+	Log     *slog.Logger
 	// Now is the clock, replaced in tests.
 	Now func() time.Time
 
@@ -47,6 +51,11 @@ type Handler struct {
 	slots     chan struct{}
 	// mu serialises publishes, tag changes and the sweep: one version check and write at a time.
 	mu sync.Mutex
+	// zipMu serialises building plugin zips outside a publish; notPlugin remembers tarballs
+	// whose package says "claude-plugin": true but failed the plugin checks, so they are read
+	// once per process, not on every marketplace request.
+	zipMu     sync.Mutex
+	notPlugin map[string]bool
 }
 
 const (
@@ -125,6 +134,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "private, no-store")
 	addr := ClientAddr(r)
 	rest, ok := strings.CutPrefix(r.URL.EscapedPath(), "/npm/")
+	plugins := false
+	if !ok {
+		rest, plugins = strings.CutPrefix(r.URL.EscapedPath(), "/plugins/")
+		ok = plugins
+	}
 	segs, okSegs := splitPath(rest)
 	okSegs = ok && okSegs
 
@@ -136,7 +150,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// npm login and adduser: tokens come from clowctl, never from a password.
-	if okSegs && r.Method == http.MethodPut && len(segs) == 3 && segs[0] == "-" && segs[1] == "user" && strings.HasPrefix(segs[2], "org.couchdb.user:") {
+	if okSegs && !plugins && r.Method == http.MethodPut && len(segs) == 3 && segs[0] == "-" && segs[1] == "user" && strings.HasPrefix(segs[2], "org.couchdb.user:") {
 		msg := "this registry does not take passwords: run clowctl npm login"
 		if _, err := h.authenticate(r); err != nil {
 			h.limiter.fail(addr, now)
@@ -162,6 +176,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	c := &call{h: h, w: w, r: r, tok: tok, rights: auth.NPMRights{Scopes: tok.Scopes}, addr: addr}
 	if !okSegs || len(segs) == 0 {
 		notFound(w)
+		return
+	}
+	if plugins {
+		c.servePlugins(segs)
 		return
 	}
 	if segs[0] == "-" {

@@ -107,8 +107,10 @@ func (s *Server) Handler() http.Handler {
 		mux.Handle("/v2/", s.Registry)
 	}
 	if s.NPM != nil {
-		// Its own tokens and its own body limits: none of the API's middleware applies.
+		// Its own tokens and its own body limits: none of the API's middleware applies. The
+		// plugin marketplace is built from the registry and takes the same npm tokens.
 		mux.Handle("/npm/", s.NPM)
+		mux.Handle("/plugins/", s.NPM)
 	}
 	// Client packages (docs/tracing.md): open source, no token.
 	mux.Handle("GET /sdk/node/", sdk.Handler(writeJSON))
@@ -145,8 +147,8 @@ func (s *Server) logRequests(h http.Handler) http.Handler {
 		start := time.Now()
 		sw := &statusWriter{ResponseWriter: w, status: 200}
 		h.ServeHTTP(sw, r)
-		if (strings.HasPrefix(r.URL.Path, "/v2/") || strings.HasPrefix(r.URL.Path, "/npm/")) && sw.status < 400 {
-			return // registries are chatty; /npm/ keeps its own audit log
+		if (strings.HasPrefix(r.URL.Path, "/v2/") || strings.HasPrefix(r.URL.Path, "/npm/") || strings.HasPrefix(r.URL.Path, "/plugins/")) && sw.status < 400 {
+			return // registries are chatty; /npm/ and /plugins/ keep their own audit log
 		}
 		s.Log.Info("http", "method", r.Method, "path", r.URL.Path, "status", sw.status, "dur", time.Since(start).Round(time.Millisecond))
 	})
@@ -168,7 +170,7 @@ func (w *statusWriter) Flush() {
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
 
 // TokenFromRequest reads "Authorization: Bearer <token>" or basic auth (password = token).
-// npm tokens never pass auth.Check, so they work on no route but /npm/.
+// npm tokens never pass auth.Check, so they work on no route but /npm/ and /plugins/.
 func TokenFromRequest(r *http.Request) string {
 	h := r.Header.Get("Authorization")
 	if t, ok := strings.CutPrefix(h, "Bearer "); ok {
@@ -243,7 +245,7 @@ func (s *Server) version(w http.ResponseWriter, r *http.Request) {
 	v := Version{Version: s.Version, Registry: s.RegistryKind, Principal: principal(r).Name()}
 	v.Features = append(v.Features, FeatureAllowOutdated)
 	if s.NPM != nil {
-		v.Features = append(v.Features, FeatureNPM)
+		v.Features = append(v.Features, FeatureNPM, FeaturePlugins)
 	}
 	if info, err := s.Engine.Docker.Info(r.Context()); err == nil {
 		v.Docker = info.ServerVersion

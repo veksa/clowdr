@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
-	"crypto/rand"
 	"crypto/sha1"
 	"crypto/sha512"
 	"crypto/subtle"
@@ -16,7 +15,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -169,6 +167,16 @@ func (c *call) publish(name string) {
 		writeErr(w, 500, "storage error")
 		return
 	}
+	if v.Plugin != nil {
+		var err error
+		v.Plugin.ZipSHA256, v.Plugin.ZipSize, err = c.h.makeZip(v.SHA512, data, unpackLimit(max))
+		if err != nil {
+			c.h.log().Error("npm: plugin zip", "package", name, "version", v.Version, "err", err)
+			c.audit("publish", name, v.Version, "", 400, err.Error())
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	if err := c.h.Store.PublishNPM(v, tags); err != nil {
 		if errors.Is(err, store.ErrExists) {
 			writeErr(w, http.StatusConflict, name+"@"+v.Version+" is already published")
@@ -230,9 +238,11 @@ func checkPublish(name string, b publishBody, unpacked int64) (store.NPMVersion,
 	if subtle.ConstantTimeCompare([]byte(strings.ToLower(vm.Dist.Shasum)), []byte(hex.EncodeToString(s1[:]))) != 1 {
 		return v, nil, nil, errors.New("dist.shasum does not match the tarball")
 	}
-	if err := checkTarball(data, name, ver, unpacked); err != nil {
+	plugin, err := checkTarball(data, name, ver, unpacked)
+	if err != nil {
 		return v, nil, nil, err
 	}
+	v.Plugin = plugin
 	var tags []string
 	for t, tv := range b.DistTags {
 		if !validTag(t) {
@@ -284,28 +294,34 @@ func integrityMatches(sri string, sum []byte) bool {
 // empty and "." parts dropped) and an entry with ".." is refused. Exactly one entry may become
 // package.json, it must name the published package and version, and no two entries may land
 // on the same path, so nothing extracted later can replace what was checked.
-func checkTarball(data []byte, name, version string, unpacked int64) error {
+//
+// It also tells a Claude Code plugin (docs/plugins.md): a package.json with "claude-plugin": true
+// makes the package one, and then the plugin rules apply (checkPlugin). The result is nil for a
+// package that is not a plugin.
+func checkTarball(data []byte, name, version string, unpacked int64) (*store.NPMPlugin, error) {
 	gz, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
-		return errors.New("the tarball is not gzip")
+		return nil, errors.New("the tarball is not gzip")
 	}
 	tr := tar.NewReader(&capReader{r: gz, n: unpacked})
 	seen := map[string]bool{}
 	found := 0
+	var flag json.RawMessage
+	var pt pluginTar
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if errors.Is(err, errTooLarge) {
-			return fmt.Errorf("the tarball unpacks to more than %d bytes", unpacked)
+			return nil, fmt.Errorf("the tarball unpacks to more than %d bytes", unpacked)
 		}
 		if err != nil {
-			return errors.New("the tarball is not a valid tar archive")
+			return nil, errors.New("the tarball is not a valid tar archive")
 		}
 		rel, err := extractedPath(hdr.Name)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if rel == "" {
 			continue // the top directory itself, or an entry strip: 1 drops
@@ -314,35 +330,43 @@ func checkTarball(data []byte, name, version string, unpacked int64) error {
 			continue
 		}
 		if seen[rel] {
-			return fmt.Errorf("the tarball has %s twice", rel)
+			return nil, fmt.Errorf("the tarball has %s twice", rel)
 		}
 		seen[rel] = true
+		if err := pt.entry(rel, hdr, tr); err != nil {
+			return nil, err
+		}
 		if rel != "package.json" {
 			continue
 		}
 		found++
 		if hdr.Typeflag != tar.TypeReg {
-			return errors.New("package.json in the tarball is not a regular file")
+			return nil, errors.New("package.json in the tarball is not a regular file")
 		}
 		b, err := io.ReadAll(io.LimitReader(tr, 4<<20+1))
 		if err != nil || len(b) > 4<<20 {
-			return errors.New("package.json in the tarball cannot be read")
+			return nil, errors.New("package.json in the tarball cannot be read")
 		}
 		var pj struct {
-			Name    string `json:"name"`
-			Version string `json:"version"`
+			Name         string          `json:"name"`
+			Version      string          `json:"version"`
+			ClaudePlugin json.RawMessage `json:"claude-plugin"`
 		}
 		if err := json.Unmarshal(b, &pj); err != nil {
-			return errors.New("package.json in the tarball is not valid JSON")
+			return nil, errors.New("package.json in the tarball is not valid JSON")
 		}
 		if pj.Name != name || pj.Version != version {
-			return fmt.Errorf("package.json in the tarball is %s@%s, the document says %s@%s", pj.Name, pj.Version, name, version)
+			return nil, fmt.Errorf("package.json in the tarball is %s@%s, the document says %s@%s", pj.Name, pj.Version, name, version)
 		}
+		flag = pj.ClaudePlugin
+	}
+	if errors.Is(pt.err, errTooLarge) {
+		return nil, fmt.Errorf("the tarball unpacks to more than %d bytes", unpacked)
 	}
 	if found != 1 {
-		return errors.New("the tarball must hold exactly one package.json at its top")
+		return nil, errors.New("the tarball must hold exactly one package.json at its top")
 	}
-	return nil
+	return checkPlugin(name, version, flag, &pt)
 }
 
 // extractedPath is where an entry lands after extraction with strip: 1, "" when it lands
@@ -371,40 +395,7 @@ func (h *Handler) writeTarball(sha512hex string, data []byte) error {
 	if !ok {
 		return errors.New("bad hash")
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	var rnd [6]byte
-	rand.Read(rnd[:])
-	tmp := filepath.Join(dir, tmpPrefix+hex.EncodeToString(rnd[:]))
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		os.Remove(tmp)
-		return err
-	}
-	if err := f.Close(); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
-		return err
-	}
-	if d, err := os.Open(dir); err == nil {
-		d.Sync()
-		d.Close()
-	}
-	return nil
+	return writeAtomic(path, data)
 }
 
 const tmpPrefix = ".upload-"
@@ -510,7 +501,8 @@ func (c *call) distTags(name, tag string) {
 
 // retain applies retention to a package: the newest keep versions by semver and every
 // dist-tagged version stay; any other version is deprecated until now+grace and, when
-// deleteDue is set (the sweep), deleted once that date has passed. A version that becomes
+// deleteDue is set (the sweep), deleted once that date has passed, with its tarball and plugin
+// zip unless another live version has the same tarball. A version that becomes
 // kept again (tagged, or newer ones were removed) loses its deprecation. Callers hold h.mu.
 func (h *Handler) retain(name string, now time.Time, cfg config.NPMConf, deleteDue bool) error {
 	var gone []string
@@ -561,6 +553,11 @@ func (h *Handler) retain(name string, now time.Time, cfg config.NPMConf, deleteD
 		if path, ok := h.tarPath(sum); ok {
 			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 				h.log().Warn("npm: remove tarball", "err", err)
+			}
+		}
+		if path, ok := h.zipPath(sum); ok {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+				h.log().Warn("npm: remove plugin zip", "err", err)
 			}
 		}
 	}

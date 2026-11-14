@@ -845,7 +845,7 @@ func TestTarballPaths(t *testing.T) {
 		{[]string{"package/../package.json", other}, false},
 		{[]string{"package/x/../../etc", "x"}, false},
 	} {
-		err := checkTarball(tgz(t, name, ver, c.extra...), name, ver, 1<<20)
+		_, err := checkTarball(tgz(t, name, ver, c.extra...), name, ver, 1<<20)
 		if (err == nil) != c.ok {
 			t.Errorf("%q: %v", c.extra, err)
 		}
@@ -859,7 +859,7 @@ func TestTarballPaths(t *testing.T) {
 		{[]string{"./package/package.json", real, "/package.json", other}, false},
 		{[]string{"./package.json", real}, true},
 	} {
-		err := checkTarball(tarOf(t, c.entries...), name, ver, 1<<20)
+		_, err := checkTarball(tarOf(t, c.entries...), name, ver, 1<<20)
 		if (err == nil) != c.ok {
 			t.Errorf("%q: %v", c.entries, err)
 		}

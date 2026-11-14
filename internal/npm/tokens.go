@@ -233,7 +233,8 @@ func (h *Handler) Audit(f AuditFilter) ([]store.NPMAudit, error) {
 
 // Sweep is the registry's housekeeping, run by the daemon's periodic ticker: retention on
 // every package (deleting versions whose grace period is over, and their tarball unless
-// another version has the same bytes), audit entries older than 90 days or beyond the cap,
+// another version has the same bytes, and its plugin zip), plugin zips no live version uses
+// (left behind by an older clowdrd's retention), audit entries older than 90 days or beyond the cap,
 // rotated tokens past their grace and tokens expired for 30 days, stale failed-auth counters and leftover temp files.
 func (h *Handler) Sweep(ctx context.Context) {
 	h.mu.Lock()
@@ -267,14 +268,53 @@ func (h *Handler) Sweep(ctx context.Context) {
 		return nil, del, nil
 	})
 	h.limiter.prune(now)
-	dir := filepath.Join(h.Dir, "tarballs")
-	if es, err := os.ReadDir(dir); err == nil {
+	h.sweepZips(pkgs, now)
+	for _, sub := range []string{"tarballs", "zips"} {
+		dir := filepath.Join(h.Dir, sub)
+		es, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
 		for _, e := range es {
 			if !strings.HasPrefix(e.Name(), tmpPrefix) {
 				continue
 			}
 			if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > time.Hour {
 				os.Remove(filepath.Join(dir, e.Name()))
+			}
+		}
+	}
+}
+
+// sweepZips deletes plugin zips whose tarball no live version has: retention removes a zip with
+// its version, but a 0.4 server rolled back to deletes versions without knowing about zips. A
+// zip younger than an hour stays, whatever it is.
+func (h *Handler) sweepZips(pkgs []store.NPMPackage, now time.Time) {
+	dir := filepath.Join(h.Dir, "zips")
+	es, err := os.ReadDir(dir)
+	if err != nil || len(es) == 0 {
+		return
+	}
+	live := map[string]bool{}
+	for _, p := range pkgs {
+		vs, err := h.Store.NPMVersions(p.Name)
+		if err != nil {
+			return // unsure what is live: keep everything
+		}
+		for _, v := range vs {
+			if !v.Removed {
+				live[v.SHA512] = true
+			}
+		}
+	}
+	for _, e := range es {
+		sum, ok := strings.CutSuffix(e.Name(), ".zip")
+		if !ok || !hexRe.MatchString(sum) || live[sum] {
+			continue
+		}
+		if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > time.Hour {
+			if err := os.Remove(filepath.Join(dir, e.Name())); err == nil {
+				h.log().Info("npm: removed a plugin zip no version uses", "sha512", sum)
 			}
 		}
 	}

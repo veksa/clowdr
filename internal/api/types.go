@@ -26,6 +26,8 @@ type DeployRequest struct {
 const (
 	FeatureNPM           = "npm"
 	FeatureAllowOutdated = "allow-outdated"
+	// FeaturePlugins is the Claude Code plugin marketplace at /plugins/ (clowdrd 0.5.0).
+	FeaturePlugins = "plugins"
 )
 
 type RollbackRequest struct {
@@ -124,7 +126,7 @@ type Version struct {
 	Docker    string `json:"docker,omitempty"`
 	Registry  string `json:"registry"`
 	Principal string `json:"principal,omitempty"`
-	// Features lists what this server supports beyond the base API ("npm"), so a newer CLI can
+	// Features lists what this server supports beyond the base API ("npm", "plugins"), so a newer CLI can
 	// tell an old server apart from a failure.
 	Features []string `json:"features,omitempty"`
 }

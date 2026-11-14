@@ -69,6 +69,20 @@ type NPMVersion struct {
 	// RemoveAt is set by retention: the version is deprecated until then and deleted after.
 	RemoveAt time.Time `json:"remove_at,omitzero"`
 	Removed  bool      `json:"removed,omitempty"`
+	// Plugin is set on a version that is a Claude Code plugin (its package.json says
+	// "claude-plugin": true and the tarball passed the plugin checks).
+	Plugin *NPMPlugin `json:"plugin,omitempty"`
+}
+
+// NPMPlugin is what the plugin marketplace lists for a version, and the zip it serves.
+type NPMPlugin struct {
+	// Name is the plugin's name: the package's unscoped name, equal to plugin.json's name.
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	// ZipSHA256 and ZipSize describe npm/zips/<sha512 hex>.zip, built from the tarball. Empty
+	// until the zip is built.
+	ZipSHA256 string `json:"zip_sha256,omitempty"`
+	ZipSize   int64  `json:"zip_size,omitempty"`
 }
 
 // NPMAudit is one entry of the registry's audit log.

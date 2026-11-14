@@ -159,7 +159,9 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 		LowDisk: func() error { return lowDisk(o.StateDir) }}
 	srv.Registry = reg
 	srv.NPM = &npm.Handler{Store: st, Dir: filepath.Join(o.StateDir, "npm"), Log: log,
-		Config: func() config.NPMConf { return current.NPM }}
+		Config:  func() config.NPMConf { return current.NPM },
+		Plugins: func() config.PluginsConf { return current.Plugins },
+		Domain:  func() string { return current.Domain }}
 	handler := srv.Handler()
 
 	errc := make(chan error, 3)

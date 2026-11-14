@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -37,6 +38,40 @@ type Platform struct {
 	Notify         NotifyConf              `yaml:"notify"`
 	Limits         LimitsConf              `yaml:"limits"`
 	NPM            NPMConf                 `yaml:"npm"`
+	Plugins        PluginsConf             `yaml:"plugins"`
+}
+
+// PluginsConf names the Claude Code plugin marketplace at /plugins/ on the deploy host
+// (docs/plugins.md). Both keys are optional.
+type PluginsConf struct {
+	// Name is the marketplace's name, typed after "@" when a plugin is installed. Default:
+	// "clowdr-" and the domain with dots as dashes. Changing it later makes every user set the
+	// marketplace up again.
+	Name string `yaml:"name"`
+	// Owner is the marketplace's owner shown by Claude Code. Default: the domain.
+	Owner string `yaml:"owner"`
+}
+
+var marketplaceNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// ValidMarketplaceName refuses a name Claude Code would not take: other characters than
+// letters, digits, '.', '_' and '-', "..", more than 128 characters, the "claudeai-" prefix, names
+// it keeps for itself, and anything with "claude" or "anthropic" in it, which it may read as an
+// imitation of an official marketplace.
+func ValidMarketplaceName(n string) error {
+	l := strings.ToLower(n)
+	switch {
+	case !marketplaceNameRe.MatchString(n) || strings.Contains(n, ".."):
+		return fmt.Errorf("plugins.name %q: letters, digits, '.', '_' and '-', starting with a letter or digit, no \"..\", at most 128", n)
+	case strings.Contains(l, "claude") || strings.Contains(l, "anthropic"):
+		return fmt.Errorf("plugins.name %q: Claude Code refuses names that read as its own marketplaces", n)
+	}
+	switch l {
+	case "inline", "builtin", "skills-dir", "synced", "org", "org-provisioned", "unknown", "healthcare", "life-sciences", "agent-skills",
+		"constructor", "hasownproperty", "isprototypeof", "propertyisenumerable", "tolocalestring", "tostring", "valueof":
+		return fmt.Errorf("plugins.name %q is reserved by Claude Code", n)
+	}
+	return nil
 }
 
 // NPMConf configures the private npm registry at /npm/ on the deploy host.
@@ -143,6 +178,12 @@ limits:
 #   keep: 3             # versions kept per package, besides dist-tagged ones
 #   grace: 14d          # how long an old version stays deprecated before it is deleted
 #   max_publish: 64m    # largest publish request
+
+# Claude Code plugin marketplace at https://deploy.<domain>/plugins/marketplace.json, built from
+# the npm packages marked "claude-plugin": true (users: clowctl plugins setup).
+# plugins:
+#   name: clowdr-example-com   # marketplace name (default: clowdr-<domain, dots as dashes>)
+#   owner: Example Inc.        # shown as the owner (default: the domain)
 `
 
 func LoadPlatform(path string) (*Platform, error) {
@@ -278,6 +319,11 @@ func (p *Platform) validate() error {
 		}
 		if a.Image == "" {
 			return fmt.Errorf("addons.%s: image is required", name)
+		}
+	}
+	if p.Plugins.Name != "" {
+		if err := ValidMarketplaceName(p.Plugins.Name); err != nil {
+			return err
 		}
 	}
 	if p.NPM.MaxPublish < 0 {
