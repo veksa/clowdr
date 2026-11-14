@@ -13,6 +13,9 @@
 # clowdr-stand-ubuntu. It never stops the Docker runtime or other containers. Ports, on
 # 127.0.0.1 only: 11500 HTTPS, 11501 HTTP, 11502 the self-signed API port.
 #
+# STAND_NEW_VERSION=v0.4.0 tests that release from GitHub instead of the working tree;
+# STAND_OLD_VERSION picks the release to start from (v0.3.1).
+#
 # One run at a time: a second one is refused while the first holds the lock. Ctrl-C removes the
 # stand (KEEP=1 keeps it); a run that fails leaves it up to look at.
 set -euo pipefail
@@ -104,7 +107,7 @@ up() {
 }
 
 scenario() {
-	docker exec "$NAME" bash /src/test/stand/scenario.sh
+	docker exec -e STAND_OLD_VERSION="${STAND_OLD_VERSION:-}" -e STAND_NEW_VERSION="${STAND_NEW_VERSION:-}" "$NAME" bash /src/test/stand/scenario.sh
 	say "the stand is up: https://deploy.$BASE:11500 and https://shop.$BASE:11500 (Pebble certificates)"
 	say "test/stand/stand.sh shell for a shell on it, test/stand/stand.sh down to remove it"
 }

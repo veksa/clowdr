@@ -234,6 +234,7 @@ certificates, published on 127.0.0.1 only (11500 HTTPS, 11501 HTTP, 11502 the AP
 test/stand/stand.sh           # from scratch: build the stand, then the scenario
 test/stand/stand.sh shell     # a shell on the stand host (clowctl, docker, journalctl)
 test/stand/stand.sh down      # remove it
+STAND_NEW_VERSION=v0.4.0 test/stand/stand.sh   # upgrade to that release with install.sh, not to the working tree
 ```
 
 The scenario (`test/stand/scenario.sh`) installs the last release and deploys the example,

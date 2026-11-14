@@ -12,6 +12,9 @@ SRC=/src
 . "$SRC/test/e2e/pebble.sh"
 
 OLD="${STAND_OLD_VERSION:-v0.3.1}"
+# STAND_NEW_VERSION=v0.4.0 upgrades to that release with install.sh (download, signature check)
+# instead of a build of the working tree.
+NEW="${STAND_NEW_VERSION:-}"
 BASE=127-0-0-1.sslip.io
 API="https://deploy.$BASE"
 REG="$API/npm/"
@@ -97,10 +100,22 @@ release v2
 RELEASES_BEFORE="$(cc releases web -o json | jq length)"
 TOKENS_BEFORE="$(admin token ls -o json | jq -r '.[].name' | sort | tr '\n' ' ')"
 
-step "upgrade to the working tree"
-(cd "$SRC" && CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags "-X main.version=stand-dev" -o "$W/clowdrd" ./cmd/clowdr)
-npm_block on
-install_and_wait stand-dev --binary "$W/clowdrd"
+# upgrade: to $NEW from GitHub Releases, or to a build of the working tree.
+upgrade() {
+	npm_block on
+	if [ -n "$NEW" ]; then
+		install_and_wait "${NEW#v}" --version "$NEW"
+	else
+		install_and_wait stand-dev --binary "$W/clowdrd"
+	fi
+}
+if [ -n "$NEW" ]; then
+	step "upgrade to $NEW"
+else
+	step "upgrade to the working tree"
+	(cd "$SRC" && CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags "-X main.version=stand-dev" -o "$W/clowdrd" ./cmd/clowdr)
+fi
+upgrade
 served v2 || fail "v2 is not served after the upgrade"
 [ "$(cc releases web -o json | jq length)" = "$RELEASES_BEFORE" ] || fail "releases lost in the upgrade"
 [ "$(admin token ls -o json | jq -r '.[].name' | sort | tr '\n' ' ')" = "$TOKENS_BEFORE" ] || fail "tokens changed in the upgrade"
@@ -187,8 +202,7 @@ release v6
 [ "$(code "$TOKEN" "$REG-/whoami")" != 200 ] || fail "$OLD serves npm"
 
 step "upgrade again"
-npm_block on
-install_and_wait stand-dev --binary "$W/clowdrd"
+upgrade
 served v6 || fail "v6 is not served after the second upgrade"
 [ "$(code "$TOKEN" "$REG-/whoami")" = 200 ] || fail "the npm token did not survive the rollback"
 # $OLD rewrote the history with its v6 deploy: its own fields only, so the v5 mark is gone.
