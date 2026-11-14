@@ -336,16 +336,17 @@ var (
 // this clowctl, quoted for the shell that runs it (sh, or cmd.exe on Windows), then the
 // arguments. On Windows the path is always in double quotes, with forward slashes, and nothing
 // else is quoted: two quote characters, which cmd.exe keeps as they are, and inside them only
-// '%' and '!' (variable expansion) and '"' mean anything, so those are refused. Claude Code takes
-// at most 500 printable ASCII characters.
+// '%' and '!' (variable expansion) and '"' mean anything, so those are refused; so are '$' and
+// '`', which a POSIX shell (Git Bash) would expand inside double quotes. Claude Code takes at most
+// 500 printable ASCII characters.
 func headersHelperCommand(exe, reg, goos string) (string, error) {
 	if !urlChars.MatchString(reg) {
 		return "", fmt.Errorf("registry %q: unexpected characters for a command line", reg)
 	}
 	var cmd string
 	if goos == "windows" {
-		if strings.ContainsAny(exe, `"%!`) {
-			return "", fmt.Errorf("%s: cmd.exe reads %%, ! and \" in a path as its own; install clowctl under a path without them", exe)
+		if strings.ContainsAny(exe, "\"%!$`") {
+			return "", fmt.Errorf("%s: cmd.exe or a POSIX shell reads %%, !, $, ` and \" in a path as their own; install clowctl under a path without them", exe)
 		}
 		cmd = `"` + strings.ReplaceAll(exe, `\`, "/") + `" plugins headers --registry ` + reg
 	} else {

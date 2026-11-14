@@ -43,6 +43,8 @@ func TestHeadersHelperCommand(t *testing.T) {
 		{`C:\100%\clowctl.exe`, "windows"},
 		{`C:\%PATH%\clowctl.exe`, "windows"},
 		{`C:\wow!\clowctl.exe`, "windows"},
+		{`C:\$HOME\clowctl.exe`, "windows"},
+		{"C:\\a`b\\clowctl.exe", "windows"},
 	} {
 		if got, err := headersHelperCommand(bad.exe, reg, bad.goos); err == nil {
 			t.Errorf("%q accepted: %q", bad.exe, got)
