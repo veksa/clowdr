@@ -227,7 +227,10 @@ if cc deploy --tag v5 >"$W/out" 2>&1; then fail "deploy went ahead with a deprec
 grep -q "deploy anyway with --allow-outdated" "$W/out" || fail "deploy: $(cat "$W/out")"
 cc deploy --tag v5 --allow-outdated
 within 30 served v5 || fail "v5 is not served"
-cc releases web | grep -q "v5.*(allow-outdated)" || fail "the release does not show --allow-outdated"
+# captured first: with pipefail, grep -q leaving at the first match can kill clowctl with SIGPIPE
+# while it still writes, and the pipeline then fails although the line was there
+OUT="$(cc releases web)"
+grep -q "v5.*(allow-outdated)" <<<"$OUT" || fail "the release does not show --allow-outdated: $OUT"
 
 step "token rotation"
 OLD_TOKEN="$(grep -A1 "$REG" /root/.yarnrc.yml | sed -n 's/.*npmAuthToken: *//p' | tr -d '"')"
@@ -256,8 +259,8 @@ plugin_served() {
 	[ "$(sha256sum <"$P/greeter.zip" | cut -d' ' -f1)" = "$(jq -r '.plugins[0].source.sha256' "$1")" ] ||
 		fail "the zip's sha256 differs from marketplace.json"
 	# no unzip on the stand host; python3 is there
-	python3 -c 'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$P/greeter.zip" |
-		grep -qx '.claude-plugin/plugin.json' || fail "plugin.json is not at the top of the zip"
+	ENTRIES="$(python3 -c 'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$P/greeter.zip")"
+	grep -qx '.claude-plugin/plugin.json' <<<"$ENTRIES" || fail "plugin.json is not at the top of the zip: $ENTRIES"
 }
 if $NEW_HAS_PLUGINS; then
 	step "a claude code plugin"
@@ -271,8 +274,8 @@ EOF
 	echo '{"name": "greeter", "version": "1.0.0", "description": "Greets"}' >"$P/pkg/.claude-plugin/plugin.json"
 	echo 'Say hello.' >"$P/pkg/commands/hello.md"
 	(cd "$P/pkg" && plug clowctl --context stand npm publish) || fail "the plugin publish"
-	plug clowctl --context stand plugins ls | grep -q '^greeter@clowdr-127-0-0-1-sslip-io  *1\.0\.0' ||
-		fail "clowctl plugins ls: $(plug clowctl --context stand plugins ls 2>&1)"
+	OUT="$(plug clowctl --context stand plugins ls)"
+	grep -q '^greeter@clowdr-127-0-0-1-sslip-io  *1\.0\.0' <<<"$OUT" || fail "clowctl plugins ls: $OUT"
 	plug clowctl --context stand plugins setup
 	SETTINGS="$P/claude/settings.json"
 	MARKET="$(jq -r '.extraKnownMarketplaces | keys | join(" ")' "$SETTINGS")"

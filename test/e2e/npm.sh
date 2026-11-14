@@ -224,8 +224,11 @@ ZIP="$(jq -r '.plugins[0].source.url' "$WORK/marketplace.json")"
 [ "$(sha256sum <"$WORK/body" | cut -d' ' -f1)" = "$(jq -r '.plugins[0].source.sha256' "$WORK/marketplace.json")" ] ||
 	fail "the zip's sha256 differs from marketplace.json"
 mv "$WORK/body" "$WORK/greeter.zip"
-unzip -Z1 "$WORK/greeter.zip" | grep -qx '.claude-plugin/plugin.json' || fail "plugin.json is not at the top of the zip: $(unzip -Z1 "$WORK/greeter.zip")"
-unzip -Z "$WORK/greeter.zip" hooks/run.sh | grep -q '^-rwxr-xr-x' || fail "the hook lost its execute bit"
+# outputs captured before grep -q: with pipefail, grep leaving early can SIGPIPE the writer
+OUT="$(unzip -Z1 "$WORK/greeter.zip")"
+grep -qx '.claude-plugin/plugin.json' <<<"$OUT" || fail "plugin.json is not at the top of the zip: $OUT"
+OUT="$(unzip -Z "$WORK/greeter.zip" hooks/run.sh)"
+grep -q '^-rwxr-xr-x' <<<"$OUT" || fail "the hook lost its execute bit: $OUT"
 { [ "$(status "$ONLY_PLUG" "$MARKET")" = 200 ] && jq -e '.plugins == []' "$WORK/body" >/dev/null; } ||
 	fail "a token that reads no package must get an empty marketplace: $(head -c 300 "$WORK/body")"
 if command -v claude >/dev/null; then
@@ -236,7 +239,8 @@ fi
 # the same answers through clowctl and the headers helper it writes for Claude Code
 admin npm login --scope plugins:read --scope @e2e --name e2e-plugins
 TOKENS+=("$(home_token)")
-admin plugins ls | grep -q '^greeter@clowdr-clowdr-test  *1\.0\.0' || fail "clowctl plugins ls: $(admin plugins ls 2>&1)"
+OUT="$(admin plugins ls)"
+grep -q '^greeter@clowdr-clowdr-test  *1\.0\.0' <<<"$OUT" || fail "clowctl plugins ls: $OUT"
 admin plugins setup
 SETTINGS="$HOME/.claude/settings.json"
 jq -e --arg u "$MARKET" '.extraKnownMarketplaces["clowdr-clowdr-test"] | .autoUpdate == true and .source.source == "url" and .source.url == $u' \
