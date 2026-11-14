@@ -49,7 +49,10 @@ Publish with `clowctl npm publish`, `npm publish` or `yarn npm publish` and a to
 ### Publish rules
 
 A package is a plugin when its tarball's `package.json` has `"claude-plugin": true`. The server
-reads the tarball, not what the client claims, and refuses the publish (400) unless:
+reads the tarball, not what the client claims: the version object of the publish document
+counts for nothing, and the stored one carries `"claude-plugin"` as the tarball says it. A plugin
+publish is judged on its own tarball only, never against other packages, and refused (400)
+unless:
 
 - `"claude-plugin"` is `true` or `false` (absent counts as `false`). A package without it, or with
   `false`, is an ordinary package even when it holds a `.claude-plugin/plugin.json`;
@@ -72,8 +75,6 @@ reads the tarball, not what the client claims, and refuses the publish (400) unl
   extension: `aux.md` too), and no two entries that differ only in case (`README.md` and
   `readme.md`, or a file `skills` beside a folder `Skills/`), which a case-insensitive file system
   (macOS, Windows) would make one;
-- no other package holds the plugin name (409 `plugin name tool is taken by another package`),
-  see [one name, one package](#one-name-one-package);
 - at most 100 000 files (Claude Code's extraction limit), and the zip comes out at most
   `plugins.max_zip` (default 64 MiB, at most 256 MiB, Claude Code's download limit).
 
@@ -110,11 +111,13 @@ Everything else is the npm registry's: one version per publish, immutable versio
   published with `--tag next` is not listed until `latest` moves to it; every live version can
   still be downloaded by its URL. When `latest` points at a version that is not a plugin, the
   package is not listed.
-- **The entry `name` is the plugin name** (the unscoped package name), unique on the server: see
-  below.
+- **The entry `name` is the plugin name** (the unscoped package name). Two packages the token
+  reads with one plugin name are both left out: see [one name per token](#one-name-per-token).
 - **URLs are absolute and on the deploy host**, `https://deploy.<domain>/plugins/…`, whatever
   `Host` the request carried (nginx sends any unknown host to the deploy host, so the header is
-  not trusted for links). They are on the marketplace's own origin, so Claude Code sends the
+  not trusted for links). A request to the deploy host on another port than 443 (a port mapping,
+  `https://deploy.example.com:8443/…`) gets URLs with that port, so the zips download the way
+  the marketplace did. They are on the marketplace's own origin, so Claude Code sends the
   marketplace's headers with each zip download too; a cross-origin redirect would drop them, and
   there is none.
 - **The marketplace name** is `clowdr-` and the server's `domain` with every dot (and any other
@@ -136,21 +139,31 @@ Everything else is the npm registry's: one version per publish, immutable versio
   removes the old entry (setup warns about it).
 - A token that may read no plugin gets a valid, empty marketplace (`"plugins": []`).
 
-### One name, one package
+### One name per token
 
 Claude Code installs, updates and keys a plugin by its name and the marketplace's, never by the
-package. If `@beta/tool` could also be a plugin named `tool`, then for a token that reads both
-scopes the marketplace would have to pick one, and whoever publishes in `@beta` could replace the
-code of `tool@clowdr-example-com` on every machine that installed it from `@acme`, through
-`autoUpdate`, with no one installing anything. So a plugin name belongs to the first package that
-publishes it, for every scope: another package's plugin publish with that name gets 409. An
-ordinary package (no `"claude-plugin": true`) may share the name.
+package. So when a token reads two packages that are plugins of one name (`@acme/tool` and
+`@beta/tool`), the marketplace lists **neither** of them for that token, logs the clash once as a
+warning, and names both packages in the audit entry of each listing (`skipped plugin name tool in
+@acme/tool and @beta/tool`). Every other token sees what it reads as before.
 
-A name is held while its package has a live version that is a plugin (or says
-`"claude-plugin": true`, for versions published on 0.4); when retention or a removal leaves none,
-the name is free. Versions published before 0.5.0 may already hold one name from two packages:
-then **neither** is listed, the server logs the clash once, and the audit entry of each listing
-names both packages. Unpublish or rename one of them, and the other is listed again.
+Why per token, and why neither:
+
+- **No takeover.** Listing either one would let whoever publishes in the other scope replace the
+  code of `tool@clowdr-example-com` on every machine with that token, through `autoUpdate`,
+  without anyone installing anything. Leaving both out means a name a token already gets can only
+  disappear, never change hands.
+- **No leak.** Whether a clash exists is worked out from the packages the token may read, so a
+  token learns nothing about a package outside its rights, and a publisher learns nothing about
+  other scopes: there is no cross-scope check at publish, and no answer that depends on one.
+- **No squatting.** Any scope may publish a plugin of any name; a name nobody owns server-wide
+  cannot be taken away from the scope that needs it. Only a token an admin deliberately gave
+  access to both scopes is affected.
+
+On a clash, narrow the token's scopes so it reads only one of the packages (tokens' scopes do
+not change: create a new token and revoke the old one), or rename one plugin and move its
+package's `latest` to the renamed version. There is still no unpublish. A package whose `latest`
+version is not a plugin takes no part in a clash.
 
 ## Access
 
@@ -262,7 +275,9 @@ plugin lives in `~/.claude/plugins/cache/<marketplace>/<plugin>/<version>/`.
 
 The server builds a version's zip once, when it is published, from the tarball, before it stores
 either: a zip that cannot be built (over `plugins.max_zip`) refuses the publish and leaves
-nothing behind.
+nothing behind. `plugins.max_zip` judges publishes only: a zip rebuilt later for a version
+already accepted is allowed the hard cap of 256 MiB, so lowering the setting never delists a
+published plugin.
 
 - the tarball's top folder (`package/`) is stripped, so the plugin root, with
   `.claude-plugin/plugin.json`, is the top of the zip;
@@ -281,17 +296,21 @@ no-cache`.
 A zip missing from disk is built again on the next request. Deflate's output is not promised
 across Go releases, so a rebuild by a newer clowdrd may give other bytes; it then records the new
 digest before it serves anything, and the next marketplace fetch names it. A zip that fails to
-build is logged once and not tried again for an hour; meanwhile the marketplace leaves the
-plugin out (the audit entry says `zip unavailable`) and its URL answers 404.
+build is logged once; it is not tried again for a minute when the disk or the store failed, and
+for an hour when the tarball cannot make one. Meanwhile the marketplace leaves the plugin out
+(the audit entry says `zip unavailable`) and its URL answers 404. A version that retention
+removed while its zip was being rebuilt is simply gone.
 
-A version published on clowdrd 0.4 with `"claude-plugin": true` is checked against the rules the
-first time the marketplace would list it: if it passes, its zip is built then; if not, it is not
-listed and the reason is logged once.
+Every version recorded from 0.5.0 on is marked as checked, plugin or not. A version stored by
+0.4 whose version object says `"claude-plugin": true` is checked against the rules from its
+tarball the first time the marketplace would list it, and the answer is recorded: if it passes,
+its zip is built then; if not, it is not a plugin for any purpose and the reason is logged once.
 
 ## Audit
 
 Two more actions in `clowctl npm audit`: `plugin.list` for each fetch of `marketplace.json` (the
-detail says how many plugins it listed, and which packages lost a name to another scope) and
+detail says how many plugins it listed, and which it left out: zips unavailable, and plugin names
+two packages the token reads share) and
 `plugin.download` for each zip, with package and version. `--action plugin` matches both.
 
 ## Storage
@@ -315,9 +334,8 @@ path, never the `Authorization` header.
 - Nothing to do on the server; the marketplace answers once 0.5.0 runs. Tokens need
   `plugins:read` to see it; a token created with that scope before the upgrade works as soon as
   0.5.0 runs.
-- Two things 0.5.0 refuses that 0.4 took: a package with a sparse or special tarball entry, and a
-  plugin publish under a name another package holds. Versions already stored stay; a name two
-  packages hold is listed for neither (see [one name, one package](#one-name-one-package)).
+- 0.5.0 refuses a package with a sparse or special tarball entry, which 0.4 took. Versions already
+  stored stay.
 - **Rolling back to 0.4.x:** remove the `plugins:` section from `platform.yml` first (0.4.x refuses
   unknown keys). 0.4.x ignores the plugin fields of version records and may drop them when it
   rewrites a record (retention); 0.5.0 checks such a version again from its tarball, so nothing is
