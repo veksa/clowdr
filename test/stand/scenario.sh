@@ -4,7 +4,8 @@
 #   install the last release and deploy the example project; upgrade to a build of the working
 #   tree and check that releases, tokens, images and the site survive; npm login, publish and
 #   install with yarn 4 and npm; a full clowctl deploy with the package check; token rotation;
-#   roll back to the release and upgrade again.
+#   a Claude Code plugin: publish, clowctl plugins setup, its headers helper, the zip and its
+#   digest; roll back to the release and upgrade again.
 set -euo pipefail
 
 SRC=/src
@@ -16,6 +17,13 @@ OLD="${STAND_OLD_VERSION:-v0.3.1}"
 # instead of a build of the working tree. v0.4.0 itself fails nginx_follows_main_conf: it needs
 # a hand reload of nginx after the upgrade.
 NEW="${STAND_NEW_VERSION:-}"
+# version_at_least A B: release A (v0.4.1) is B or later.
+version_at_least() { [ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" = "$2" ]; }
+# npm came with 0.4.0, the plugin marketplace with 0.5.0; a build of the working tree has both.
+OLD_HAS_NPM=false
+if version_at_least "$OLD" v0.4.0; then OLD_HAS_NPM=true; fi
+NEW_HAS_PLUGINS=true
+if [ -n "$NEW" ] && ! version_at_least "$NEW" v0.5.0; then NEW_HAS_PLUGINS=false; fi
 BASE=127-0-0-1.sslip.io
 API="https://deploy.$BASE"
 REG="$API/npm/"
@@ -75,6 +83,11 @@ npm_block() {
 # install_and_wait VERSION INSTALL_ARGS... (VERSION as /v1/version says it: 0.3.1). The version
 # is read through nginx on the deploy host, so this also checks that nginx passes the API to
 # the new daemon; see nginx_follows_main_conf for what it cannot see.
+# plugins_block on|off: the plugins section of platform.yml; releases before 0.5 refuse it.
+plugins_block() {
+	sed -i '/^plugins:/,/^  max_zip:/d' /etc/clowdr/platform.yml
+	[ "$1" = off ] || printf 'plugins:\n  owner: Stand\n  max_zip: 8m\n' >>/etc/clowdr/platform.yml
+}
 install_and_wait() {
 	local want=$1
 	shift
@@ -116,6 +129,7 @@ TOKENS_BEFORE="$(admin token ls -o json | jq -r '.[].name' | sort | tr '\n' ' ')
 # upgrade: to $NEW from GitHub Releases, or to a build of the working tree.
 upgrade() {
 	npm_block on
+	if $NEW_HAS_PLUGINS; then plugins_block on; fi
 	if [ -n "$NEW" ]; then
 		install_and_wait "${NEW#v}" --version "$NEW"
 	else
@@ -227,13 +241,65 @@ clowctl --context stand npm token rotate --now
 [ "$(code "$NEW_TOKEN" "$REG-/whoami")" = 401 ] || fail "--now did not stop the previous token"
 TOKEN="$(grep -A1 "$REG" /root/.yarnrc.yml | sed -n 's/.*npmAuthToken: *//p' | tr -d '"')"
 
+# the plugin step keeps its own home, clowctl config and Claude Code settings, so the npm login
+# above (and ~/.yarnrc.yml) stays as it is
+P="$W/plugins"
+plug() { HOME="$P/home" CLOWDR_CONFIG="$P/clowctl-config" CLAUDE_CONFIG_DIR="$P/claude" "$@"; }
+# plugin_served FILE: the marketplace as PLUGIN_AUTH sees it lists greeter, and its zip has the
+# digest the marketplace names
+plugin_served() {
+	curl -fsS -H "Authorization: $PLUGIN_AUTH" "$API/plugins/marketplace.json" >"$1" || fail "marketplace.json"
+	jq -e --arg u "$API/plugins/@stand/greeter/1.0.0.zip" \
+		'.owner.name == "Stand" and (.plugins | length) == 1 and .plugins[0].name == "greeter" and .plugins[0].source.url == $u' \
+		"$1" >/dev/null || fail "marketplace.json: $(cat "$1")"
+	curl -fsS -H "Authorization: $PLUGIN_AUTH" -o "$P/greeter.zip" "$(jq -r '.plugins[0].source.url' "$1")" || fail "the plugin zip"
+	[ "$(sha256sum <"$P/greeter.zip" | cut -d' ' -f1)" = "$(jq -r '.plugins[0].source.sha256' "$1")" ] ||
+		fail "the zip's sha256 differs from marketplace.json"
+	unzip -Z1 "$P/greeter.zip" | grep -qx '.claude-plugin/plugin.json' || fail "plugin.json is not at the top of the zip"
+}
+if $NEW_HAS_PLUGINS; then
+	step "a claude code plugin"
+	mkdir -p "$P/home" "$P/claude" "$P/pkg/.claude-plugin" "$P/pkg/commands"
+	plug clowctl context add stand "$API" --token "$ADMIN"
+	plug clowctl --context stand npm login --name stand-plugins --scope plugins:read --scope 'npm:publish:@stand/*'
+	cat >"$P/pkg/package.json" <<EOF
+{"name": "@stand/greeter", "version": "1.0.0", "claude-plugin": true,
+ "files": [".claude-plugin", "commands"], "publishConfig": {"registry": "$REG"}}
+EOF
+	echo '{"name": "greeter", "version": "1.0.0", "description": "Greets"}' >"$P/pkg/.claude-plugin/plugin.json"
+	echo 'Say hello.' >"$P/pkg/commands/hello.md"
+	(cd "$P/pkg" && plug clowctl --context stand npm publish) || fail "the plugin publish"
+	plug clowctl --context stand plugins ls | grep -q '^greeter@clowdr-127-0-0-1-sslip-io  *1\.0\.0' ||
+		fail "clowctl plugins ls: $(plug clowctl --context stand plugins ls 2>&1)"
+	plug clowctl --context stand plugins setup
+	SETTINGS="$P/claude/settings.json"
+	MARKET="$(jq -r '.extraKnownMarketplaces | keys | join(" ")' "$SETTINGS")"
+	[ "$MARKET" = clowdr-127-0-0-1-sslip-io ] || fail "settings.json: $(cat "$SETTINGS")"
+	jq -e --arg u "$API/plugins/marketplace.json" '.extraKnownMarketplaces["clowdr-127-0-0-1-sslip-io"] |
+		.autoUpdate == true and .source.source == "url" and .source.url == $u' "$SETTINGS" >/dev/null ||
+		fail "settings.json: $(cat "$SETTINGS")"
+	# clowctl is a link to clowdrd: the helper must run the link, or it would start a server
+	HELPER="$(jq -r '.extraKnownMarketplaces["clowdr-127-0-0-1-sslip-io"].source.headersHelper' "$SETTINGS")"
+	case "$HELPER" in "/usr/local/bin/clowctl plugins headers "*) ;; *) fail "the headers helper is $HELPER" ;; esac
+	PLUGIN_AUTH="$(cd / && plug sh -c "$HELPER" | jq -r .Authorization)"
+	plugin_served "$P/marketplace.json"
+fi
+
 step "roll back to $OLD"
-npm_block off
+if $NEW_HAS_PLUGINS; then plugins_block off; fi
+if ! $OLD_HAS_NPM; then npm_block off; fi
 install_and_wait "${OLD#v}" --version "$OLD"
 served v5 || fail "v5 is not served after the rollback"
 [ "$(cc releases web -o json | jq length)" -ge 5 ] || fail "releases lost in the rollback"
 release v6
-[ "$(code "$TOKEN" "$REG-/whoami")" != 200 ] || fail "$OLD serves npm"
+if $OLD_HAS_NPM; then
+	[ "$(code "$TOKEN" "$REG-/whoami")" = 200 ] || fail "$OLD stopped serving npm"
+	if $NEW_HAS_PLUGINS; then
+		[ "$(code "${PLUGIN_AUTH#Bearer }" "$API/plugins/marketplace.json")" != 200 ] || fail "$OLD serves plugins"
+	fi
+else
+	[ "$(code "$TOKEN" "$REG-/whoami")" != 200 ] || fail "$OLD serves npm"
+fi
 
 step "upgrade again"
 upgrade
@@ -243,6 +309,10 @@ served v6 || fail "v6 is not served after the second upgrade"
 # $OLD rewrote the history with its v6 deploy: its own fields only, so the v5 mark is gone.
 [ "$(cc releases web -o json | jq length)" -ge 6 ] || fail "releases lost in the second upgrade"
 (cd "$W/app" && rm -rf node_modules && yarn cache clean --all >/dev/null && yarn install >/dev/null) || fail "yarn install after the second upgrade"
+if $NEW_HAS_PLUGINS; then
+	# what $OLD stored, or rewrote without the plugin fields it does not know, is a plugin again
+	plugin_served "$P/marketplace-again.json"
+fi
 release v7 --allow-outdated
 
 step "stand scenario passed"
