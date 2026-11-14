@@ -214,4 +214,35 @@ Docker 29 (installs clowdrd system-wide, takes ports 80/443/7443): deploys under
 failed requests, a failed health check, rollback, scale, restarts, logs. CI runs it on every
 push; fuzz targets (`go test -fuzz`) run nightly.
 
+`test/e2e/npm.sh` does the same for the npm registry: install with a domain whose certificate
+comes from Pebble (Let's Encrypt's test CA) through clowdrd's own ACME flow, then real npm and
+yarn 4 over nginx and TLS (login, publish, re-publish, dist-tags, installs, audit, retention,
+rotation, revocation) and an access matrix with curl: no, garbage, expired, revoked, project
+and admin tokens, a token of another scope, `%2f`, dot segments, double encoding, guessed
+tarball URLs, the ACME path, the brute-force limit, and no token in any log.
+
+### Local stand
+
+`test/stand/stand.sh` runs a whole server on your own Docker (Colima on macOS): an Ubuntu
+container with systemd and Docker inside, `deploy.127-0-0-1.sslip.io` with Pebble
+certificates, published on 127.0.0.1 only (11500 HTTPS, 11501 HTTP, 11502 the API port).
+
+```sh
+test/stand/stand.sh           # from scratch: build the stand, then the scenario
+test/stand/stand.sh shell     # a shell on the stand host (clowctl, docker, journalctl)
+test/stand/stand.sh down      # remove it
+```
+
+The scenario (`test/stand/scenario.sh`) installs the last release and deploys the example,
+upgrades to a build of the working tree and checks that releases, tokens, images and the site
+survive, logs in to npm, publishes and installs with yarn 4 and npm, runs a full `clowctl deploy`
+with the package check, rotates the token, rolls back to the release and upgrades again. Two
+things the rollback shows: a release before npm refuses the `npm:` section of `platform.yml`
+(unknown keys are an error), so remove it before going back; and the old release rewrites a
+service's history on its next deploy with the fields it knows, so `allow-outdated` marks of
+that service are gone. The stand touches only what it names: the container
+`clowdr-stand-host`, the volumes `clowdr-stand-docker`, `clowdr-stand-containerd` and
+`clowdr-stand-gomod`, and the image `clowdr-stand-ubuntu`; it never stops Docker or other
+containers. Its Docker build cache stays with your other build cache.
+
 License: Apache-2.0.
