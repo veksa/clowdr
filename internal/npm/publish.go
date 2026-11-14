@@ -162,25 +162,13 @@ func (c *call) publish(name string) {
 		writeErr(w, 500, "storage error")
 		return
 	}
+	// A plugin is judged on its own tarball only: whether another scope has a plugin of the
+	// same name is not this publisher's business, and telling it would leak that the other
+	// package exists. Clashes are resolved per token in the marketplace (marketplace).
 	var zip built
 	if v.Plugin != nil {
-		// A plugin name is one name for every scope: Claude Code installs and updates by the
-		// name in plugin.json, so a second package with it could replace the first one's code on
-		// every machine that installed it.
-		holders, err := c.h.pluginHolders()
-		if err != nil {
-			writeErr(w, 500, "storage error")
-			return
-		}
-		for _, o := range holders[v.Plugin.Name] {
-			if o != name {
-				msg := "plugin name " + v.Plugin.Name + " is taken by another package"
-				c.audit("publish", name, v.Version, "", 409, msg+" ("+o+")")
-				writeErr(w, http.StatusConflict, msg)
-				return
-			}
-		}
-		zip, err = c.h.makeZip(data, unpackLimit(max))
+		var err error
+		zip, err = c.h.makeZip(data, unpackLimit(max), c.h.maxZip())
 		if err != nil {
 			c.h.log().Warn("npm: plugin zip", "package", name, "version", v.Version, "err", err)
 			c.audit("publish", name, v.Version, "", 400, err.Error())
@@ -273,7 +261,7 @@ func checkPublish(name string, b publishBody, unpacked int64) (store.NPMVersion,
 	if err != nil {
 		return v, nil, nil, err
 	}
-	v.Plugin = plugin
+	v.Plugin, v.PluginChecked = plugin, true
 	var tags []string
 	for t, tv := range b.DistTags {
 		if !validTag(t) {
@@ -292,6 +280,12 @@ func checkPublish(name string, b publishBody, unpacked int64) (store.NPMVersion,
 	}
 	delete(m, "dist")
 	delete(m, "deprecated")
+	// "claude-plugin" as the tarball says it, not as the client wrote it: the stored version
+	// object must not claim a plugin the server did not check, nor hide one.
+	delete(m, "claude-plugin")
+	if plugin != nil {
+		m["claude-plugin"] = json.RawMessage("true")
+	}
 	manifest, _ := json.Marshal(m)
 	v.Manifest = manifest
 	v.SHA512 = hex.EncodeToString(s512[:])

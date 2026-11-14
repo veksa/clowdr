@@ -389,6 +389,47 @@ func TestPluginZipLimits(t *testing.T) {
 }
 
 func TestPluginZipFailureCached(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root writes into a read-only folder")
+	}
+	e := newEnv(t)
+	pub := e.token("ci", "npm:publish:@acme/*", "plugins:read")
+	mustStatus(t, e.publishPlugin(pub, "@acme/tool", "1.0.0"), 201)
+	v, _ := e.st.NPMVersion("@acme/tool", "1.0.0")
+	zp, _ := e.h.zipPath(v.SHA512)
+	os.Remove(zp)
+	zips := e.h.Dir + "/zips"
+
+	// The disk fails: the zip is unavailable, the failure logged once and remembered briefly.
+	os.Chmod(zips, 0o500)
+	t.Cleanup(func() { os.Chmod(zips, 0o700) })
+	mustStatus(t, e.do("GET", "/plugins/@acme/tool/1.0.0.zip", pub, nil), 404)
+	os.Chmod(zips, 0o700)
+	mustStatus(t, e.do("GET", "/plugins/@acme/tool/1.0.0.zip", pub, nil), 404)
+	if m := e.marketplace(pub); len(m.Plugins) != 0 {
+		t.Fatalf("listed with no zip: %+v", m)
+	}
+	if n := strings.Count(e.logs.String(), "level=ERROR msg=\"npm: plugin zip\""); n != 1 {
+		t.Fatalf("the failure logged %d times, want once:\n%s", n, e.logs.String())
+	}
+	es, _ := e.h.Audit(AuditFilter{Action: "plugin.list"})
+	if len(es) == 0 || !strings.Contains(es[0].Detail, "@acme/tool@1.0.0 (zip unavailable)") {
+		t.Fatalf("audit: %+v", es)
+	}
+	// A minute later it is tried again.
+	e.advance(zipRetrySoon + time.Second)
+	r := e.do("GET", "/plugins/@acme/tool/1.0.0.zip", pub, nil)
+	mustStatus(t, r, 200)
+	if cur, _ := e.st.NPMVersion("@acme/tool", "1.0.0"); sha256hex(r.body) != cur.Plugin.ZipSHA256 {
+		t.Fatal("the rebuilt zip and the record disagree")
+	}
+	if es, _ := os.ReadDir(zips); len(es) != 1 {
+		t.Fatalf("zips: %d files, want the one zip", len(es))
+	}
+}
+
+// plugins.max_zip judges a publish; lowering it later does not delist what was accepted.
+func TestPluginMaxZipOnlyAtPublish(t *testing.T) {
 	e := newEnv(t)
 	pub := e.token("ci", "npm:publish:@acme/*", "plugins:read")
 	noise := make([]byte, 64<<10)
@@ -398,84 +439,116 @@ func TestPluginZipFailureCached(t *testing.T) {
 	v, _ := e.st.NPMVersion("@acme/tool", "1.0.0")
 	zp, _ := e.h.zipPath(v.SHA512)
 	os.Remove(zp)
-
 	e.h.Plugins = func() config.PluginsConf { return config.PluginsConf{MaxZip: 16 << 10} }
-	mustStatus(t, e.do("GET", "/plugins/@acme/tool/1.0.0.zip", pub, nil), 404)
-	e.h.Plugins = nil // the cause is gone, but the failure is remembered for an hour
-	mustStatus(t, e.do("GET", "/plugins/@acme/tool/1.0.0.zip", pub, nil), 404)
-	if m := e.marketplace(pub); len(m.Plugins) != 0 {
-		t.Fatalf("listed with no zip: %+v", m)
+	mustStatus(t, e.do("GET", "/plugins/@acme/tool/1.0.0.zip", pub, nil), 200)
+	if m := e.marketplace(pub); len(m.Plugins) != 1 {
+		t.Fatalf("delisted by a lower max_zip: %+v", m)
 	}
-	if n := strings.Count(e.logs.String(), "step=build"); n != 1 {
-		t.Fatalf("the failure logged %d times, want once:\n%s", n, e.logs.String())
-	}
-	es, _ := e.h.Audit(AuditFilter{Action: "plugin.list"})
-	if len(es) == 0 || !strings.Contains(es[0].Detail, "@acme/tool@1.0.0 (zip unavailable)") {
-		t.Fatalf("audit: %+v", es)
-	}
-	if es, _ := os.ReadDir(e.h.Dir + "/zips"); len(es) != 0 {
-		t.Fatalf("a failed build left %d files", len(es))
-	}
-	e.advance(zipRetry + time.Minute)
-	r := e.do("GET", "/plugins/@acme/tool/1.0.0.zip", pub, nil)
-	mustStatus(t, r, 200)
-	if cur, _ := e.st.NPMVersion("@acme/tool", "1.0.0"); sha256hex(r.body) != cur.Plugin.ZipSHA256 {
-		t.Fatal("the rebuilt zip and the record disagree")
+	data = pluginTgz(t, "@acme/tool", "1.0.1", entry{name: "package/noise.bin", body: string(noise)})
+	if r := e.publishData(pub, "@acme/tool", "1.0.1", data, pubOpts{}); r.status != 400 || !strings.Contains(string(r.body), "plugins.max_zip") {
+		t.Fatalf("publish over max_zip: %d %s", r.status, r.body)
 	}
 }
 
-func TestPluginNameHeldTwice(t *testing.T) {
+// A version that retention removed while its zip was being rebuilt is gone, not a failure.
+func TestPluginZipOfRemovedVersion(t *testing.T) {
 	e := newEnv(t)
-	acme := e.token("acme", "npm:publish:@acme/*")
-	beta := e.token("beta", "npm:publish:@beta/*")
-	both := e.token("both", "npm:read:@acme/*", "npm:read:@beta/*", "plugins:read")
-	mustStatus(t, e.publishPlugin(acme, "@acme/tool", "1.0.0"), 201)
-
-	// A version as a 0.4 server stored it (no plugin record) still holds the name.
-	setAcme := func(f func(v *store.NPMVersion)) {
-		e.st.UpdateNPM("@acme/tool", func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
-			f(&vs[0])
-			return vs, nil
-		})
-	}
-	orig, _ := e.st.NPMVersion("@acme/tool", "1.0.0")
-	setAcme(func(v *store.NPMVersion) { v.Plugin = nil })
-	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.0"), 409)
-
-	// Two packages holding one name, as only an older server could have stored: neither is listed.
-	setAcme(func(v *store.NPMVersion) { v.Manifest = json.RawMessage(`{}`) })
-	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.0"), 201)
-	setAcme(func(v *store.NPMVersion) { *v = orig })
-	mustStatus(t, e.publishPlugin(beta, "@beta/other", "1.0.0"), 201)
-	for range 2 {
-		m := e.marketplace(both)
-		if len(m.Plugins) != 1 || m.Plugins[0].Name != "other" {
-			t.Fatalf("plugins: %+v", m.Plugins)
-		}
-	}
-	if n := strings.Count(e.logs.String(), "plugin name held by more than one package"); n != 1 {
-		t.Fatalf("collision logged %d times", n)
-	}
-	es, _ := e.h.Audit(AuditFilter{Action: "plugin.list"})
-	if !strings.Contains(es[0].Detail, "plugin name tool held by @acme/tool and @beta/tool") {
-		t.Fatalf("audit: %+v", es[0])
-	}
-	// A token that may read a package still downloads its zip by URL, as it downloads the
-	// tarball from npm; what matters is that no marketplace points autoUpdate at it.
-
-	// Once one of them has no live version, the other is listed again.
-	e.st.UpdateNPM("@beta/tool", func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
+	pub := e.token("ci", "npm:publish:@acme/*", "plugins:read")
+	mustStatus(t, e.publishPlugin(pub, "@acme/tool", "1.0.0"), 201)
+	v, _ := e.st.NPMVersion("@acme/tool", "1.0.0")
+	zp, _ := e.h.zipPath(v.SHA512)
+	tp, _ := e.h.tarPath(v.SHA512)
+	os.Remove(zp)
+	os.Remove(tp)
+	e.st.UpdateNPM("@acme/tool", func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
 		vs[0].Removed = true
 		return vs, nil
 	})
-	m := e.marketplace(both)
-	if len(m.Plugins) != 2 || m.Plugins[1].Source.URL[len(m.Plugins[1].Source.URL)-len("@acme/tool/1.0.0.zip"):] != "@acme/tool/1.0.0.zip" {
+	if p, err := e.h.pluginOf(v); p != nil || err != nil { // v: the record as read before the removal
+		t.Fatalf("%+v %v", p, err)
+	}
+	if strings.Contains(e.logs.String(), "level=ERROR") || len(e.h.zipFailed) != 0 {
+		t.Fatalf("a removed version counted as a failure:\n%s", e.logs.String())
+	}
+}
+
+// Two packages a token reads with one plugin name are both left out for that token, and only
+// for it.
+func TestPluginNameClashPerToken(t *testing.T) {
+	e := newEnv(t)
+	acme := e.token("acme", "npm:publish:@acme/*")
+	beta := e.token("beta", "npm:publish:@beta/*")
+	acmeOnly := e.token("acme-only", "npm:read:@acme/*", "plugins:read")
+	betaOnly := e.token("beta-only", "npm:read:@beta/*", "plugins:read")
+	both := e.token("both", "npm:read:@acme/*", "npm:read:@beta/*", "plugins:read")
+	mustStatus(t, e.publishPlugin(acme, "@acme/tool", "1.0.0"), 201)
+	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.0"), 201)
+	mustStatus(t, e.publishPlugin(beta, "@beta/other", "1.0.0"), 201)
+
+	for tok, want := range map[string]string{
+		acmeOnly: "tool=@acme/tool",
+		betaOnly: "other=@beta/other tool=@beta/tool",
+		both:     "other=@beta/other",
+	} {
+		for range 2 {
+			var got []string
+			for _, p := range e.marketplace(tok).Plugins {
+				got = append(got, p.Name+"="+strings.Join(strings.Split(p.Source.URL, "/")[4:6], "/"))
+			}
+			if strings.Join(got, " ") != want {
+				t.Errorf("%s: %v, want %s", tok, got, want)
+			}
+		}
+	}
+	if n := strings.Count(e.logs.String(), "reads two plugins of one name"); n != 1 {
+		t.Fatalf("clash logged %d times:\n%s", n, e.logs.String())
+	}
+	es, _ := e.h.Audit(AuditFilter{Action: "plugin.list", Token: "both"})
+	if len(es) == 0 || !strings.Contains(es[0].Detail, "plugin name tool in @acme/tool and @beta/tool") {
+		t.Fatalf("audit: %+v", es)
+	}
+	// Both packages keep publishing.
+	mustStatus(t, e.publishPlugin(acme, "@acme/tool", "1.0.1"), 201)
+	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.1"), 201)
+	// Once one of them is no plugin at its latest version, the other is listed again.
+	mustStatus(t, e.publish(beta, "@beta/tool", "2.0.0"), 201)
+	if m := e.marketplace(both); len(m.Plugins) != 2 || m.Plugins[1].Version != "1.0.1" || !strings.Contains(m.Plugins[1].Source.URL, "@acme/tool") {
 		t.Fatalf("plugins: %+v", m.Plugins)
 	}
-	// A name is held while a package has a live version with it; once none is left, it is free.
-	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.1"), 409)
-	setAcme(func(v *store.NPMVersion) { v.Removed = true })
-	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.1"), 201)
+}
+
+// A version object that claims a plugin the tarball is not changes nothing: not for its own
+// package, not for another scope's plugin of that name, not for later publishes.
+func TestPluginForgedManifest(t *testing.T) {
+	e := newEnv(t)
+	acme := e.token("acme", "npm:publish:@acme/*")
+	evil := e.token("evil", "npm:publish:@evil/*")
+	acmeOnly := e.token("acme-only", "npm:read:@acme/*", "plugins:read")
+	both := e.token("both", "npm:read:@acme/*", "npm:read:@evil/*", "plugins:read")
+	mustStatus(t, e.publishPlugin(acme, "@acme/tool", "1.0.0"), 201)
+	forged := pubOpts{fields: map[string]any{"claude-plugin": true}}
+	mustStatus(t, e.publishData(evil, "@evil/tool", "1.0.0", tgz(t, "@evil/tool", "1.0.0"), forged), 201)
+	got, _ := e.st.NPMVersion("@evil/tool", "1.0.0")
+	if got.Plugin != nil || !got.PluginChecked || manifestSaysPlugin(got.Manifest) {
+		t.Fatalf("stored: plugin %+v checked %v manifest %s", got.Plugin, got.PluginChecked, got.Manifest)
+	}
+	for _, tok := range []string{acmeOnly, both} {
+		if m := e.marketplace(tok); len(m.Plugins) != 1 || !strings.Contains(m.Plugins[0].Source.URL, "@acme/tool") {
+			t.Fatalf("%s: %+v", tok, m.Plugins)
+		}
+	}
+	mustStatus(t, e.publishPlugin(acme, "@acme/tool", "1.0.1"), 201)
+	mustStatus(t, e.do("GET", "/plugins/@evil/tool/1.0.0.zip", both, nil), 404)
+	// The reverse holds as well: a plugin's stored version object says what its tarball says.
+	if v, _ := e.st.NPMVersion("@acme/tool", "1.0.1"); !manifestSaysPlugin(v.Manifest) {
+		t.Fatalf("plugin manifest: %s", v.Manifest)
+	}
+	// And the npm document serves no claim the server did not check.
+	r := e.do("GET", "/npm/@evil%2ftool", both, nil)
+	mustStatus(t, r, 200)
+	if strings.Contains(string(r.body), "claude-plugin") {
+		t.Fatalf("document: %s", r.body)
+	}
 }
 
 func TestPluginZipDeterministic(t *testing.T) {
@@ -549,16 +622,9 @@ func TestMarketplace(t *testing.T) {
 	mustStatus(t, e.publishPlugin(pub, "@acme/tool", "2.0.0-beta.1"), 201)
 	mustStatus(t, e.do("PUT", "/npm/-/package/@acme%2ftool/dist-tags/latest", pub, []byte(`"1.1.0"`)), 200)
 	mustStatus(t, e.publish(pub, "@acme/lib", "1.0.0"), 201) // not a plugin
-	// A plugin name is one for all scopes.
-	r := e.publishPlugin(other, "@beta/tool", "3.0.0")
-	if r.status != 409 || !strings.Contains(string(r.body), "plugin name tool is taken by another package") {
-		t.Fatalf("second package with a plugin name: %d %s", r.status, r.body)
-	}
-	if _, err := e.st.NPMVersion("@beta/tool", "3.0.0"); err == nil {
-		t.Fatal("the refused version was stored")
-	}
+	// Another scope may publish a plugin of the same name: a publish is judged on its own tarball.
+	mustStatus(t, e.publishPlugin(other, "@beta/tool", "3.0.0"), 201)
 	mustStatus(t, e.publishPlugin(other, "@beta/extra", "1.0.0"), 201)
-	// An ordinary package may share the name.
 	mustStatus(t, e.publish(other, "@beta/lib", "1.0.0"), 201)
 
 	m := e.marketplace(reader)
@@ -573,7 +639,7 @@ func TestMarketplace(t *testing.T) {
 		p.Source.URL != "https://deploy.example.com/plugins/@acme/tool/1.1.0.zip" {
 		t.Fatalf("entry: %+v", p)
 	}
-	r = e.do("GET", "/plugins/@acme/tool/1.1.0.zip", reader, nil)
+	r := e.do("GET", "/plugins/@acme/tool/1.1.0.zip", reader, nil)
 	mustStatus(t, r, 200)
 	if sha256hex(r.body) != p.Source.SHA256 {
 		t.Fatalf("served zip %s, marketplace says %s", sha256hex(r.body), p.Source.SHA256)
@@ -589,19 +655,32 @@ func TestMarketplace(t *testing.T) {
 	mustStatus(t, e.do("GET", "/plugins/@acme/tool/1.0.0.zip", reader, nil), 200)
 	mustStatus(t, e.do("GET", "/plugins/@acme/lib/1.0.0.zip", reader, nil), 404)
 
-	// The URLs name the deploy host whatever Host the request carried.
+	// A token that reads both scopes gets neither "tool" (see TestPluginNameClashPerToken).
 	m = e.marketplace(both)
 	var names []string
 	for _, p := range m.Plugins {
 		names = append(names, p.Name+"="+strings.TrimPrefix(p.Source.URL, "https://deploy.example.com"))
 	}
-	if strings.Join(names, " ") != "extra=/plugins/@beta/extra/1.0.0.zip tool=/plugins/@acme/tool/1.1.0.zip" {
+	if strings.Join(names, " ") != "extra=/plugins/@beta/extra/1.0.0.zip" {
 		t.Fatalf("plugins: %v", names)
 	}
 
-	if r := e.do("GET", "/plugins/marketplace.json", reader, nil, "Host", "evil.example.net"); r.status != 200 ||
-		strings.Contains(string(r.body), "evil") {
-		t.Fatalf("Host header in the marketplace: %d %s", r.status, r.body)
+	// The URLs name the deploy host whatever Host the request carried, and keep the port of a
+	// request to the deploy host itself.
+	for host, want := range map[string]string{
+		"evil.example.net":        "https://deploy.example.com/plugins/",
+		"evil.example.net:8443":   "https://deploy.example.com/plugins/",
+		"deploy.example.com":      "https://deploy.example.com/plugins/",
+		"deploy.example.com:443":  "https://deploy.example.com/plugins/",
+		"deploy.example.com:8443": "https://deploy.example.com:8443/plugins/",
+		"DEPLOY.example.com:8443": "https://deploy.example.com:8443/plugins/",
+	} {
+		r := e.do("GET", "/plugins/marketplace.json", reader, nil, "Host", host)
+		var hm Marketplace
+		if r.status != 200 || json.Unmarshal(r.body, &hm) != nil || len(hm.Plugins) != 1 ||
+			!strings.HasPrefix(hm.Plugins[0].Source.URL, want) || strings.Contains(string(r.body), "evil") {
+			t.Errorf("Host %s: %d %s, want URLs under %s", host, r.status, r.body, want)
+		}
 	}
 	// Without a domain the links follow the request.
 	e.h.Domain = nil
@@ -801,7 +880,13 @@ func TestPluginPublishedBeforePlugins(t *testing.T) {
 	zp, _ := e.h.zipPath(v.SHA512)
 	os.Remove(zp)
 	e.st.UpdateNPM("@acme/tool", func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
-		vs[0].Plugin = nil
+		vs[0].Plugin, vs[0].PluginChecked = nil, false
+		return vs, nil
+	})
+	// And one whose version object claimed a plugin its tarball is not.
+	mustStatus(t, e.publish(pub, "@acme/fake", "1.0.0"), 201)
+	e.st.UpdateNPM("@acme/fake", func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
+		vs[0].PluginChecked, vs[0].Manifest = false, json.RawMessage(`{"name":"@acme/fake","version":"1.0.0","claude-plugin":true}`)
 		return vs, nil
 	})
 	m := e.marketplace(pub)
@@ -812,6 +897,13 @@ func TestPluginPublishedBeforePlugins(t *testing.T) {
 	mustStatus(t, r, 200)
 	if sha256hex(r.body) != m.Plugins[0].Source.SHA256 {
 		t.Fatal("digest")
+	}
+	// The answers are recorded: the tarballs are read once.
+	if v, _ := e.st.NPMVersion("@acme/tool", "1.0.0"); v.Plugin == nil || !v.PluginChecked {
+		t.Fatalf("tool: %+v", v)
+	}
+	if v, _ := e.st.NPMVersion("@acme/fake", "1.0.0"); v.Plugin != nil || !v.PluginChecked {
+		t.Fatalf("fake: %+v", v)
 	}
 }
 

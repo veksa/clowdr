@@ -72,6 +72,10 @@ type NPMVersion struct {
 	// Plugin is set on a version that is a Claude Code plugin (its package.json says
 	// "claude-plugin": true and the tarball passed the plugin checks).
 	Plugin *NPMPlugin `json:"plugin,omitempty"`
+	// PluginChecked says the server read the tarball for the plugin rules (every publish from
+	// 0.5 on, or the first look at an older version): Plugin is then the whole answer. Without
+	// it the version predates the check, and only its tarball can tell.
+	PluginChecked bool `json:"plugin_checked,omitempty"`
 }
 
 // NPMPlugin is what the plugin marketplace lists for a version, and the zip it serves.

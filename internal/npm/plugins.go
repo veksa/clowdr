@@ -22,6 +22,7 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -46,9 +47,11 @@ const (
 	// pluginMaxRatio is Claude Code's limit on how much an archive may expand. An entry that
 	// deflates better than this is stored instead, so no zip built here comes near it.
 	pluginMaxRatio = 50
-	// zipRetry is how long a zip that failed to build, or a 0.4-era package that failed the
-	// plugin checks, is not tried again.
-	zipRetry = time.Hour
+	// zipRetry is how long a zip whose tarball cannot make one (over the hard cap, a broken
+	// archive) is not tried again; zipRetrySoon the same after a failure of the disk or the
+	// store, which may pass by itself.
+	zipRetry     = time.Hour
+	zipRetrySoon = time.Minute
 )
 
 // pluginNameRe is a plugin name Claude Code installs (letters, digits, '.', '_', '-', starting
@@ -288,6 +291,14 @@ type zipFile struct {
 // errZipTooLarge is returned by limitWriter past its limit.
 var errZipTooLarge = errors.New("zip too large")
 
+// zipContentError is a zip build that failed on what the tarball holds, not on the disk: trying
+// again gives the same answer.
+type zipContentError struct{ error }
+
+func (e zipContentError) Unwrap() error { return e.error }
+
+func contentErr(format string, a ...any) error { return zipContentError{fmt.Errorf(format, a...)} }
+
 // limitWriter fails once more than n bytes were written.
 type limitWriter struct {
 	w io.Writer
@@ -329,7 +340,7 @@ func buildZip(tgz io.Reader, dir string, unpacked, maxZip int64) (b built, err e
 
 	gz, err := gzip.NewReader(tgz)
 	if err != nil {
-		return b, errors.New("the tarball is not gzip")
+		return b, contentErr("the tarball is not gzip")
 	}
 	tr := tar.NewReader(&capReader{r: gz, n: unpacked})
 	var files []zipFile
@@ -341,28 +352,31 @@ func buildZip(tgz io.Reader, dir string, unpacked, maxZip int64) (b built, err e
 			break
 		}
 		if err != nil {
-			return b, fmt.Errorf("read the tarball: %w", err)
+			return b, contentErr("read the tarball: %w", err)
 		}
 		if err := checkEntryHeader(hdr); err != nil {
-			return b, err
+			return b, zipContentError{err}
 		}
 		if total += hdr.Size; total > unpacked {
-			return b, fmt.Errorf("the tarball unpacks to more than %d bytes", unpacked)
+			return b, contentErr("the tarball unpacks to more than %d bytes", unpacked)
 		}
 		rel, err := extractedPath(hdr.Name)
 		if err != nil {
-			return b, err
+			return b, zipContentError{err}
 		}
 		if rel == "" || hdr.Typeflag != tar.TypeReg {
 			continue
 		}
 		if seen[rel] {
-			return b, fmt.Errorf("the tarball has %s twice", rel)
+			return b, contentErr("the tarball has %s twice", rel)
 		}
 		seen[rel] = true
 		f := zipFile{name: rel, exec: hdr.Mode&0o111 != 0, path: filepath.Join(work, strconv.Itoa(len(files)))}
 		if f.size, err = copyToFile(f.path, tr); err != nil {
-			return b, fmt.Errorf("read %s: %w", rel, err)
+			if errors.Is(err, errTooLarge) {
+				return b, contentErr("the tarball unpacks to more than %d bytes", unpacked)
+			}
+			return b, fmt.Errorf("unpack %s: %w", rel, err)
 		}
 		files = append(files, f)
 	}
@@ -386,14 +400,14 @@ func buildZip(tgz io.Reader, dir string, unpacked, maxZip int64) (b built, err e
 	for _, f := range files {
 		if err := addZipEntry(zw, f, comp); err != nil {
 			if errors.Is(err, errZipTooLarge) {
-				return b, fmt.Errorf("the plugin zip is larger than %d bytes (plugins.max_zip)", maxZip)
+				return b, contentErr("the plugin zip is larger than %d bytes (plugins.max_zip)", maxZip)
 			}
 			return b, err
 		}
 	}
 	if err := zw.Close(); err != nil {
 		if errors.Is(err, errZipTooLarge) {
-			return b, fmt.Errorf("the plugin zip is larger than %d bytes (plugins.max_zip)", maxZip)
+			return b, contentErr("the plugin zip is larger than %d bytes (plugins.max_zip)", maxZip)
 		}
 		return b, err
 	}
@@ -514,9 +528,10 @@ func (h *Handler) maxZip() int64 {
 }
 
 // makeZip builds the zip of a plugin tarball into a temp file next to the stored zips; place
-// moves it into its place.
-func (h *Handler) makeZip(tgz []byte, unpacked int64) (built, error) {
-	return buildZip(bytes.NewReader(tgz), filepath.Join(h.Dir, "zips"), unpacked, h.maxZip())
+// moves it into its place. A publish passes plugins.max_zip; a rebuild of a version already
+// accepted passes the hard cap, so lowering the setting never delists what is published.
+func (h *Handler) makeZip(tgz []byte, unpacked, maxZip int64) (built, error) {
+	return buildZip(bytes.NewReader(tgz), filepath.Join(h.Dir, "zips"), unpacked, maxZip)
 }
 
 // place renames a built zip to the zip of the tarball sha512hex.
@@ -537,8 +552,9 @@ func (h *Handler) place(b built, sha512hex string) error {
 	return nil
 }
 
-// manifestSaysPlugin reports whether a stored version object carries "claude-plugin": true: a
-// hint, for versions published before clowdrd knew plugins, that the tarball is worth checking.
+// manifestSaysPlugin reports whether a stored version object carries "claude-plugin": true. Only a
+// hint, for versions stored before the server checked plugins, that the tarball is worth reading:
+// from 0.5 on the stored value is the tarball's, and the client's never counts.
 func manifestSaysPlugin(m json.RawMessage) bool {
 	var v struct {
 		ClaudePlugin bool `json:"claude-plugin"`
@@ -546,48 +562,32 @@ func manifestSaysPlugin(m json.RawMessage) bool {
 	return len(m) > 0 && json.Unmarshal(m, &v) == nil && v.ClaudePlugin
 }
 
-// holdsPluginName reports whether a version claims its package's plugin name: a plugin, or one
-// published before clowdrd knew plugins whose version object says it is.
-func holdsPluginName(v store.NPMVersion) bool {
-	return !v.Removed && (v.Plugin != nil || manifestSaysPlugin(v.Manifest))
-}
-
-// pluginHolders maps each plugin name to the packages that hold it with a live version.
-func (h *Handler) pluginHolders() (map[string][]string, error) {
-	pkgs, err := h.Store.NPMPackages()
-	if err != nil {
-		return nil, err
+// mayBePlugin reports whether a version could be a plugin: checked and found one, or never
+// checked and its version object hints at it. A version checked and found not to be one is not,
+// whatever its version object says.
+func mayBePlugin(v store.NPMVersion) bool {
+	switch {
+	case v.Removed:
+		return false
+	case v.Plugin != nil:
+		return true
+	case v.PluginChecked:
+		return false
 	}
-	out := map[string][]string{}
-	for _, p := range pkgs {
-		vs, err := h.Store.NPMVersions(p.Name)
-		if err != nil {
-			return nil, err
-		}
-		for _, v := range vs {
-			if holdsPluginName(v) {
-				_, base, _ := strings.Cut(p.Name, "/")
-				out[base] = append(out[base], p.Name)
-				break
-			}
-		}
-	}
-	for _, ps := range out {
-		sort.Strings(ps)
-	}
-	return out, nil
+	return manifestSaysPlugin(v.Manifest)
 }
 
 // pluginOf returns a version's plugin record with its zip on disk, building the zip when it is
-// missing (deleted by hand, or never built), and checking a version published before this server
-// knew plugins. It returns nil for a version that is not a plugin, and errZipUnavailable for one
-// whose zip cannot be built (logged once per zipRetry, and not tried again meanwhile).
+// missing (deleted by hand, or never built), and checking, once, a version stored before the
+// server checked plugins. It returns nil for a version that is not a plugin (or no longer exists),
+// and errZipUnavailable for one whose zip cannot be built now: logged once, and not tried again
+// for zipRetry (the tarball cannot make one) or zipRetrySoon (the disk or the store failed).
 //
 // The stored digest never describes other bytes than the file: a zip is built under a temp name,
 // the record takes its digest, and only then is the file renamed into place. A reader that sees
 // the record before the file goes the slow way, waits for the lock, and finds both.
 func (h *Handler) pluginOf(v store.NPMVersion) (*store.NPMPlugin, error) {
-	if !holdsPluginName(v) {
+	if !mayBePlugin(v) {
 		return nil, nil
 	}
 	zp, okZip := h.zipPath(v.SHA512)
@@ -609,59 +609,88 @@ func (h *Handler) pluginOf(v store.NPMVersion) (*store.NPMPlugin, error) {
 	if until, ok := h.zipFailed[v.SHA512]; ok && now.Before(until) {
 		return nil, errZipUnavailable
 	}
-	// Another request may have built it while this one waited.
+	// Another request may have built it, or retention removed the version, while this one waited.
 	cur, err := h.Store.NPMVersion(v.Name, v.Version)
-	if err != nil || cur.Removed {
+	if errors.Is(err, store.ErrNotFound) || (err == nil && !mayBePlugin(cur)) {
 		return nil, nil
+	}
+	fail := func(what string, err error) (*store.NPMPlugin, error) {
+		retry := zipRetrySoon
+		var ce zipContentError
+		if errors.As(err, &ce) {
+			retry = zipRetry
+		}
+		if h.zipFailed == nil {
+			h.zipFailed = map[string]time.Time{}
+		}
+		h.zipFailed[v.SHA512] = now.Add(retry)
+		h.log().Error("npm: plugin zip", "package", v.Name, "version", v.Version, "step", what, "err", err, "retry_after", retry)
+		return nil, errZipUnavailable
+	}
+	if err != nil {
+		return fail("read record", err)
 	}
 	if cur.Plugin != nil && cur.Plugin.ZipSHA256 != "" {
 		if _, err := os.Stat(zp); err == nil {
 			return cur.Plugin, nil
 		}
 	}
-	fail := func(what string, err error) (*store.NPMPlugin, error) {
-		if h.zipFailed == nil {
-			h.zipFailed = map[string]time.Time{}
-		}
-		h.zipFailed[v.SHA512] = now.Add(zipRetry)
-		h.log().Error("npm: plugin zip", "package", v.Name, "version", v.Version, "step", what, "err", err, "retry_after", zipRetry)
-		return nil, errZipUnavailable
-	}
 	tgz, err := os.ReadFile(tp)
+	if errors.Is(err, os.ErrNotExist) {
+		// Removed between the record and the file: a retention in progress, not a failure.
+		if cur, err := h.Store.NPMVersion(v.Name, v.Version); err != nil || cur.Removed {
+			return nil, nil
+		}
+	}
 	if err != nil {
 		return fail("read tarball", err)
 	}
+	// update writes the version's plugin fields; false means the version is gone.
+	update := func(p *store.NPMPlugin) (bool, error) {
+		err := h.Store.UpdateNPM(v.Name, func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
+			for _, o := range vs {
+				if o.Version == v.Version && !o.Removed {
+					o.Plugin, o.PluginChecked = p, true
+					return []store.NPMVersion{o}, nil
+				}
+			}
+			return nil, store.ErrNotFound
+		})
+		if errors.Is(err, store.ErrNotFound) {
+			return false, nil
+		}
+		return err == nil, err
+	}
 	p := cur.Plugin
 	if p == nil {
+		// Stored before the server checked plugins: the tarball decides, once.
 		p, err = checkTarball(tgz, v.Name, v.Version, maxUnpackedCap)
 		if err != nil || p == nil {
-			if h.notPlugin == nil {
-				h.notPlugin = map[string]time.Time{}
-			}
-			h.notPlugin[v.SHA512] = now.Add(zipRetry)
 			if err != nil {
-				h.log().Warn("npm: not listed as a plugin", "package", v.Name, "version", v.Version, "err", err)
+				h.log().Warn("npm: not a plugin", "package", v.Name, "version", v.Version, "err", err)
+			}
+			if _, uerr := update(nil); uerr != nil {
+				// Not recorded: remember it for a while instead.
+				if h.notPlugin == nil {
+					h.notPlugin = map[string]time.Time{}
+				}
+				h.notPlugin[v.SHA512] = now.Add(zipRetrySoon)
 			}
 			return nil, nil
 		}
 	}
-	b, err := h.makeZip(tgz, maxUnpackedCap)
+	b, err := h.makeZip(tgz, maxUnpackedCap, config.PluginMaxZipCap)
 	if err != nil {
 		return fail("build", err)
 	}
 	np := *p
 	np.ZipSHA256, np.ZipSize = b.sha256, b.size
-	err = h.Store.UpdateNPM(v.Name, func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
-		for _, o := range vs {
-			if o.Version == v.Version && !o.Removed {
-				o.Plugin = &np
-				return []store.NPMVersion{o}, nil
-			}
-		}
-		return nil, store.ErrNotFound
-	})
-	if err != nil {
+	ok, err := update(&np)
+	if !ok {
 		os.Remove(b.tmp)
+		if err == nil {
+			return nil, nil // removed meanwhile
+		}
 		return fail("record", err)
 	}
 	if err := h.place(b, v.SHA512); err != nil {
@@ -717,16 +746,23 @@ func (h *Handler) domain() string {
 	return ""
 }
 
-// pluginsBase is the scheme and host of the marketplace's URLs: the configured deploy host when
-// the server has a domain (the deploy host is also nginx's answer to any Host, so the request's
-// Host header is not to be trusted for links), else what the client used.
+// pluginsBase is the scheme and host of the marketplace's URLs. With a domain it is the deploy
+// host: nginx sends any unknown Host to the deploy host, so the request's Host is not to be
+// trusted for links. Its port is kept when the request named the deploy host itself, so a
+// server reached on another port than 443 (behind a port mapping) gets links that work there.
+// Without a domain, it is what the client used.
 func (c *call) pluginsBase() (base, host string) {
-	if d := c.h.domain(); d != "" {
-		host = "deploy." + d
-		return "https://" + host, host
+	reqBase := BaseURL(c.r)
+	reqHost := strings.TrimPrefix(strings.TrimPrefix(reqBase, "https://"), "http://")
+	d := c.h.domain()
+	if d == "" {
+		return reqBase, reqHost
 	}
-	base = BaseURL(c.r)
-	return base, strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://")
+	host = "deploy." + d
+	if h, port, err := net.SplitHostPort(reqHost); err == nil && strings.EqualFold(h, host) && port != "443" && port != "" {
+		host = net.JoinHostPort(host, port)
+	}
+	return "https://" + host, host
 }
 
 // servePlugins serves the routes under /plugins/; the token is checked already.
@@ -748,9 +784,14 @@ func (c *call) servePlugins(segs []string) {
 
 // marketplace serves marketplace.json: one entry per plugin package the token may read, at the
 // version its latest tag points at. A token that may read none gets a valid, empty marketplace;
-// a token without plugins:read gets 404. A plugin name held by two packages (possible only for
-// versions published before clowdrd refused that) is listed for neither: whichever won, one
-// scope could replace another's plugin on every machine that installed it.
+// a token without plugins:read gets 404.
+//
+// Two packages this token reads that are plugins of one name (@acme/tool and @beta/tool) are
+// both left out, for this token only: Claude Code keys an installed plugin by its name, so
+// listing either could let one scope replace the other's plugin on the machines of whoever
+// holds the token. Which packages clash is decided by what the token reads, so nothing about a
+// package leaks to a token that cannot read it, and no publish anywhere can take a name away
+// from a token that reads only one of them.
 func (c *call) marketplace() {
 	if !c.rights.Plugins() {
 		c.audit("plugin.list", "", "", "", 404, "no plugins:read")
@@ -778,21 +819,12 @@ func (c *call) marketplace() {
 		writeErr(c.w, 500, "storage error")
 		return
 	}
-	holders, err := c.h.pluginHolders()
-	if err != nil {
-		writeErr(c.w, 500, "storage error")
-		return
-	}
 	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].Name < pkgs[j].Name })
 	var skipped []string
+	byName := map[string][]MarketplacePlugin{}
+	from := map[string][]string{} // plugin name → packages
 	for _, p := range pkgs {
 		if !c.rights.CanRead(p.Name) {
-			continue
-		}
-		_, base, _ := strings.Cut(p.Name, "/")
-		if hs := holders[base]; len(hs) > 1 {
-			skipped = append(skipped, p.Name+" (plugin name "+base+" held by "+strings.Join(hs, " and ")+")")
-			c.h.collision(base, hs)
 			continue
 		}
 		pp, live, err := c.h.live(p.Name)
@@ -815,12 +847,22 @@ func (c *call) marketplace() {
 			continue
 		}
 		scope, name, _ := strings.Cut(p.Name, "/")
-		m.Plugins = append(m.Plugins, MarketplacePlugin{
+		byName[pl.Name] = append(byName[pl.Name], MarketplacePlugin{
 			Name: pl.Name, Description: pl.Description, Version: v.Version,
 			Source: ArchiveSource{Source: "archive", URL: urlBase + "/plugins/" + scope + "/" + name + "/" + v.Version + ".zip", SHA256: pl.ZipSHA256},
 		})
+		from[pl.Name] = append(from[pl.Name], p.Name)
+	}
+	for name, es := range byName {
+		if len(es) > 1 {
+			skipped = append(skipped, "plugin name "+name+" in "+strings.Join(from[name], " and "))
+			c.h.clash(c.tok.Name, name, from[name])
+			continue
+		}
+		m.Plugins = append(m.Plugins, es[0])
 	}
 	sort.Slice(m.Plugins, func(i, j int) bool { return m.Plugins[i].Name < m.Plugins[j].Name })
+	sort.Strings(skipped)
 	detail := fmt.Sprintf("%d plugins", len(m.Plugins))
 	if len(skipped) > 0 {
 		detail += ", skipped " + strings.Join(skipped, ", ")
@@ -837,19 +879,21 @@ func (c *call) marketplace() {
 	enc.Encode(m)
 }
 
-// collision logs, once per process and name, a plugin name two packages hold.
-func (h *Handler) collision(name string, holders []string) {
+// clash logs, once per process, token and set of packages, a plugin name that two packages the
+// token reads hold.
+func (h *Handler) clash(token, name string, pkgs []string) {
+	key := token + "\x00" + name + "\x00" + strings.Join(pkgs, " ")
 	h.zipMu.Lock()
 	defer h.zipMu.Unlock()
-	if h.collided[name] {
+	if h.collided[key] {
 		return
 	}
 	if h.collided == nil {
 		h.collided = map[string]bool{}
 	}
-	h.collided[name] = true
-	h.log().Error("npm: plugin name held by more than one package; none of them is listed until one stops being a plugin",
-		"plugin", name, "packages", strings.Join(holders, " "))
+	h.collided[key] = true
+	h.log().Warn("npm: a token reads two plugins of one name; neither is listed for it (narrow the token's scopes)",
+		"token", token, "plugin", name, "packages", strings.Join(pkgs, " "))
 }
 
 // pluginZip serves /plugins/@scope/name/<version>.zip. Without plugins:read, without read rights

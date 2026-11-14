@@ -52,9 +52,9 @@ type Handler struct {
 	// mu serialises publishes, tag changes and the sweep: one version check and write at a time.
 	mu sync.Mutex
 	// zipMu serialises building plugin zips outside a publish. notPlugin remembers, until the
-	// time it holds, tarballs whose package says "claude-plugin": true but failed the plugin
-	// checks, and zipFailed tarballs whose zip failed to build, so neither is retried on every
-	// marketplace request; collided remembers plugin names already logged as held twice.
+	// time it holds, older tarballs found not to be plugins when that could not be recorded, and
+	// zipFailed tarballs whose zip failed to build, so neither is retried on every marketplace
+	// request; collided remembers plugin name clashes already logged.
 	zipMu     sync.Mutex
 	notPlugin map[string]time.Time
 	zipFailed map[string]time.Time
