@@ -13,10 +13,14 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/veksa/clowdr/internal/ingress"
 	"github.com/veksa/clowdr/internal/npm"
 	"github.com/veksa/clowdr/internal/store"
 )
@@ -186,5 +190,42 @@ func TestNPMThroughAPI(t *testing.T) {
 		if strings.Contains(e.logs.String(), tok[len(tok)-48:]) {
 			t.Fatal("an npm token's secret is in the server log")
 		}
+	}
+}
+
+// A request through nginx that did not come from the deploy host's location reaches the ACME
+// challenges only: a traversal that lands in an ACME location of any site must not open the API.
+func TestSocketReachesOnlyACME(t *testing.T) {
+	e := newEnv(t)
+	dir := t.TempDir()
+	old := ACMEDir
+	ACMEDir = dir
+	t.Cleanup(func() { ACMEDir = old })
+	if err := os.WriteFile(filepath.Join(dir, "tok_1"), []byte("proof"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := e.api.Handler()
+	serve := func(target string, marked bool) (int, string) {
+		r := httptest.NewRequest("GET", target, nil)
+		r.RemoteAddr = "@"
+		r.Header.Set("Authorization", "Bearer "+e.admin.Token)
+		if marked {
+			r.Header.Set(ingress.ViaHeader, ingress.ViaDeployHost)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, r)
+		return w.Code, w.Body.String()
+	}
+	if code, body := serve("/.well-known/acme-challenge/tok_1", false); code != 200 || body != "proof" {
+		t.Fatalf("challenge: %d %s", code, body)
+	}
+	for _, p := range []string{"/v1/projects", "/v1/version", "/npm/-/whoami", "/v2/",
+		"/npm/x/..%2F..%2F.well-known/acme-challenge/tok_1", "/v1/x/..%2F..%2F.well-known/acme-challenge/tok_1"} {
+		if code, _ := serve(p, false); code != 404 {
+			t.Errorf("%s through a non-deploy location: %d", p, code)
+		}
+	}
+	if code, _ := serve("/v1/projects", true); code != 200 {
+		t.Fatalf("deploy host: %d", code)
 	}
 }

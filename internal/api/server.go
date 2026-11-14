@@ -120,7 +120,21 @@ func (s *Server) Handler() http.Handler {
 		}
 		http.ServeFile(w, r, filepath.Join(ACMEDir, token))
 	})
-	return s.logRequests(mux)
+	return s.logRequests(onlyACMEFromSocket(mux))
+}
+
+// onlyACMEFromSocket lets a request that came through nginx but not through its deploy-host
+// location (an ACME location on some site, or the default server) reach the ACME challenges
+// and nothing else. nginx already passes such locations only a normalised challenge path;
+// this keeps the API closed even if a stale or hand-edited nginx config forwards more.
+func onlyACMEFromSocket(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ingress.FromAPISocket(r) && !ingress.FromDeployHost(r) && !ingress.IsACMEChallenge(r) {
+			http.NotFound(w, r)
+			return
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 // ACMEDir holds HTTP-01 challenge responses.

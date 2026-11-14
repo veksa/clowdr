@@ -25,6 +25,7 @@ import (
 
 	"github.com/veksa/clowdr/internal/auth"
 	"github.com/veksa/clowdr/internal/config"
+	"github.com/veksa/clowdr/internal/ingress"
 	"github.com/veksa/clowdr/internal/store"
 )
 
@@ -278,14 +279,15 @@ func (h *Handler) authenticate(r *http.Request) (store.NPMToken, error) {
 	return auth.CheckNPM(h.Store, tokenFromRequest(r), h.now())
 }
 
-// trustedPeer reports whether the connection comes from nginx (the unix socket) or the host
-// itself, the only peers whose X-Forwarded-* headers are believed. A direct TLS connection on
-// :7443 from anywhere else cannot choose its own URLs or address.
+// trustedPeer reports whether the request's X-Forwarded-* headers are believed: only when
+// nginx's deploy-host location passed it (it sets them itself), or it came from the host
+// itself over loopback. Anything else through the socket, or a direct TLS connection on
+// :7443, cannot choose its own URLs or address.
 func trustedPeer(r *http.Request) bool {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return true // unix socket: RemoteAddr is "" or "@"
+	if ingress.FromAPISocket(r) {
+		return ingress.FromDeployHost(r)
 	}
+	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
 }

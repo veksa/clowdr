@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/veksa/clowdr/internal/config"
+	"github.com/veksa/clowdr/internal/ingress"
 	"github.com/veksa/clowdr/internal/store"
 )
 
@@ -311,12 +312,46 @@ func TestForwardedHeadersOnlyFromTrustedPeers(t *testing.T) {
 	if got := ClientAddr(r); got != "203.0.113.7" {
 		t.Fatal(got)
 	}
-	r.RemoteAddr = "@" // nginx through the unix socket
+	// Through the socket but not from the deploy host's location (an ACME location, say):
+	// the headers are the client's own and are ignored.
+	r.RemoteAddr = "@"
+	if got := BaseURL(r); got != "http://deploy.example.com" {
+		t.Fatal(got)
+	}
+	if got := ClientAddr(r); got != "local" {
+		t.Fatal(got)
+	}
+	r.Header.Set(ingress.ViaHeader, ingress.ViaDeployHost)
 	if got := BaseURL(r); got != "https://evil.example" {
 		t.Fatal(got)
 	}
 	if got := ClientAddr(r); got != "10.9.9.9" {
 		t.Fatal(got)
+	}
+}
+
+// Failed logins sent with someone else's address in X-Forwarded-For, through a route that is
+// not the deploy host's, count against the sender's own bucket, not the victim's.
+func TestForgedAddressCannotLockOutOthers(t *testing.T) {
+	e := newEnv(t)
+	good := e.token("ci", "npm:read:@acme/*")
+	serve := func(token string, marked bool) int {
+		r := httptest.NewRequest("GET", "/npm/-/whoami", nil)
+		r.RemoteAddr = "@"
+		r.Header.Set("X-Forwarded-For", "198.51.100.77")
+		if marked {
+			r.Header.Set(ingress.ViaHeader, ingress.ViaDeployHost)
+		}
+		r.Header.Set("Authorization", "Bearer "+token)
+		w := httptest.NewRecorder()
+		e.h.ServeHTTP(w, r)
+		return w.Code
+	}
+	for i := 0; i < failMax+5; i++ {
+		serve("clwn_bad_bad", false)
+	}
+	if got := serve(good, true); got != 200 {
+		t.Fatalf("the victim's address was locked out by forged headers: %d", got)
 	}
 }
 
