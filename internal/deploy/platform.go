@@ -85,6 +85,41 @@ func (n NginxExec) workers(ctx context.Context) (map[string]string, error) {
 	return ws, nil
 }
 
+// StartNginx brings nginx up with the current config when clowdrd starts. A container that is
+// missing, stopped or about to be recreated for a new image reads its config when it starts,
+// so the main files are written first. One that already runs keeps the config it loaded until
+// it is reloaded: the main files then go through RenderAll like any other change, `nginx -t`
+// and a graceful reload, which is what an upgrade that changes nginx.conf needs. If nginx
+// rejects the new config, the previous files are restored and nginx keeps serving them; the
+// daemon still starts, since stopping it would not bring the old config back either.
+func (e *Engine) StartNginx(ctx context.Context) error {
+	running := e.nginxCurrent(ctx)
+	if !running {
+		if err := e.Ingress.Write(e.mainConf()...); err != nil {
+			return err
+		}
+	}
+	if err := e.EnsureNginx(ctx); err != nil {
+		return err
+	}
+	err := e.RenderAll(ctx)
+	if running && errors.Is(err, ingress.ErrInvalidConfig) {
+		e.Log.Error("nginx rejected the new config and keeps running on the previous one; check platform.yml and restart clowdrd", "err", err)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("nginx config: %w", err)
+	}
+	return nil
+}
+
+// nginxCurrent tells whether the nginx container runs the configured image, i.e. whether
+// EnsureNginx will leave it alone.
+func (e *Engine) nginxCurrent(ctx context.Context) bool {
+	ci, err := e.Docker.ContainerInspect(ctx, NginxContainer)
+	return err == nil && ci.State.Running && ci.Config.Image == e.Platform().Nginx.Image
+}
+
 // EnsureNginx makes sure the nginx container runs the configured image with clowdr's config,
 // and is connected to every project network.
 func (e *Engine) EnsureNginx(ctx context.Context) error {

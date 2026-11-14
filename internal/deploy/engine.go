@@ -1120,10 +1120,7 @@ func (e *Engine) RenderAll(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	files := []ingress.File{
-		{Path: "nginx.conf", Content: ingress.RenderMain(e.IngressOptions())},
-		{Path: "proxy_defaults.conf", Content: ingress.ProxyDefaultsConf},
-	}
+	files := e.mainConf()
 	known := map[string]bool{}
 	for _, p := range projects {
 		known[ingress.ProjectFile(p.Name)] = true
@@ -1144,6 +1141,14 @@ func (e *Engine) RenderAll(ctx context.Context) error {
 		}
 	}
 	return e.Ingress.Apply(ctx, files...)
+}
+
+// mainConf is nginx's own config: everything outside conf.d.
+func (e *Engine) mainConf() []ingress.File {
+	return []ingress.File{
+		{Path: "nginx.conf", Content: ingress.RenderMain(e.IngressOptions())},
+		{Path: "proxy_defaults.conf", Content: ingress.ProxyDefaultsConf},
+	}
 }
 
 func contains(list []string, s string) bool {

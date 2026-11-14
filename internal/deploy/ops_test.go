@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/veksa/clowdr/internal/deploy/fake"
+	"github.com/veksa/clowdr/internal/ingress"
 	"github.com/veksa/clowdr/internal/runtime"
 	"github.com/veksa/clowdr/internal/spec"
 	"github.com/veksa/clowdr/internal/store"
@@ -191,6 +193,143 @@ func TestEnsureNginx(t *testing.T) {
 	if c := f.d.ByName[NginxContainer]; c.Config.Image != "nginx:1.29-alpine" || !c.Running {
 		t.Fatalf("not recreated: %+v", c.Config)
 	}
+}
+
+// liveNginx stands for `docker exec clowdr-nginx nginx ...`: it fails when the container
+// does not run, the way exec into a missing container does.
+type liveNginx struct {
+	d       *fake.Docker
+	tests   int
+	reloads int
+	testErr error
+}
+
+func (n *liveNginx) running() error {
+	if c := n.d.ByName[NginxContainer]; c == nil || !c.Running {
+		return errors.New("no such container: " + NginxContainer)
+	}
+	return nil
+}
+
+func (n *liveNginx) Test(context.Context) (string, error) {
+	if err := n.running(); err != nil {
+		return "", err
+	}
+	n.tests++
+	return "", n.testErr
+}
+
+func (n *liveNginx) Reload(context.Context) error {
+	if err := n.running(); err != nil {
+		return err
+	}
+	n.reloads++
+	return nil
+}
+
+func TestStartNginx(t *testing.T) {
+	ctx := context.Background()
+	setup := func(t *testing.T) (*fixture, *liveNginx) {
+		f := newFixture(t)
+		ng := &liveNginx{d: f.d}
+		f.e.Ingress.Nginx = ng
+		return f, ng
+	}
+	read := func(f *fixture, name string) string {
+		b, _ := os.ReadFile(filepath.Join(f.dir, name))
+		return string(b)
+	}
+	// started puts the host where a previous clowdrd left it: nginx running the configured
+	// image on the config that version wrote.
+	started := func(t *testing.T, f *fixture, ng *liveNginx, mainConf string) {
+		t.Helper()
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if mainConf != "" {
+			os.WriteFile(filepath.Join(f.dir, "nginx.conf"), []byte(mainConf), 0o644)
+		}
+		ng.tests, ng.reloads = 0, 0
+	}
+
+	t.Run("first start", func(t *testing.T) {
+		f, ng := setup(t)
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if c := f.d.ByName[NginxContainer]; c == nil || !c.Running {
+			t.Fatal("nginx not started")
+		}
+		if read(f, "nginx.conf") != ingress.RenderMain(f.e.IngressOptions()) || read(f, "proxy_defaults.conf") != ingress.ProxyDefaultsConf {
+			t.Fatal("main config not written")
+		}
+		// The fresh container read the files when it started: nothing to test or reload
+		// (and liveNginx fails any exec that runs before the container exists).
+		if ng.tests != 0 || ng.reloads != 0 {
+			t.Fatalf("tests=%d reloads=%d", ng.tests, ng.reloads)
+		}
+	})
+
+	t.Run("upgrade with nginx running", func(t *testing.T) {
+		f, ng := setup(t)
+		started(t, f, ng, "# written by the previous version\n")
+		c := f.d.ByName[NginxContainer]
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if read(f, "nginx.conf") != ingress.RenderMain(f.e.IngressOptions()) {
+			t.Fatal("new nginx.conf not written")
+		}
+		if ng.tests != 1 || ng.reloads != 1 {
+			t.Fatalf("a changed nginx.conf needs one checked reload: tests=%d reloads=%d", ng.tests, ng.reloads)
+		}
+		if f.d.ByName[NginxContainer] != c {
+			t.Fatal("nginx recreated instead of reloaded")
+		}
+	})
+
+	t.Run("unchanged config", func(t *testing.T) {
+		f, ng := setup(t)
+		started(t, f, ng, "")
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if ng.tests != 0 || ng.reloads != 0 {
+			t.Fatalf("nothing changed, nothing to reload: tests=%d reloads=%d", ng.tests, ng.reloads)
+		}
+	})
+
+	t.Run("rejected config", func(t *testing.T) {
+		f, ng := setup(t)
+		old := "# written by the previous version\n"
+		started(t, f, ng, old)
+		ng.testErr = errors.New("nginx -t exited with 1")
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatalf("the daemon must still start on the previous config: %v", err)
+		}
+		if read(f, "nginx.conf") != old {
+			t.Fatal("previous nginx.conf not restored")
+		}
+		if ng.reloads != 0 || !f.d.ByName[NginxContainer].Running {
+			t.Fatalf("nginx must keep running unreloaded: reloads=%d", ng.reloads)
+		}
+	})
+
+	t.Run("stopped nginx starts on the new config", func(t *testing.T) {
+		f, ng := setup(t)
+		started(t, f, ng, "# written by the previous version\n")
+		f.d.ByName[NginxContainer].Running = false
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if read(f, "nginx.conf") != ingress.RenderMain(f.e.IngressOptions()) || !f.d.ByName[NginxContainer].Running {
+			t.Fatal("nginx not started on the new config")
+		}
+		// It read the new file when it started: no reload needed.
+		if ng.reloads != 0 {
+			t.Fatalf("reloads=%d", ng.reloads)
+		}
+	})
 }
 
 func TestNginxExec(t *testing.T) {

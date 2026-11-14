@@ -132,8 +132,8 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 	}
 	go mon.Run(ctx)
 
-	// nginx: write config, make sure the container runs, then a checked reload.
-	if err := bootstrapNginx(ctx, eng, ing, st); err != nil {
+	// nginx: make sure the container runs on the current config (checked reload if it already ran).
+	if err := eng.StartNginx(ctx); err != nil {
 		return err
 	}
 	// Finish what a killed clowdrd or a reboot left half-done, before anything deploys.
@@ -342,24 +342,6 @@ func checkDocker(info runtime.Info, o Options, log *slog.Logger) error {
 	}
 	if !info.ContainerdStore() {
 		return errors.New(`docker does not use the containerd image store; add {"features": {"containerd-snapshotter": true}} to /etc/docker/daemon.json and restart docker`)
-	}
-	return nil
-}
-
-func bootstrapNginx(ctx context.Context, eng *deploy.Engine, ing *ingress.Controller, st *store.Store) error {
-	opts := eng.IngressOptions()
-	files := []ingress.File{
-		{Path: "nginx.conf", Content: ingress.RenderMain(opts)},
-		{Path: "proxy_defaults.conf", Content: ingress.ProxyDefaultsConf},
-	}
-	if err := ing.Write(files...); err != nil {
-		return err
-	}
-	if err := eng.EnsureNginx(ctx); err != nil {
-		return err
-	}
-	if err := eng.RenderAll(ctx); err != nil {
-		return fmt.Errorf("nginx config: %w", err)
 	}
 	return nil
 }
