@@ -63,11 +63,7 @@ registry, stops the deploy. --allow-outdated deploys anyway and is recorded in t
 			}
 			if a.allowOutdated {
 				// Recorded in each release, on servers that know the field.
-				var v api.Version
-				if err := t.client.Do(cmd.Context(), "GET", "/v1/version", nil, &v); err == nil && !slices.Contains(v.Features, api.FeatureAllowOutdated) {
-					fmt.Fprintln(a.err, "! the server is too old to record --allow-outdated in the release history")
-					a.allowOutdated = false
-				}
+				a.allowOutdated = a.confirmAllowOutdated(cmd.Context(), t.client)
 			} else if err := a.npmCheckDeploy(cmd.Context(), d); err != nil {
 				return err
 			}
@@ -1146,4 +1142,16 @@ func hostLine(h monitor.Host) string {
 		s += fmt.Sprintf(", swap %s used of %s", used, human(h.SwapTotal))
 	}
 	return s + fmt.Sprintf(", disk %s free of %s", human(h.DiskFree), human(h.DiskTotal))
+}
+
+// confirmAllowOutdated reports whether the server lists the allow-outdated feature. The field is
+// sent only then: an older server refuses a deploy request with a field it does not know, and a
+// failed version request confirms nothing.
+func (a *app) confirmAllowOutdated(ctx context.Context, c *api.Client) bool {
+	var v api.Version
+	if err := c.Do(ctx, "GET", "/v1/version", nil, &v); err != nil || !slices.Contains(v.Features, api.FeatureAllowOutdated) {
+		fmt.Fprintln(a.err, "! the server did not confirm it can record --allow-outdated: deploying without recording it")
+		return false
+	}
+	return true
 }
