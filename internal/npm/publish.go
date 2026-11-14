@@ -162,22 +162,46 @@ func (c *call) publish(name string) {
 		writeErr(w, 500, "storage error")
 		return
 	}
+	var zip built
+	if v.Plugin != nil {
+		// A plugin name is one name for every scope: Claude Code installs and updates by the
+		// name in plugin.json, so a second package with it could replace the first one's code on
+		// every machine that installed it.
+		holders, err := c.h.pluginHolders()
+		if err != nil {
+			writeErr(w, 500, "storage error")
+			return
+		}
+		for _, o := range holders[v.Plugin.Name] {
+			if o != name {
+				msg := "plugin name " + v.Plugin.Name + " is taken by another package"
+				c.audit("publish", name, v.Version, "", 409, msg+" ("+o+")")
+				writeErr(w, http.StatusConflict, msg)
+				return
+			}
+		}
+		zip, err = c.h.makeZip(data, unpackLimit(max))
+		if err != nil {
+			c.h.log().Warn("npm: plugin zip", "package", name, "version", v.Version, "err", err)
+			c.audit("publish", name, v.Version, "", 400, err.Error())
+			writeErr(w, http.StatusBadRequest, "plugin "+name+": "+err.Error())
+			return
+		}
+		v.Plugin.ZipSHA256, v.Plugin.ZipSize = zip.sha256, zip.size
+	}
+	dropZip := func() {
+		if zip.tmp != "" {
+			os.Remove(zip.tmp)
+		}
+	}
 	if err := c.h.writeTarball(v.SHA512, data); err != nil {
+		dropZip()
 		c.h.log().Error("npm: write tarball", "package", name, "version", v.Version, "err", err)
 		writeErr(w, 500, "storage error")
 		return
 	}
-	if v.Plugin != nil {
-		var err error
-		v.Plugin.ZipSHA256, v.Plugin.ZipSize, err = c.h.makeZip(v.SHA512, data, unpackLimit(max))
-		if err != nil {
-			c.h.log().Error("npm: plugin zip", "package", name, "version", v.Version, "err", err)
-			c.audit("publish", name, v.Version, "", 400, err.Error())
-			writeErr(w, http.StatusBadRequest, err.Error())
-			return
-		}
-	}
 	if err := c.h.Store.PublishNPM(v, tags); err != nil {
+		dropZip()
 		if errors.Is(err, store.ErrExists) {
 			writeErr(w, http.StatusConflict, name+"@"+v.Version+" is already published")
 			return
@@ -185,6 +209,13 @@ func (c *call) publish(name string) {
 		c.h.log().Error("npm: publish", "package", name, "version", v.Version, "err", err)
 		writeErr(w, 500, "storage error")
 		return
+	}
+	if zip.tmp != "" {
+		// The record names the zip's digest already; until the file is in place, a request for
+		// it builds it again (pluginOf), so a failure here costs time, not a wrong answer.
+		if err := c.h.place(zip, v.SHA512); err != nil {
+			c.h.log().Error("npm: place plugin zip", "package", name, "version", v.Version, "err", err)
+		}
 	}
 	if err := c.h.retain(name, now, cfg, false); err != nil {
 		c.h.log().Error("npm: retention", "package", name, "err", err)
@@ -308,6 +339,7 @@ func checkTarball(data []byte, name, version string, unpacked int64) (*store.NPM
 	found := 0
 	var flag json.RawMessage
 	var pt pluginTar
+	var total int64
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -319,6 +351,14 @@ func checkTarball(data []byte, name, version string, unpacked int64) (*store.NPM
 		if err != nil {
 			return nil, errors.New("the tarball is not a valid tar archive")
 		}
+		if err := checkEntryHeader(hdr); err != nil {
+			return nil, err
+		}
+		// The size an entry unpacks to, from its header: the cap on the gzip stream alone does
+		// not see what a reader makes without reading it.
+		if total += hdr.Size; total > unpacked {
+			return nil, fmt.Errorf("the tarball unpacks to more than %d bytes", unpacked)
+		}
 		rel, err := extractedPath(hdr.Name)
 		if err != nil {
 			return nil, err
@@ -326,6 +366,7 @@ func checkTarball(data []byte, name, version string, unpacked int64) (*store.NPM
 		if rel == "" {
 			continue // the top directory itself, or an entry strip: 1 drops
 		}
+		pt.name(rel, hdr)
 		if hdr.Typeflag == tar.TypeDir {
 			continue
 		}
@@ -367,6 +408,29 @@ func checkTarball(data []byte, name, version string, unpacked int64) (*store.NPM
 		return nil, errors.New("the tarball must hold exactly one package.json at its top")
 	}
 	return checkPlugin(name, version, flag, &pt)
+}
+
+// checkEntryHeader refuses an entry whose unpacked size the header does not tell: sparse files
+// (GNU or PAX, whose holes a reader makes without reading anything) and every type but files,
+// folders, links and PAX global headers.
+func checkEntryHeader(hdr *tar.Header) error {
+	if hdr.Typeflag == tar.TypeGNUSparse {
+		return fmt.Errorf("the tarball has a sparse entry, %s; sparse files are not taken", hdr.Name)
+	}
+	for k := range hdr.PAXRecords {
+		if strings.HasPrefix(k, "GNU.sparse.") {
+			return fmt.Errorf("the tarball has a sparse entry, %s; sparse files are not taken", hdr.Name)
+		}
+	}
+	switch hdr.Typeflag {
+	case tar.TypeReg, tar.TypeDir, tar.TypeSymlink, tar.TypeLink, tar.TypeXGlobalHeader:
+	default:
+		return fmt.Errorf("the tarball has %s of type %q; only files, folders and links are taken", hdr.Name, hdr.Typeflag)
+	}
+	if hdr.Size < 0 {
+		return fmt.Errorf("the tarball has %s with a negative size", hdr.Name)
+	}
+	return nil
 }
 
 // extractedPath is where an entry lands after extraction with strip: 1, "" when it lands

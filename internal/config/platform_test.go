@@ -113,10 +113,24 @@ func TestPlatformPlugins(t *testing.T) {
 		"plugins: {name: claude-tools}", "plugins: {name: claudeai-x}", "plugins: {name: Anthropic-x}", "plugins: {name: inline}",
 		"plugins: {name: toString}", "plugins: {name: café}", "plugins: {unknown: 1}",
 		"plugins: {name: " + strings.Repeat("a", 129) + "}",
+		"plugins: {max_zip: 0}", "plugins: {max_zip: 300m}",
+		// a default name Claude Code would refuse
+		"domain: claude-tools.example", "domain: " + strings.Repeat("a", 60) + "." + strings.Repeat("b", 60) + ".example.com",
 	} {
 		if _, err := ParsePlatform([]byte(bad)); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+	_, err = ParsePlatform([]byte("plugins: {name: claude-x}"))
+	if err == nil || !strings.Contains(err.Error(), `plugins.name "claude-x"`) || !strings.Contains(err.Error(), "claude") {
+		t.Fatalf("the error must name the key and the rule: %v", err)
+	}
+	_, err = ParsePlatform([]byte("domain: anthropic-fans.example"))
+	if err == nil || !strings.Contains(err.Error(), "set plugins.name") {
+		t.Fatalf("a refused default name must point at plugins.name: %v", err)
+	}
+	if p, err := ParsePlatform([]byte("domain: anthropic-fans.example\nplugins: {name: fans}")); err != nil || p.Plugins.MaxZip != DefaultPluginMaxZip {
+		t.Fatalf("plugins.name fixes it: %v", err)
 	}
 	for _, ok := range []string{"acme", "clowdr-example-com", "Acme_Tools.v2", strings.Repeat("a", 128)} {
 		if err := ValidMarketplaceName(ok); err != nil {

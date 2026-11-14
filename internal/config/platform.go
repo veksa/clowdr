@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"regexp"
 	"strings"
@@ -41,35 +42,66 @@ type Platform struct {
 	Plugins        PluginsConf             `yaml:"plugins"`
 }
 
-// PluginsConf names the Claude Code plugin marketplace at /plugins/ on the deploy host
-// (docs/plugins.md). Both keys are optional.
+// PluginsConf configures the Claude Code plugin marketplace at /plugins/ on the deploy host
+// (docs/plugins.md). Every key is optional.
 type PluginsConf struct {
 	// Name is the marketplace's name, typed after "@" when a plugin is installed. Default:
-	// "clowdr-" and the domain with dots as dashes. Changing it later makes every user set the
-	// marketplace up again.
+	// MarketplaceName. Changing it later makes every user set the marketplace up again.
 	Name string `yaml:"name"`
 	// Owner is the marketplace's owner shown by Claude Code. Default: the domain.
 	Owner string `yaml:"owner"`
+	// MaxZip caps a plugin's zip: a publish whose zip would be larger is refused.
+	MaxZip Bytes `yaml:"max_zip"`
 }
 
-var marketplaceNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+// DefaultPluginMaxZip is plugins.max_zip unless set; PluginMaxZipCap is the most it may be,
+// Claude Code's own download limit.
+const (
+	DefaultPluginMaxZip = 64 << 20
+	PluginMaxZipCap     = 256 << 20
+)
+
+var (
+	marketplaceNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	nonNameRe         = regexp.MustCompile(`[^a-z0-9]+`)
+)
+
+// MarketplaceName is the marketplace's name: c.Name, else "clowdr-" and the domain with every
+// run of other characters than a-z and 0-9 made one dash ("example.com" → "clowdr-example-com").
+// Without a domain, the host the client used stands in, without its port.
+func MarketplaceName(c PluginsConf, domain, host string) string {
+	if c.Name != "" {
+		return c.Name
+	}
+	if domain == "" {
+		domain = host
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			domain = h
+		}
+	}
+	s := strings.Trim(nonNameRe.ReplaceAllString(strings.ToLower(domain), "-"), "-")
+	if s == "" {
+		s = "local"
+	}
+	return "clowdr-" + s
+}
 
 // ValidMarketplaceName refuses a name Claude Code would not take: other characters than
 // letters, digits, '.', '_' and '-', "..", more than 128 characters, the "claudeai-" prefix, names
 // it keeps for itself, and anything with "claude" or "anthropic" in it, which it may read as an
-// imitation of an official marketplace.
+// imitation of an official marketplace. The error states the rule.
 func ValidMarketplaceName(n string) error {
 	l := strings.ToLower(n)
 	switch {
 	case !marketplaceNameRe.MatchString(n) || strings.Contains(n, ".."):
-		return fmt.Errorf("plugins.name %q: letters, digits, '.', '_' and '-', starting with a letter or digit, no \"..\", at most 128", n)
+		return errors.New(`a marketplace name uses only letters, digits, '.', '_' and '-', starts with a letter or digit, has no "..", and is at most 128 characters`)
 	case strings.Contains(l, "claude") || strings.Contains(l, "anthropic"):
-		return fmt.Errorf("plugins.name %q: Claude Code refuses names that read as its own marketplaces", n)
+		return errors.New(`Claude Code refuses marketplace names containing "claude" or "anthropic" (they read as its own)`)
 	}
 	switch l {
 	case "inline", "builtin", "skills-dir", "synced", "org", "org-provisioned", "unknown", "healthcare", "life-sciences", "agent-skills",
 		"constructor", "hasownproperty", "isprototypeof", "propertyisenumerable", "tolocalestring", "tostring", "valueof":
-		return fmt.Errorf("plugins.name %q is reserved by Claude Code", n)
+		return errors.New("Claude Code reserves this marketplace name")
 	}
 	return nil
 }
@@ -184,6 +216,7 @@ limits:
 # plugins:
 #   name: clowdr-example-com   # marketplace name (default: clowdr-<domain, dots as dashes>)
 #   owner: Example Inc.        # shown as the owner (default: the domain)
+#   max_zip: 64m               # largest plugin zip a publish may make (at most 256m)
 `
 
 func LoadPlatform(path string) (*Platform, error) {
@@ -224,6 +257,9 @@ func checkSetNPM(b []byte) error {
 			Grace      *Duration `yaml:"grace"`
 			MaxPublish *Bytes    `yaml:"max_publish"`
 		} `yaml:"npm"`
+		Plugins struct {
+			MaxZip *Bytes `yaml:"max_zip"`
+		} `yaml:"plugins"`
 	}
 	if err := yaml.Unmarshal(b, &probe); err != nil {
 		return err
@@ -236,6 +272,9 @@ func checkSetNPM(b []byte) error {
 	}
 	if m := probe.NPM.MaxPublish; m != nil && *m <= 0 {
 		return errors.New("npm.max_publish: must be larger than 0")
+	}
+	if m := probe.Plugins.MaxZip; m != nil && *m <= 0 {
+		return errors.New("plugins.max_zip: must be larger than 0")
 	}
 	return nil
 }
@@ -261,6 +300,9 @@ func (p *Platform) defaults() {
 	}
 	if p.NPM.MaxPublish == 0 {
 		p.NPM.MaxPublish = 64 << 20
+	}
+	if p.Plugins.MaxZip == 0 {
+		p.Plugins.MaxZip = DefaultPluginMaxZip
 	}
 	if p.Limits.Pids == 0 {
 		p.Limits.Pids = 1024
@@ -323,8 +365,16 @@ func (p *Platform) validate() error {
 	}
 	if p.Plugins.Name != "" {
 		if err := ValidMarketplaceName(p.Plugins.Name); err != nil {
-			return err
+			return fmt.Errorf("plugins.name %q: %v", p.Plugins.Name, err)
 		}
+	} else if p.Domain != "" {
+		n := MarketplaceName(p.Plugins, p.Domain, "")
+		if err := ValidMarketplaceName(n); err != nil {
+			return fmt.Errorf("plugins.name: the plugin marketplace's default name %q, made from domain %q, will not do: %v; set plugins.name in platform.yml", n, p.Domain, err)
+		}
+	}
+	if p.Plugins.MaxZip < 0 || p.Plugins.MaxZip > PluginMaxZipCap {
+		return fmt.Errorf("plugins.max_zip: from 1 byte to %d (Claude Code downloads at most 256 MiB)", PluginMaxZipCap)
 	}
 	if p.NPM.MaxPublish < 0 {
 		return fmt.Errorf("npm.max_publish: must be positive")

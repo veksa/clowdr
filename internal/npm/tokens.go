@@ -279,8 +279,9 @@ func (h *Handler) Sweep(ctx context.Context) {
 			if !strings.HasPrefix(e.Name(), tmpPrefix) {
 				continue
 			}
+			// A temp file, or the folder a zip build unpacks into (left behind by a crash).
 			if fi, err := e.Info(); err == nil && now.Sub(fi.ModTime()) > time.Hour {
-				os.Remove(filepath.Join(dir, e.Name()))
+				os.RemoveAll(filepath.Join(dir, e.Name()))
 			}
 		}
 	}

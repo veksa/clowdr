@@ -118,6 +118,10 @@ func (e *env) do(method, path, token string, body []byte, hdr ...string) resp {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
 	for i := 0; i+1 < len(hdr); i += 2 {
+		if hdr[i] == "Host" {
+			req.Host = hdr[i+1] // Go sends req.Host, not a Host header
+			continue
+		}
 		req.Header.Set(hdr[i], hdr[i+1])
 	}
 	res, err := http.DefaultClient.Do(req)

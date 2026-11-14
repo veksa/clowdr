@@ -5,11 +5,14 @@ import (
 	"archive/zip"
 	"bytes"
 	"compress/gzip"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -97,6 +100,30 @@ func (e *env) marketplace(token string) Marketplace {
 	return m
 }
 
+// zipOf builds the zip of a tarball and returns its bytes, checking the digest buildZip reports.
+func zipOf(t *testing.T, data []byte, maxZip int64) ([]byte, error) {
+	t.Helper()
+	dir := t.TempDir()
+	b, err := buildZip(bytes.NewReader(data), dir, 64<<20, maxZip)
+	if err != nil {
+		if es, _ := os.ReadDir(dir); len(es) != 0 {
+			t.Errorf("a failed build left %d files behind", len(es))
+		}
+		return nil, err
+	}
+	z, err := os.ReadFile(b.tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha256hex(z) != b.sha256 || int64(len(z)) != b.size {
+		t.Fatalf("buildZip says %s/%d, the file is %s/%d", b.sha256, b.size, sha256hex(z), len(z))
+	}
+	if es, _ := os.ReadDir(dir); len(es) != 1 {
+		t.Errorf("the build left %d files, want only the zip", len(es))
+	}
+	return z, nil
+}
+
 func sha256hex(b []byte) string {
 	s := sha256.Sum256(b)
 	return hex.EncodeToString(s[:])
@@ -165,6 +192,28 @@ func TestPluginPublishRules(t *testing.T) {
 			{name: "package/package.json", body: pkgJSON("@acme/a~b", v, "true")},
 			{name: "package/.claude-plugin/plugin.json", body: manifestJSON("a~b", v)},
 		}, "may use only"},
+		// Names every system Claude Code runs on can create, once.
+		{"colon", "@acme/colon", pl("@acme/colon", entry{name: "package/a:b.md", body: "x"}), "has a colon"},
+		{"backslash", "@acme/bs", pl("@acme/bs", entry{name: `package\x.md`, body: "x"}), "has a backslash"},
+		{"control character", "@acme/ctl", pl("@acme/ctl", entry{name: "package/a\x01b", body: "x"}), "a control character"},
+		{"reserved name", "@acme/con", pl("@acme/con", entry{name: "package/commands/CON.md", body: "x"}), "Windows reserves"},
+		{"reserved name in lower case", "@acme/aux", pl("@acme/aux", entry{name: "package/aux", body: "x"}), "Windows reserves"},
+		{"trailing dot", "@acme/dot", pl("@acme/dot", entry{name: "package/x.", body: "x"}), "ending in a dot"},
+		{"trailing space", "@acme/sp", pl("@acme/sp", entry{name: "package/x ", body: "x"}), "ending in a dot or a space"},
+		{"absolute", "@acme/abs", pl("@acme/abs", entry{name: "/package/x.md", body: "x"}), "absolute path"},
+		{"drive letter", "@acme/drv", pl("@acme/drv", entry{name: "C:/package/x.md", body: "x"}), "absolute path"},
+		{"files differing in case", "@acme/case", pl("@acme/case",
+			entry{name: "package/README.md", body: "a"}, entry{name: "package/readme.md", body: "b"}), "differ only in case"},
+		{"a file and a folder differing in case", "@acme/case2", pl("@acme/case2",
+			entry{name: "package/skills", body: "a"}, entry{name: "package/Skills/x.md", body: "b"}), "differ only in case"},
+		{"a folder and then a file differing in case", "@acme/case3", pl("@acme/case3",
+			entry{name: "package/Skills/x.md", body: "b"}, entry{name: "package/skills", body: "a"}), "differ only in case"},
+		// The same names in an ordinary package are npm's business, not this server's.
+		{"case clash in an ordinary package", "@acme/plain3", []entry{
+			{name: "package/package.json", body: pkgJSON("@acme/plain3", v, "")},
+			{name: "package/README.md", body: "a"}, {name: "package/readme.md", body: "b"},
+			{name: "package/CON.md", body: "c"},
+		}, ""},
 	}
 	for _, c := range cases {
 		data := pluginTgz(t, c.name, v)
@@ -193,17 +242,253 @@ func TestPluginPublishRules(t *testing.T) {
 	}
 }
 
+// pl is a valid plugin package's entries plus extra.
+func pl(name string, extra ...entry) []entry {
+	_, base, _ := strings.Cut(name, "/")
+	return append([]entry{
+		{name: "package/package.json", body: pkgJSON(name, "1.0.0", "true")},
+		{name: "package/.claude-plugin/plugin.json", body: manifestJSON(base, "1.0.0")},
+	}, extra...)
+}
+
+// sparseTgz is a tarball whose second entry is a PAX GNU sparse 1.0 file of realsize bytes made
+// of one data byte: a few hundred bytes that a tar reader expands to realsize. archive/tar does
+// not write sparse files, so the PAX header is written as a regular entry and its type byte
+// patched.
+func sparseTgz(t *testing.T, name string, realsize int64) []byte {
+	t.Helper()
+	var raw bytes.Buffer
+	tw := tar.NewWriter(&raw)
+	put := func(h *tar.Header, body []byte) {
+		h.Size, h.Mode, h.Format = int64(len(body)), 0o644, tar.FormatUSTAR
+		if err := tw.WriteHeader(h); err != nil {
+			t.Fatal(err)
+		}
+		tw.Write(body)
+	}
+	pj := []byte(pkgJSON(name, "1.0.0", ""))
+	put(&tar.Header{Name: "package/package.json", Typeflag: tar.TypeReg}, pj)
+	paxAt := 512 + (len(pj)+511)/512*512 // tar.Writer pads an entry only when the next begins
+	var recs []byte
+	for _, kv := range [][2]string{
+		{"GNU.sparse.major", "1"}, {"GNU.sparse.minor", "0"},
+		{"GNU.sparse.name", "package/big"}, {"GNU.sparse.realsize", strconv.FormatInt(realsize, 10)},
+	} {
+		rec := " " + kv[0] + "=" + kv[1] + "\n"
+		n := len(rec) + 1
+		for len(strconv.Itoa(n))+len(rec) != n {
+			n++
+		}
+		recs = append(recs, strconv.Itoa(n)+rec...)
+	}
+	put(&tar.Header{Name: "package/PaxHeaders/big", Typeflag: tar.TypeReg}, recs)
+	// One region: offset 0, one byte; the map is padded to a block, then the byte follows.
+	data := make([]byte, 513)
+	copy(data, "1\n0\n1\n")
+	data[512] = 'x'
+	put(&tar.Header{Name: "package/GNUSparseFile.0/big", Typeflag: tar.TypeReg}, data)
+	tw.Close()
+	b := raw.Bytes()
+	hdr := b[paxAt : paxAt+512]
+	hdr[156] = tar.TypeXHeader
+	copy(hdr[148:156], "        ")
+	sum := 0
+	for _, c := range hdr {
+		sum += int(c)
+	}
+	copy(hdr[148:156], fmt.Sprintf("%06o\x00 ", sum))
+	var out bytes.Buffer
+	gz := gzip.NewWriter(&out)
+	gz.Write(b)
+	gz.Close()
+	return out.Bytes()
+}
+
+func TestSparseTarballRefused(t *testing.T) {
+	data := sparseTgz(t, "@acme/sparse", 10<<30)
+	if len(data) > 1024 {
+		t.Fatalf("the sparse tarball is %d bytes", len(data))
+	}
+	// Go's reader does expand it: the test would prove nothing otherwise.
+	tr := tar.NewReader(mustGunzip(t, data))
+	tr.Next()
+	if h, err := tr.Next(); err != nil || h.Size != 10<<30 {
+		t.Fatalf("archive/tar reads the sparse entry as %+v, %v", h, err)
+	}
+
+	if _, err := checkTarball(data, "@acme/sparse", "1.0.0", 64<<20); err == nil || !strings.Contains(err.Error(), "sparse") {
+		t.Fatalf("checkTarball: %v", err)
+	}
+	if _, err := zipOf(t, data, 64<<20); err == nil || !strings.Contains(err.Error(), "sparse") {
+		t.Fatalf("buildZip: %v", err)
+	}
+	e := newEnv(t)
+	pub := e.token("ci", "npm:publish:@acme/*")
+	r := e.publishData(pub, "@acme/sparse", "1.0.0", data, pubOpts{})
+	if r.status != 400 || !strings.Contains(string(r.body), "sparse") {
+		t.Fatalf("publish of an ordinary package with a sparse entry: %d %s", r.status, r.body)
+	}
+	// Other special entries are refused for every package too.
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	pj := pkgJSON("@acme/fifo", "1.0.0", "")
+	tw.WriteHeader(&tar.Header{Name: "package/package.json", Size: int64(len(pj)), Mode: 0o644, Typeflag: tar.TypeReg})
+	tw.Write([]byte(pj))
+	tw.WriteHeader(&tar.Header{Name: "package/pipe", Mode: 0o644, Typeflag: tar.TypeFifo})
+	tw.Close()
+	gz.Close()
+	if r := e.publishData(pub, "@acme/fifo", "1.0.0", buf.Bytes(), pubOpts{}); r.status != 400 {
+		t.Fatalf("publish with a fifo: %d %s", r.status, r.body)
+	}
+}
+
+func mustGunzip(t *testing.T, data []byte) io.Reader {
+	t.Helper()
+	gz, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return gz
+}
+
+func TestPluginZipLimits(t *testing.T) {
+	// A file that deflates beyond Claude Code's ratio is stored, so the zip is as large as the
+	// files; plugins.max_zip refuses it.
+	zeros := pluginTgz(t, "@acme/big", "1.0.0", entry{name: "package/zeros.bin", body: strings.Repeat("\x00", 2<<20)})
+	z, err := zipOf(t, zeros, 64<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	zr, _ := zip.NewReader(bytes.NewReader(z), int64(len(z)))
+	for _, f := range zr.File {
+		if f.Name == "zeros.bin" && f.Method != zip.Store {
+			t.Fatalf("zeros.bin method %d, want stored", f.Method)
+		}
+	}
+	if _, err := zipOf(t, zeros, 1<<20); err == nil || !strings.Contains(err.Error(), "larger than 1048576 bytes (plugins.max_zip)") {
+		t.Fatalf("over max_zip: %v", err)
+	}
+
+	e := newEnv(t)
+	e.h.Plugins = func() config.PluginsConf { return config.PluginsConf{MaxZip: 1 << 20} }
+	pub := e.token("ci", "npm:publish:@acme/*", "plugins:read")
+	r := e.publishData(pub, "@acme/big", "1.0.0", zeros, pubOpts{})
+	if r.status != 400 || !strings.Contains(string(r.body), "plugins.max_zip") {
+		t.Fatalf("publish over max_zip: %d %s", r.status, r.body)
+	}
+	for _, sub := range []string{"tarballs", "zips"} {
+		es, _ := os.ReadDir(e.h.Dir + "/" + sub)
+		if len(es) != 0 {
+			t.Errorf("%s left after a refused publish: %d", sub, len(es))
+		}
+	}
+	if _, err := e.st.NPMVersion("@acme/big", "1.0.0"); err == nil {
+		t.Fatal("the refused version was stored")
+	}
+}
+
+func TestPluginZipFailureCached(t *testing.T) {
+	e := newEnv(t)
+	pub := e.token("ci", "npm:publish:@acme/*", "plugins:read")
+	noise := make([]byte, 64<<10)
+	rand.Read(noise)
+	data := pluginTgz(t, "@acme/tool", "1.0.0", entry{name: "package/noise.bin", body: string(noise)})
+	mustStatus(t, e.publishData(pub, "@acme/tool", "1.0.0", data, pubOpts{}), 201)
+	v, _ := e.st.NPMVersion("@acme/tool", "1.0.0")
+	zp, _ := e.h.zipPath(v.SHA512)
+	os.Remove(zp)
+
+	e.h.Plugins = func() config.PluginsConf { return config.PluginsConf{MaxZip: 16 << 10} }
+	mustStatus(t, e.do("GET", "/plugins/@acme/tool/1.0.0.zip", pub, nil), 404)
+	e.h.Plugins = nil // the cause is gone, but the failure is remembered for an hour
+	mustStatus(t, e.do("GET", "/plugins/@acme/tool/1.0.0.zip", pub, nil), 404)
+	if m := e.marketplace(pub); len(m.Plugins) != 0 {
+		t.Fatalf("listed with no zip: %+v", m)
+	}
+	if n := strings.Count(e.logs.String(), "step=build"); n != 1 {
+		t.Fatalf("the failure logged %d times, want once:\n%s", n, e.logs.String())
+	}
+	es, _ := e.h.Audit(AuditFilter{Action: "plugin.list"})
+	if len(es) == 0 || !strings.Contains(es[0].Detail, "@acme/tool@1.0.0 (zip unavailable)") {
+		t.Fatalf("audit: %+v", es)
+	}
+	if es, _ := os.ReadDir(e.h.Dir + "/zips"); len(es) != 0 {
+		t.Fatalf("a failed build left %d files", len(es))
+	}
+	e.advance(zipRetry + time.Minute)
+	r := e.do("GET", "/plugins/@acme/tool/1.0.0.zip", pub, nil)
+	mustStatus(t, r, 200)
+	if cur, _ := e.st.NPMVersion("@acme/tool", "1.0.0"); sha256hex(r.body) != cur.Plugin.ZipSHA256 {
+		t.Fatal("the rebuilt zip and the record disagree")
+	}
+}
+
+func TestPluginNameHeldTwice(t *testing.T) {
+	e := newEnv(t)
+	acme := e.token("acme", "npm:publish:@acme/*")
+	beta := e.token("beta", "npm:publish:@beta/*")
+	both := e.token("both", "npm:read:@acme/*", "npm:read:@beta/*", "plugins:read")
+	mustStatus(t, e.publishPlugin(acme, "@acme/tool", "1.0.0"), 201)
+
+	// A version as a 0.4 server stored it (no plugin record) still holds the name.
+	setAcme := func(f func(v *store.NPMVersion)) {
+		e.st.UpdateNPM("@acme/tool", func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
+			f(&vs[0])
+			return vs, nil
+		})
+	}
+	orig, _ := e.st.NPMVersion("@acme/tool", "1.0.0")
+	setAcme(func(v *store.NPMVersion) { v.Plugin = nil })
+	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.0"), 409)
+
+	// Two packages holding one name, as only an older server could have stored: neither is listed.
+	setAcme(func(v *store.NPMVersion) { v.Manifest = json.RawMessage(`{}`) })
+	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.0"), 201)
+	setAcme(func(v *store.NPMVersion) { *v = orig })
+	mustStatus(t, e.publishPlugin(beta, "@beta/other", "1.0.0"), 201)
+	for range 2 {
+		m := e.marketplace(both)
+		if len(m.Plugins) != 1 || m.Plugins[0].Name != "other" {
+			t.Fatalf("plugins: %+v", m.Plugins)
+		}
+	}
+	if n := strings.Count(e.logs.String(), "plugin name held by more than one package"); n != 1 {
+		t.Fatalf("collision logged %d times", n)
+	}
+	es, _ := e.h.Audit(AuditFilter{Action: "plugin.list"})
+	if !strings.Contains(es[0].Detail, "plugin name tool held by @acme/tool and @beta/tool") {
+		t.Fatalf("audit: %+v", es[0])
+	}
+	// A token that may read a package still downloads its zip by URL, as it downloads the
+	// tarball from npm; what matters is that no marketplace points autoUpdate at it.
+
+	// Once one of them has no live version, the other is listed again.
+	e.st.UpdateNPM("@beta/tool", func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
+		vs[0].Removed = true
+		return vs, nil
+	})
+	m := e.marketplace(both)
+	if len(m.Plugins) != 2 || m.Plugins[1].Source.URL[len(m.Plugins[1].Source.URL)-len("@acme/tool/1.0.0.zip"):] != "@acme/tool/1.0.0.zip" {
+		t.Fatalf("plugins: %+v", m.Plugins)
+	}
+	// A name is held while a package has a live version with it; once none is left, it is free.
+	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.1"), 409)
+	setAcme(func(v *store.NPMVersion) { v.Removed = true })
+	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.1"), 201)
+}
+
 func TestPluginZipDeterministic(t *testing.T) {
 	data := pluginTgz(t, "@acme/tool", "1.0.0",
 		entry{name: "package/a-last-in-tar.txt", body: "z"},
 		entry{name: "package/zeros.bin", body: strings.Repeat("\x00", 1<<20)},
 		entry{name: "package/empty", body: ""},
 	)
-	a, err := buildZip(data, 64<<20)
+	a, err := zipOf(t, data, 64<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := buildZip(data, 64<<20)
+	b, _ := zipOf(t, data, 64<<20)
 	if !bytes.Equal(a, b) {
 		t.Fatal("two builds of one tarball differ")
 	}
@@ -244,9 +529,9 @@ func TestPluginZipDeterministic(t *testing.T) {
 		{name: "package/.claude-plugin/plugin.json", body: manifestJSON("tool", "1.0.0")},
 		{name: "package/package.json", body: pkgJSON("@acme/tool", "1.0.0", "true")},
 	}
-	c1, _ := buildZip(tarEntries(t, es...), 1<<20)
+	c1, _ := zipOf(t, tarEntries(t, es...), 1<<20)
 	es[0], es[3] = es[3], es[0]
-	c2, _ := buildZip(tarEntries(t, es...), 1<<20)
+	c2, _ := zipOf(t, tarEntries(t, es...), 1<<20)
 	if !bytes.Equal(c1, c2) {
 		t.Fatal("tar order changed the zip")
 	}
@@ -264,8 +549,17 @@ func TestMarketplace(t *testing.T) {
 	mustStatus(t, e.publishPlugin(pub, "@acme/tool", "2.0.0-beta.1"), 201)
 	mustStatus(t, e.do("PUT", "/npm/-/package/@acme%2ftool/dist-tags/latest", pub, []byte(`"1.1.0"`)), 200)
 	mustStatus(t, e.publish(pub, "@acme/lib", "1.0.0"), 201) // not a plugin
-	mustStatus(t, e.publishPlugin(other, "@beta/tool", "3.0.0"), 201)
+	// A plugin name is one for all scopes.
+	r := e.publishPlugin(other, "@beta/tool", "3.0.0")
+	if r.status != 409 || !strings.Contains(string(r.body), "plugin name tool is taken by another package") {
+		t.Fatalf("second package with a plugin name: %d %s", r.status, r.body)
+	}
+	if _, err := e.st.NPMVersion("@beta/tool", "3.0.0"); err == nil {
+		t.Fatal("the refused version was stored")
+	}
 	mustStatus(t, e.publishPlugin(other, "@beta/extra", "1.0.0"), 201)
+	// An ordinary package may share the name.
+	mustStatus(t, e.publish(other, "@beta/lib", "1.0.0"), 201)
 
 	m := e.marketplace(reader)
 	if m.Name != "clowdr-example-com" || m.Owner.Name != "example.com" || m.Description == "" {
@@ -276,10 +570,10 @@ func TestMarketplace(t *testing.T) {
 	}
 	p := m.Plugins[0]
 	if p.Name != "tool" || p.Version != "1.1.0" || p.Description != "A test plugin" || p.Source.Source != "archive" ||
-		p.Source.URL != e.srv.URL+"/plugins/@acme/tool/1.1.0.zip" {
+		p.Source.URL != "https://deploy.example.com/plugins/@acme/tool/1.1.0.zip" {
 		t.Fatalf("entry: %+v", p)
 	}
-	r := e.do("GET", "/plugins/@acme/tool/1.1.0.zip", reader, nil)
+	r = e.do("GET", "/plugins/@acme/tool/1.1.0.zip", reader, nil)
 	mustStatus(t, r, 200)
 	if sha256hex(r.body) != p.Source.SHA256 {
 		t.Fatalf("served zip %s, marketplace says %s", sha256hex(r.body), p.Source.SHA256)
@@ -295,16 +589,25 @@ func TestMarketplace(t *testing.T) {
 	mustStatus(t, e.do("GET", "/plugins/@acme/tool/1.0.0.zip", reader, nil), 200)
 	mustStatus(t, e.do("GET", "/plugins/@acme/lib/1.0.0.zip", reader, nil), 404)
 
-	// Two scopes with a plugin named "tool": the first package by name keeps it.
+	// The URLs name the deploy host whatever Host the request carried.
 	m = e.marketplace(both)
 	var names []string
 	for _, p := range m.Plugins {
-		names = append(names, p.Name+"="+p.Source.URL[len(e.srv.URL):])
+		names = append(names, p.Name+"="+strings.TrimPrefix(p.Source.URL, "https://deploy.example.com"))
 	}
 	if strings.Join(names, " ") != "extra=/plugins/@beta/extra/1.0.0.zip tool=/plugins/@acme/tool/1.1.0.zip" {
 		t.Fatalf("plugins: %v", names)
 	}
 
+	if r := e.do("GET", "/plugins/marketplace.json", reader, nil, "Host", "evil.example.net"); r.status != 200 ||
+		strings.Contains(string(r.body), "evil") {
+		t.Fatalf("Host header in the marketplace: %d %s", r.status, r.body)
+	}
+	// Without a domain the links follow the request.
+	e.h.Domain = nil
+	if m := e.marketplace(reader); m.Plugins[0].Source.URL != e.srv.URL+"/plugins/@acme/tool/1.1.0.zip" {
+		t.Fatalf("no domain: %+v", m.Plugins[0])
+	}
 	// plugins.name and plugins.owner win.
 	e.h.Plugins = func() config.PluginsConf { return config.PluginsConf{Name: "acme-tools", Owner: "Acme"} }
 	if m := e.marketplace(reader); m.Name != "acme-tools" || m.Owner.Name != "Acme" {
@@ -357,16 +660,62 @@ func TestPluginRightsMatrix(t *testing.T) {
 		if z.status != w.zip {
 			t.Errorf("%s: zip %d, want %d", what, z.status, w.zip)
 		}
-		if z.status == 404 && !bytes.Equal(z.body, missing.body) {
-			t.Errorf("%s: refused zip differs from a missing one: %s", what, z.body)
+		if z.status == 404 {
+			same404(t, what, z, missing)
 		}
 		if tok != "" && strings.Contains(string(r.body)+string(z.body), tok) {
 			t.Errorf("%s: a body echoes the token", what)
 		}
 	}
+	// A scope is not a prefix, a removed version is gone, and a version that is not a plugin
+	// has no zip: all the same 404.
+	acme := e.token("acme-reader", "npm:read:@acme/*", "plugins:read")
+	mustStatus(t, e.publishPlugin(e.token("acmex", "npm:publish:@acmex/*"), "@acmex/x", "1.0.0"), 201)
+	mustStatus(t, e.publishPlugin(pub, "@acme/tool", "1.0.1"), 201)
+	mustStatus(t, e.publish(pub, "@acme/lib", "1.0.0"), 201)
+	e.st.UpdateNPM("@acme/tool", func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
+		for _, v := range vs {
+			if v.Version == "1.0.1" {
+				v.Removed = true
+				return []store.NPMVersion{v}, nil
+			}
+		}
+		return nil, nil
+	})
+	e.h.limiter.reset()
+	missing = e.do("GET", "/plugins/@acme/nope/1.0.0.zip", acme, nil)
+	for _, path := range []string{"/plugins/@acmex/x/1.0.0.zip", "/plugins/@acme/tool/1.0.1.zip", "/plugins/@acme/lib/1.0.0.zip"} {
+		r := e.do("GET", path, acme, nil)
+		if r.status != 404 {
+			t.Errorf("%s: %d", path, r.status)
+		}
+		same404(t, path, r, missing)
+	}
+	if m := e.marketplace(acme); len(m.Plugins) != 1 || m.Plugins[0].Name != "tool" || m.Plugins[0].Version != "1.0.0" {
+		t.Fatalf("@acme/* reader: %+v", m.Plugins)
+	}
+
 	// npm tokens without the scope cannot use npm routes to reach the zip either; and the
 	// registry stays as it was for npm.
 	mustStatus(t, e.do("GET", "/npm/@acme/tool/-/tool-1.0.0.tgz", tokens["npm only"], nil), 200)
+}
+
+// same404 checks that a refused request cannot be told from a missing resource.
+func same404(t *testing.T, what string, got, want resp) {
+	t.Helper()
+	if !bytes.Equal(got.body, want.body) {
+		t.Errorf("%s: 404 body %q, a missing zip gets %q", what, got.body, want.body)
+	}
+	for k := range want.header {
+		if k != "Date" && got.header.Get(k) != want.header.Get(k) {
+			t.Errorf("%s: header %s %q, a missing zip gets %q", what, k, got.header.Get(k), want.header.Get(k))
+		}
+	}
+	for k := range got.header {
+		if _, ok := want.header[k]; !ok {
+			t.Errorf("%s: header %s that a missing zip does not have", what, k)
+		}
+	}
 }
 
 func TestPluginFailedAuthLimited(t *testing.T) {
