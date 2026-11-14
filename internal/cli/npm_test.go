@@ -379,6 +379,9 @@ func TestNPMWorkflow(t *testing.T) {
 	if v, _ := yamlGet(filepath.Join(h.dir, ".yarnrc.yml"), "npmScopes", "acme", "npmRegistryServer"); v != reg {
 		t.Fatalf("project .yarnrc.yml: %q", v)
 	}
+	if v, _ := yamlGet(filepath.Join(h.dir, ".yarnrc.yml"), "npmScopes", "acme", "npmMinimalAgeGate"); v != "0" {
+		t.Fatalf("the scope keeps yarn's age gate: %q", v)
+	}
 	contains(t, h.ok("npm", "check"), "are current")
 
 	// Three newer versions: retention deprecates the locked 1.0.0.

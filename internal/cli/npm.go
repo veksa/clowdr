@@ -605,7 +605,9 @@ func (a *app) npmSetupCmd() *cobra.Command {
 		Long: `Writes npmScopes.<scope>.npmRegistryServer into the project's .yarnrc.yml: the nearest
 .yarnrc.yml in this directory or above (the one in your home directory is never used), or a new
 one next to the nearest package.json. Commit the file: it is what sends the scope to this
-registry instead of the public one. The token stays in ~/.yarnrc.yml (clowctl npm login).`,
+registry instead of the public one. The token stays in ~/.yarnrc.yml (clowctl npm login).
+It also sets the scope's npmMinimalAgeGate to 0: yarn 4 otherwise refuses versions published
+less than a day ago, which guards against hijacked public packages but would hold back your own.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(scopes) == 0 {
 				return errors.New("--scope is required, e.g. --scope @acme")
@@ -626,6 +628,11 @@ registry instead of the public one. The token stays in ~/.yarnrc.yml (clowctl np
 					return fmt.Errorf("--scope %q: want @scope", s)
 				}
 				if err := yamlSet(file, reg, false, "npmScopes", strings.TrimPrefix(s, "@"), "npmRegistryServer"); err != nil {
+					return err
+				}
+				// yarn 4 holds back versions younger than npmMinimalAgeGate (1 day), a guard against
+				// a hijacked public package; for your own scope it only delays what you just published.
+				if err := yamlSet(file, "0", false, "npmScopes", strings.TrimPrefix(s, "@"), "npmMinimalAgeGate"); err != nil {
 					return err
 				}
 				if l := a.cfg.npmLogin(reg); l != nil && !slices.Contains(l.Scopes, s) {
