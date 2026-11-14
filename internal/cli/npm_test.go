@@ -752,3 +752,68 @@ func TestPackCommand(t *testing.T) {
 		}
 	}
 }
+
+// A token file linked out of home or into a git work tree is refused before the server is asked;
+// a link to a private file in home keeps working.
+func TestNPMTokenFileLinks(t *testing.T) {
+	h := newHarness(t)
+	home := os.Getenv("HOME")
+	os.MkdirAll(home, 0o700)
+	nrc := filepath.Join(home, ".npmrc")
+
+	outside := filepath.Join(h.dir, "outside", "npmrc")
+	os.MkdirAll(filepath.Dir(outside), 0o700)
+	os.WriteFile(outside, nil, 0o600)
+	os.Symlink(outside, nrc)
+	contains(t, h.fails("npm", "login", "--context", "test", "--name", "a", "--scope", "@acme"), "outside your home directory", "nothing was changed")
+
+	repo := filepath.Join(home, "dotfiles")
+	os.MkdirAll(filepath.Join(repo, ".git"), 0o700)
+	os.WriteFile(filepath.Join(repo, "npmrc"), nil, 0o600)
+	os.Remove(nrc)
+	os.Symlink(filepath.Join(repo, "npmrc"), nrc)
+	contains(t, h.fails("npm", "login", "--context", "test", "--name", "a", "--scope", "@acme"), "inside the git work tree", "nothing was changed")
+	if out := h.ok("npm", "token", "ls", "--context", "test"); strings.Contains(out, "a\t") || strings.Contains(out, "\na ") {
+		t.Fatalf("the server was asked:\n%s", out)
+	}
+	if b, _ := os.ReadFile(filepath.Join(repo, "npmrc")); len(b) != 0 {
+		t.Fatal("a token was written into the repository")
+	}
+
+	private := filepath.Join(home, "private", "npmrc")
+	os.MkdirAll(filepath.Dir(private), 0o700)
+	os.WriteFile(private, nil, 0o600)
+	os.Remove(nrc)
+	os.Symlink(private, nrc)
+	h.ok("npm", "login", "--context", "test", "--name", "a", "--scope", "@acme")
+	if fi, _ := os.Lstat(nrc); fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the link was replaced")
+	}
+	if npmrcGet(private, npmrcAuthKey(registryURL(h.srv.URL))) == "" {
+		t.Fatal("no token in the linked file")
+	}
+}
+
+// An unreadable lockfile fails the check only for a project that uses a private scope.
+func TestNPMCheckUnreadableLockfile(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", filepath.Join(dir, "home"))
+	reg := "https://deploy.example.com/npm/"
+	a := &app{cfg: &UserConfig{Contexts: map[string]*Context{}, NPM: &NPMConfig{Logins: []*NPMLogin{{Registry: reg, Name: "m", Token: "t", Scopes: []string{"@acme"}}}}}}
+	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"dependencies":{"left-pad":"^1"}}`), 0o644)
+	for _, lock := range []string{"", "garbage: true\n"} {
+		os.WriteFile(filepath.Join(dir, "yarn.lock"), []byte(lock), 0o644)
+		if res, err := a.npmCheck(context.Background(), dir); err != nil || res.Guarded {
+			t.Fatalf("%q: %+v %v", lock, res, err)
+		}
+	}
+	os.WriteFile(filepath.Join(dir, ".yarnrc.yml"), []byte("npmScopes:\n  acme:\n    npmRegistryServer: "+reg+"\n"), 0o644)
+	if _, err := a.npmCheck(context.Background(), dir); err == nil || !strings.Contains(err.Error(), "unknown yarn.lock format") {
+		t.Fatalf("mapped project: %v", err)
+	}
+	os.Remove(filepath.Join(dir, ".yarnrc.yml"))
+	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"dependencies":{"@acme/tool":"^1"}}`), 0o644)
+	if _, err := a.npmCheck(context.Background(), dir); err == nil {
+		t.Fatal("a private dependency passed with an unreadable lockfile")
+	}
+}

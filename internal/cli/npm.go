@@ -146,6 +146,11 @@ func writeHomeTokens(reg, token string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	for _, p := range []string{yrc, nrc} {
+		if err := checkTokenFileLocation(p); err != nil {
+			return nil, err
+		}
+	}
 	if err := yamlSet(yrc, token, true, "npmRegistries", reg, "npmAuthToken"); err != nil {
 		return nil, err
 	}
@@ -178,6 +183,11 @@ func (a *app) preflightTokenFiles(reg string) error {
 	if _, err := os.ReadFile(nrc); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("%w%s", err, nothing)
 	}
+	for _, p := range []string{yrc, nrc} {
+		if err := checkTokenFileLocation(p); err != nil {
+			return fmt.Errorf("%w%s", err, nothing)
+		}
+	}
 	for _, p := range []string{yrc, nrc, a.cfg.path} {
 		if err := checkWritable(p); err != nil {
 			return fmt.Errorf("%w%s", err, nothing)
@@ -187,6 +197,37 @@ func (a *app) preflightTokenFiles(reg string) error {
 		return fmt.Errorf("%w%s", err, nothing)
 	}
 	return nil
+}
+
+// checkTokenFileLocation refuses a home token file that is a symlink into a place a secret should
+// not go: outside the home directory, or inside a git work tree (a dotfiles repository is often
+// pushed or synced). A regular file, or a link to a private file in home, is fine.
+func checkTokenFileLocation(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return nil
+	}
+	target, err := resolveTarget(path)
+	if err != nil {
+		return err
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	home = canonPath(home)
+	how := "replace the link with a regular file (the token is the only line clowctl adds), or point yarn (YARN_RC_FILENAME) and npm (NPM_CONFIG_USERCONFIG) at a file that is not shared"
+	if rel, err := filepath.Rel(home, target); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("%s links to %s, outside your home directory: an npm token is not written there; %s", path, target, how)
+	}
+	for dir := filepath.Dir(target); ; dir = filepath.Dir(dir) {
+		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+			return fmt.Errorf("%s links to %s, inside the git work tree %s: an npm token there could be committed or pushed; %s", path, target, dir, how)
+		}
+		if filepath.Dir(dir) == dir {
+			return nil
+		}
+	}
 }
 
 // storeNewToken keeps a token the server has just issued: first in the clowctl config, then in
@@ -896,6 +937,7 @@ func (a *app) npmCheck(ctx context.Context, dir string) (npmCheckResult, error) 
 	}
 
 	var locked []lockedPackage
+	var lockErr error
 	lockDir, unsupported := "", ""
 	for _, f := range append(slices.Clone(lockfileNames), unsupportedLockfiles...) {
 		if p := findUp(dir, f, ""); p != "" && (lockDir == "" || len(filepath.Dir(p)) > len(lockDir)) {
@@ -908,10 +950,7 @@ func (a *app) npmCheck(ctx context.Context, dir string) (npmCheckResult, error) 
 		}
 	}
 	if lockDir != "" {
-		var err error
-		if locked, err = lockedPackages(lockDir); err != nil {
-			return res, err
-		}
+		locked, lockErr = lockedPackages(lockDir)
 	}
 	deps, err := manifestDeps(dir)
 	if err != nil {
@@ -931,6 +970,15 @@ func (a *app) npmCheck(ctx context.Context, dir string) (npmCheckResult, error) 
 		}
 	}
 	sort.Strings(names)
+	// A lockfile that cannot be read matters only to a project that uses a private scope: one
+	// whose package.json names one, or that maps a scope to a clowdr registry.
+	mapsClowdr := false
+	for _, reg := range mapped {
+		mapsClowdr = mapsClowdr || clowdr[reg]
+	}
+	if lockErr != nil && (len(names) > 0 || mapsClowdr) {
+		return res, lockErr
+	}
 	if len(names) == 0 {
 		return res, nil
 	}
