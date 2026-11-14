@@ -97,7 +97,8 @@ release() { # release TAG: deploy web with release.txt = TAG
 	cc deploy web --tag "$1"
 }
 
-setup() {
+# setup_docker: Docker 29+ with the containerd image store.
+setup_docker() {
 	step "docker 29+ with the containerd image store"
 	local major
 	major="$(docker version --format '{{.Server.Version}}' 2>/dev/null | cut -d. -f1 || true)"
@@ -118,15 +119,24 @@ setup() {
 		systemctl restart docker
 	fi
 	docker version --format 'docker {{.Server.Version}}'
+}
 
+# install_clowdrd [INSTALL_ARGS...]: install.sh with $CLOWDR_BINARY (or a fresh build); sets
+# ADMIN to the admin token.
+install_clowdrd() {
 	step "build and install"
 	BINARY="${CLOWDR_BINARY:-}"
 	if [ -z "$BINARY" ]; then
 		BINARY="$WORK/clowdrd"
 		(cd "$ROOT" && CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=e2e" -o "$BINARY" ./cmd/clowdr)
 	fi
-	sh "$ROOT/install.sh" --binary "$BINARY"
+	sh "$ROOT/install.sh" --binary "$BINARY" "$@"
 	ADMIN="$(cat /var/lib/clowdr/admin-token)"
+}
+
+setup() {
+	setup_docker
+	install_clowdrd
 	FP="$(cat /var/lib/clowdr/tls/fingerprint)"
 	clowctl context add e2e https://127.0.0.1:7443 --token "$ADMIN" --fingerprint "$FP"
 	clowctl --context e2e version

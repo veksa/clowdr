@@ -101,6 +101,24 @@ jobs:
           go test -c -o registry.test ./internal/registry
           sudo CLOWDR_CONTAINERD=/run/containerd/containerd.sock ./registry.test -test.run Containerd -test.v
 
+  # The npm registry on a real host: a domain with a Pebble certificate, real npm and yarn 4
+  # through nginx and TLS, the access matrix, no token in the logs (test/e2e/npm.sh).
+  e2e-npm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: lts/*
+      # Node 25+ no longer ships corepack, which yarn 4 comes through.
+      - run: npm install -g corepack && corepack enable
+      - run: CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=e2e" -o clowdrd ./cmd/clowdr
+      - run: sudo env "PATH=$PATH" CLOWDR_BINARY="$PWD/clowdrd" test/e2e/npm.sh
+
   # The release build, without publishing or signing: a broken .goreleaser.yaml shows up here,
   # not when a tag is pushed.
   release-snapshot:
