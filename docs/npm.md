@@ -53,7 +53,7 @@ A token carries scopes:
 | `npm:read:@acme/*` | installing every package of `@acme` |
 | `npm:read:@acme/tool` | installing one package |
 | `npm:publish:@acme/*` | publishing and moving dist-tags (and reading) in `@acme` |
-| `plugins:read` | reserved for a later feature; grants nothing yet |
+| `plugins:read` | the [Claude Code plugin marketplace](plugins.md) at `/plugins/`, listing the plugins of the packages the token may read; nothing alone |
 
 A token lives one year unless asked otherwise (`--expires 90d`). Names are unique: a name still
 on record cannot be reused until its token is revoked, or until 30 days after it expired, when the
@@ -162,7 +162,8 @@ refused unless:
 - `dist.integrity` (sha512) and `dist.shasum` match the bytes;
 - the tarball is gzip+tar, has no entry outside its folder and no two entries landing on the same
   path, and fits the unpack limit;
-- the version was never published before, including versions retention has deleted (409).
+- the version was never published before, including versions retention has deleted (409);
+- a package with `"claude-plugin": true` also passes the [plugin rules](plugins.md#publish-rules).
 
 Dist-tags move with `npm dist-tag` or `yarn npm tag`; `latest` can be moved but not removed.
 Unpublish answers 405.
@@ -198,8 +199,9 @@ clowctl npm audit --token laptop --action token     # token.create, token.rotate
 clowctl npm audit --action publish --limit 20
 ```
 
-Actions are `read`, `download`, `publish`, `tags`, `tag.set`, `tag.delete` and `token.*`;
-`--action token` matches all three token actions. Entries are kept for 90 days, at most 200 000.
+Actions are `read`, `download`, `publish`, `tags`, `tag.set`, `tag.delete`, `token.*` and, for the
+[plugin marketplace](plugins.md), `plugin.list` and `plugin.download`; `--action token` matches all
+three token actions, `--action plugin` both plugin ones. Entries are kept for 90 days, at most 200 000.
 Requests with a missing or wrong token are not recorded per request: after 20 failures in 10
 minutes an address (an IPv6 /64) gets 429 for 10 minutes, with a valid token too.
 
@@ -213,6 +215,8 @@ Under the state directory (`/var/lib/clowdr`):
 - `state.db`: tokens, packages, versions, dist-tags and the audit log, in buckets of their own.
   A 0.3.x binary opens the same database and ignores them.
 - `npm/tarballs/<sha512 hex>`: one file per distinct tarball, written atomically.
+- `npm/zips/<sha512 hex>.zip`: the zip of each [plugin](plugins.md) tarball, a cache built again
+  when missing.
 
 Back up both together; a tarball without its record is never served, a record without its
 tarball answers 404 on download.

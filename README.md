@@ -191,6 +191,25 @@ when the local npm token expires within 30 days.
 Tokens and scopes, CI tokens, retention, the audit log, storage and upgrading from 0.3.x:
 [docs/npm.md](docs/npm.md).
 
+## Claude Code plugins
+
+The registry doubles as a private Claude Code plugin marketplace: a package whose `package.json`
+says `"claude-plugin": true` and that holds `.claude-plugin/plugin.json` (named like the package
+without its scope, at the package's version) is listed in
+`https://deploy.example.com/plugins/marketplace.json` and served as a zip with its sha256. A token
+needs `plugins:read` and read rights on the package; it sees only what it may read.
+
+```sh
+clowctl npm login --scope plugins:read --scope @acme  # a token that may see @acme's plugins
+clowctl plugins setup                                  # the marketplace in ~/.claude/settings.json
+claude plugin install tool@clowdr-example-com
+clowctl plugins ls
+```
+
+`setup` stores no token in Claude Code's settings: Claude Code runs `clowctl plugins headers`,
+which prints the machine's npm token, on every fetch. Publish rules, the marketplace name, the zip
+format and access: [docs/plugins.md](docs/plugins.md).
+
 ## How a deploy works
 
 1. `build` and `docker build --platform linux/amd64` run on your machine.
@@ -222,7 +241,9 @@ comes from Pebble (Let's Encrypt's test CA) through clowdrd's own ACME flow, the
 yarn 4 over nginx and TLS (login, publish, re-publish, dist-tags, installs, audit, retention,
 rotation, revocation) and an access matrix with curl: no, garbage, expired, revoked, project
 and admin tokens, a token of another scope, `%2f`, dot segments, double encoding, guessed
-tarball URLs, the ACME path, the brute-force limit, and no token in any log.
+tarball URLs, the ACME path, the brute-force limit, and no token in any log. It then publishes a
+Claude Code plugin and checks its marketplace entry, the zip and its sha256, `clowctl plugins
+setup` with the headers helper it writes, and the 401 and 404 answers for under-scoped tokens.
 
 ### Local stand
 
