@@ -14,6 +14,7 @@ import (
 type UserConfig struct {
 	Current  string              `yaml:"current,omitempty"`
 	Contexts map[string]*Context `yaml:"contexts,omitempty"`
+	NPM      *NPMConfig          `yaml:"npm,omitempty"`
 
 	path string
 }

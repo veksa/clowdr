@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -32,6 +33,8 @@ type app struct {
 	deploy  *config.Deploy // nil outside a project directory
 	loadErr error
 	cfg     *UserConfig
+	// allowOutdated is deploy --allow-outdated: recorded in each release.
+	allowOutdated bool
 }
 
 // target is where a command goes.
@@ -51,7 +54,11 @@ func newRoot(a *app) *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-			return a.load()
+			if err := a.load(); err != nil {
+				return err
+			}
+			a.warnNPMExpiry(time.Now())
+			return nil
 		},
 	}
 	f := root.PersistentFlags()
@@ -65,6 +72,7 @@ func newRoot(a *app) *cobra.Command {
 		a.psCmd(), a.statusCmd(), a.routesCmd(), a.logsCmd(), a.accessCmd(), a.traceCmd(), a.metricsCmd(), a.sdkCmd(), a.eventsCmd(), a.scaleCmd(), a.execCmd(), a.profileCmd(), a.topCmd(), a.volumeCmd(), a.addonCmd(), a.gcCmd(),
 		a.restartCmd(), a.stopCmd(), a.startCmd(), a.rmCmd(), a.envCmd(),
 		a.contextCmd(), a.projectCmd(), a.tokenCmd(), a.platformCmd(), a.versionCmd(), a.selfUpdateCmd(),
+		a.npmCmd(),
 	)
 	return root
 }

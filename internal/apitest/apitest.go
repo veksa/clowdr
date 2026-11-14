@@ -55,6 +55,7 @@ func start(t testing.TB, tls bool) *Server {
 	if err != nil {
 		t.Fatal(err)
 	}
+	plat.NPM.Publish = true // clients' tests publish to the registry
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 	ls := &logs.Store{BufDir: filepath.Join(dir, "buf"), DataDir: filepath.Join(dir, "logs"), Log: log}
 	if err := ls.Open(); err != nil {

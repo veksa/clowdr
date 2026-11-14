@@ -48,6 +48,7 @@ func newHarness(t *testing.T) *harness {
 	t.Setenv("CLOWDR_CONFIG", filepath.Join(dir, "userconfig"))
 	t.Setenv("CLOWDR_TOKEN", "")
 	t.Setenv("CLOWDER_TOKEN", "")
+	t.Setenv("HOME", filepath.Join(dir, "home")) // ~/.yarnrc.yml and ~/.npmrc of npm login
 	wd, _ := os.Getwd()
 	t.Cleanup(func() { os.Chdir(wd) })
 	os.Chdir(dir)

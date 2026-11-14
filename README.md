@@ -163,6 +163,27 @@ every container sampled by clowdr. `clowctl metrics ls`, `clowctl metrics show <
 format and the Node API: [docs/metrics.md](docs/metrics.md). CPU profiles of a Node service:
 `clowctl profile <service> --seconds 30`, no endpoint needed.
 
+## npm packages
+
+The deploy host also serves a private npm registry at `https://deploy.example.com/npm/`, for
+scoped packages only. Every request needs an npm token; reads, publishes and token changes go to an
+audit log. Publishing is off until `npm: {publish: true}` in `platform.yml`; `keep` (3) and
+`grace` (14d) set how many versions retention keeps and how long a dropped one stays deprecated
+before it is deleted.
+
+```sh
+clowctl npm login --scope @acme                        # token for this machine -> ~/.yarnrc.yml, ~/.npmrc
+clowctl npm setup --scope @acme                        # map the scope in the project's .yarnrc.yml
+clowctl npm publish --tag latest                       # packs with the project's npm or yarn
+clowctl npm check                                      # locked versions current, every private scope mapped
+clowctl npm token ls | revoke <name> | rotate [--now]
+clowctl npm audit --package @acme/tool --since 24h
+```
+
+`clowctl deploy` runs `npm check` first in a project that uses a scope mapped to clowdr;
+`--allow-outdated` deploys anyway and marks the release in `clowctl releases`. Every command warns
+when the local npm token expires within 30 days.
+
 ## How a deploy works
 
 1. `build` and `docker build --platform linux/amd64` run on your machine.

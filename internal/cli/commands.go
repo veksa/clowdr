@@ -40,7 +40,11 @@ server's registry and deploy: the new version starts next to the old one, traffi
 when it is healthy, the old one is drained. Without arguments deploys every service in order.
 
 After a service is live its older local images are removed, keeping the deployed one and the
-one before it (the server keeps the same two), and the build cache is trimmed to --keep-cache.`,
+one before it (the server keeps the same two), and the build cache is trimmed to --keep-cache.
+
+A project that uses packages from a clowdr npm registry is checked first (clowctl npm check):
+a deprecated or removed locked version, or a private scope the project does not map to its
+registry, stops the deploy. --allow-outdated deploys anyway and is recorded in the release.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			d, err := a.needDeploy()
 			if err != nil {
@@ -56,6 +60,16 @@ one before it (the server keeps the same two), and the build cache is trimmed to
 			}
 			if image != "" && len(names) != 1 {
 				return errors.New("--image needs exactly one service")
+			}
+			if a.allowOutdated {
+				// Recorded in each release, on servers that know the field.
+				var v api.Version
+				if err := t.client.Do(cmd.Context(), "GET", "/v1/version", nil, &v); err == nil && !slices.Contains(v.Features, api.FeatureAllowOutdated) {
+					fmt.Fprintln(a.err, "! the server is too old to record --allow-outdated in the release history")
+					a.allowOutdated = false
+				}
+			} else if err := a.npmCheckDeploy(cmd.Context(), d); err != nil {
+				return err
 			}
 			if image == "" && slices.ContainsFunc(names, func(n string) bool { return usesDocker(d.Services[n]) }) {
 				if err := requireLocalDocker(cmd.Context()); err != nil {
@@ -99,6 +113,7 @@ one before it (the server keeps the same two), and the build cache is trimmed to
 	cmd.Flags().StringVar(&tag, "tag", "", "image tag (default: git commit)")
 	cmd.Flags().BoolVar(&noGC, "no-gc", false, "keep older local images and the build cache as they are")
 	cmd.Flags().StringVar(&keepCache, "keep-cache", "20GB", "build cache to keep after deploying (empty: do not touch)")
+	cmd.Flags().BoolVar(&a.allowOutdated, "allow-outdated", false, "skip the check of locked packages from clowdr registries (clowctl npm check); recorded in the release")
 	return cmd
 }
 
@@ -111,7 +126,7 @@ func (a *app) deployOne(ctx context.Context, d *config.Deploy, t *target, name s
 	var ref string
 	s := d.Services[name]
 	dir := filepath.Join(d.Dir, filepath.FromSlash(s.Path))
-	req := api.DeployRequest{Spec: sp, Author: gitAuthor()}
+	req := api.DeployRequest{Spec: sp, Author: gitAuthor(), AllowOutdated: a.allowOutdated}
 	start := time.Now()
 	switch {
 	case image != "":
@@ -233,6 +248,9 @@ func (a *app) releasesCmd() *cobra.Command {
 				status := string(r.Status)
 				if r.Rollback {
 					status += " (rollback)"
+				}
+				if r.AllowOutdated {
+					status += " (allow-outdated)"
 				}
 				fmt.Fprintf(w, "r%d\t%s\t%s\t%s\t%s\t%s\t%s\n", r.ID, r.Version, status, r.Author, ago(r.Created), dur, firstLine(r.Error))
 			}
