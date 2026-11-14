@@ -280,12 +280,16 @@ step "clowdrd restart reloads nginx when only nginx.conf changed"
 # 0.3 wrote it, restart clowdrd and expect the API through nginx again with no hand reload.
 api_through_nginx() { curl -fsS -o /dev/null -H "Authorization: Bearer $ADMIN" "$API/v1/version"; }
 api_refused() { [ "$(status "$ADMIN" "$API/v1/version")" = 404 ]; }
+cp /etc/clowdr/nginx/nginx.conf "$WORK/nginx.conf.good"
+# on any failure from here: the good nginx.conf back and loaded, so the diagnostics see a working host
+ON_EXIT+=('[ ! -f "$WORK/nginx.conf.good" ] || { cp "$WORK/nginx.conf.good" /etc/clowdr/nginx/nginx.conf && docker exec clowdr-nginx nginx -s reload -c /etc/clowdr/nginx/nginx.conf; }')
 sed -i '/X-Clowdr-Via deploy-host;/d' /etc/clowdr/nginx/nginx.conf
-docker exec clowdr-nginx nginx -s reload -c /etc/clowdr/nginx/nginx.conf
+docker exec clowdr-nginx nginx -s reload -c /etc/clowdr/nginx/nginx.conf || fail "hand reload failed"
 eventually api_refused || fail "the API answers through a deploy host without X-Clowdr-Via: the check below would prove nothing"
 systemctl restart clowdrd
 eventually api_through_nginx || fail "nginx still runs the old nginx.conf after clowdrd restarted"
 grep -q 'X-Clowdr-Via deploy-host;' /etc/clowdr/nginx/nginx.conf || fail "clowdrd did not rewrite nginx.conf"
+rm -f "$WORK/nginx.conf.good"
 
 step "no token in the logs"
 systemctl restart clowdrd # flushes the log store

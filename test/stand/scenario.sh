@@ -27,7 +27,16 @@ step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 fail() {
 	printf '\033[31mFAIL: %s\033[0m\n' "$*" >&2
 	journalctl -u clowdrd -n 60 --no-pager >&2 || true
+	restore_nginx_conf
 	exit 1
+}
+# restore_nginx_conf: puts back and loads the nginx.conf nginx_follows_main_conf saved, if any,
+# so a failed run leaves a working stand to look at.
+restore_nginx_conf() {
+	[ -f "$W/nginx.conf.good" ] || return 0
+	cp "$W/nginx.conf.good" /etc/clowdr/nginx/nginx.conf &&
+		docker exec clowdr-nginx nginx -s reload -c /etc/clowdr/nginx/nginx.conf >&2 || true
+	rm -f "$W/nginx.conf.good"
 }
 within() { # within SECONDS CMD...: retry once a second
 	local n=$1 i
@@ -123,12 +132,14 @@ api_refused() { [ "$(code "$ADMIN" "$API/v1/version")" = 404 ]; }
 nginx_follows_main_conf() {
 	local want
 	want="$(server_version)"
+	cp /etc/clowdr/nginx/nginx.conf "$W/nginx.conf.good"
 	sed -i '/X-Clowdr-Via deploy-host;/d' /etc/clowdr/nginx/nginx.conf
-	docker exec clowdr-nginx nginx -s reload -c /etc/clowdr/nginx/nginx.conf
+	docker exec clowdr-nginx nginx -s reload -c /etc/clowdr/nginx/nginx.conf || fail "hand reload failed"
 	within 10 api_refused || fail "the API answers through a deploy host without X-Clowdr-Via: the check proves nothing"
 	systemctl restart clowdrd
 	within 60 is_version "$want" || fail "nginx still runs the old nginx.conf after clowdrd restarted (no reload)"
 	grep -q 'X-Clowdr-Via deploy-host;' /etc/clowdr/nginx/nginx.conf || fail "clowdrd did not rewrite nginx.conf"
+	rm -f "$W/nginx.conf.good"
 }
 if [ -n "$NEW" ]; then
 	step "upgrade to $NEW"
