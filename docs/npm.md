@@ -161,7 +161,9 @@ refused unless:
   `package.json` all agree;
 - `dist.integrity` (sha512) and `dist.shasum` match the bytes;
 - the tarball is gzip+tar, has no entry outside its folder and no two entries landing on the same
-  path, and fits the unpack limit;
+  path, and fits the unpack limit, counted by the size each entry's header gives;
+- every entry is a file, a folder or a link: no sparse file (a few hundred bytes that unpack to
+  gigabytes) and no device or FIFO;
 - the version was never published before, including versions retention has deleted (409);
 - a package with `"claude-plugin": true` also passes the [plugin rules](plugins.md#publish-rules).
 

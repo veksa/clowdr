@@ -202,12 +202,14 @@ needs `plugins:read` and read rights on the package; it sees only what it may re
 ```sh
 clowctl npm login --scope plugins:read --scope @acme  # a token that may see @acme's plugins
 clowctl plugins setup                                  # the marketplace in ~/.claude/settings.json
+claude                                                 # start it once, so it adds the marketplace
 claude plugin install tool@clowdr-example-com
 clowctl plugins ls
 ```
 
 `setup` stores no token in Claude Code's settings: Claude Code runs `clowctl plugins headers`,
-which prints the machine's npm token, on every fetch. Publish rules, the marketplace name, the zip
+which prints the machine's npm token, on every fetch. A plugin name belongs to one package on the
+server, so no scope can replace another's plugin. Publish rules, the marketplace name, the zip
 format and access: [docs/plugins.md](docs/plugins.md).
 
 ## How a deploy works
