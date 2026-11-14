@@ -65,7 +65,7 @@ jobs:
           cmp README.md ../../internal/sdk/files/README.md || { echo "internal/sdk/files/README.md is stale: run sdk/node/pack.sh"; exit 1; }
           mkdir -p /tmp/pack/built /tmp/pack/embedded
           npm pack --pack-destination /tmp/pack >/dev/null
-          tar -xzf "/tmp/pack/clowdr-node-$v.tgz" -C /tmp/pack/built
+          tar -xzf "/tmp/pack/veksa-clowdr-node-$v.tgz" -C /tmp/pack/built
           tar -xzf "../../internal/sdk/files/clowdr-node-$v.tgz" -C /tmp/pack/embedded \
             || { echo "clowdr-node $v is not in internal/sdk/files: run sdk/node/pack.sh"; exit 1; }
           diff -r /tmp/pack/built /tmp/pack/embedded \

@@ -153,7 +153,7 @@ with model calls, outgoing HTTP, SQL and log lines in order.
 ```sh
 clowctl trace ls --since 2h --errors
 clowctl trace show <traceId>
-clowctl sdk install        # clowdr-node, served by the server itself, into vendor/clowdr
+clowctl sdk install        # clowdr-node, served by the server itself, into vendor/clowdr (or from npm: @veksa/clowdr-node)
 ```
 
 Record format, the Node package and how to wire a service: [docs/tracing.md](docs/tracing.md).

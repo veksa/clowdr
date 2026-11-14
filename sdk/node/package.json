@@ -1,8 +1,14 @@
 {
-  "name": "clowdr-node",
-  "version": "0.4.0",
+  "name": "@veksa/clowdr-node",
+  "version": "0.5.0",
   "description": "Traces for services deployed with clowdr: records written to stdout, read with `clowctl trace`.",
   "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/veksa/clowdr.git",
+    "directory": "sdk/node"
+  },
+  "homepage": "https://github.com/veksa/clowdr/blob/main/docs/tracing.md",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
@@ -20,5 +26,8 @@
   "devDependencies": {
     "@types/node": "^22.0.0",
     "typescript": "^5.6.0"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

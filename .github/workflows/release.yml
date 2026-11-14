@@ -1,3 +1,10 @@
+# A v* tag releases clowdr (goreleaser: binaries, signed checksums) and the Node SDK:
+#   npm  @veksa/clowdr-node — the version in sdk/node/package.json, when npm does not have it yet (the SDK
+#        has its own version; most clowdr releases leave it unchanged and this job skips). The tarball is the
+#        same one clowdrd embeds (CI checks internal/sdk/files against the sources). npm gets it staged, not
+#        published: a maintainer approves it with 2FA (`npm stage list @veksa/clowdr-node`, then
+#        `npm stage approve <id>`). Needs the NPM_TOKEN secret: a granular token with "Read and write (stage
+#        only)" on @veksa.
 name: release
 
 on:
@@ -32,3 +39,45 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  npm:
+    needs: goreleaser
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: sdk/node
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Skip a version npm already has
+        id: version
+        run: |
+          v=$(node -p "require('./package.json').version")
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if npm view "@veksa/clowdr-node@$v" version >/dev/null 2>&1; then
+            echo "@veksa/clowdr-node $v is on npm already"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.version.outputs.publish == 'true'
+        run: npm ci --no-audit --no-fund
+      - if: steps.version.outputs.publish == 'true'
+        run: npm run build && npm test
+      # The README is the docs, as pack.sh builds it for the embedded tarball.
+      - if: steps.version.outputs.publish == 'true'
+        run: cat ../../docs/tracing.md ../../docs/metrics.md > README.md
+      # `npm stage` needs npm 11.15 or later; Node 22 comes with npm 10.
+      - if: steps.version.outputs.publish == 'true'
+        run: npm install --global npm@11
+      # A pre-release (1.2.0-beta.1) goes to the `next` dist-tag.
+      - if: steps.version.outputs.publish == 'true'
+        run: npm stage publish --provenance --access public --tag ${{ contains(steps.version.outputs.version, '-') && 'next' || 'latest' }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

@@ -117,6 +117,13 @@ clowctl sdk install          # from the directory with deploy.yml
 
 It downloads `clowdr-node-<version>.tgz` from your server into `vendor/clowdr/` (commit it) and
 adds `"clowdr-node": "file:…"` to the `package.json` of every service with a `path` that has one.
+
+The same package is on npm as `@veksa/clowdr-node` (0.5.0 and later). Installed under the old name, the
+imports below stay as they are:
+
+```json
+"dependencies": { "clowdr-node": "npm:@veksa/clowdr-node@^0.5.0" }
+```
 `clowctl sdk update` moves to the server's newest version. Without clowctl:
 `curl -O https://<server>/sdk/node/clowdr-node-<version>.tgz` (the index is `/sdk/node/`).
 
