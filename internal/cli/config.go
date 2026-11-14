@@ -65,7 +65,8 @@ func (c *UserConfig) Save() error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(c.path, b, 0o600)
+	// The file holds admin and npm tokens: always 0600, also when an older clowctl left it 0644.
+	return writeFileAtomic(c.path, b, 0o600)
 }
 
 // byServer finds a context for a server URL (to reuse its token and fingerprint).
