@@ -234,16 +234,19 @@ func integrityMatches(sri string, sum []byte) bool {
 	return found
 }
 
-// checkTarball looks at every package.json at the top directory of the tarball ("package/"
-// for npm): all of them must name the published package and version, so a second entry
-// cannot override the first on extraction.
+// checkTarball reads the tarball the way npm's extractor (node-tar with strip: 1) lays it out:
+// each entry name is normalised (backslashes as separators, empty and "." parts dropped, the
+// first directory stripped) and an entry with ".." is refused. Exactly one entry may become
+// package.json, it must name the published package and version, and no two entries may land
+// on the same path, so nothing extracted later can replace what was checked.
 func checkTarball(data []byte, name, version string) error {
 	gz, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return errors.New("the tarball is not gzip")
 	}
 	tr := tar.NewReader(io.LimitReader(gz, maxUnpacked))
-	found := false
+	seen := map[string]bool{}
+	found := 0
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -252,11 +255,24 @@ func checkTarball(data []byte, name, version string) error {
 		if err != nil {
 			return errors.New("the tarball is not a valid tar archive")
 		}
-		p := strings.TrimPrefix(hdr.Name, "./")
-		dir, file, ok := strings.Cut(p, "/")
-		if !ok || dir == "" || file != "package.json" {
+		rel, err := extractedPath(hdr.Name)
+		if err != nil {
+			return err
+		}
+		if rel == "" {
+			continue // the top directory itself, or an entry strip: 1 drops
+		}
+		if hdr.Typeflag == tar.TypeDir {
 			continue
 		}
+		if seen[rel] {
+			return fmt.Errorf("the tarball has %s twice", rel)
+		}
+		seen[rel] = true
+		if rel != "package.json" {
+			continue
+		}
+		found++
 		if hdr.Typeflag != tar.TypeReg {
 			return errors.New("package.json in the tarball is not a regular file")
 		}
@@ -274,12 +290,30 @@ func checkTarball(data []byte, name, version string) error {
 		if pj.Name != name || pj.Version != version {
 			return fmt.Errorf("package.json in the tarball is %s@%s, the document says %s@%s", pj.Name, pj.Version, name, version)
 		}
-		found = true
 	}
-	if !found {
-		return errors.New("the tarball has no package.json")
+	if found != 1 {
+		return errors.New("the tarball must hold exactly one package.json at its top")
 	}
 	return nil
+}
+
+// extractedPath is where an entry lands after extraction with strip: 1, "" when it lands
+// nowhere.
+func extractedPath(name string) (string, error) {
+	var parts []string
+	for _, p := range strings.Split(strings.ReplaceAll(name, "\\", "/"), "/") {
+		switch p {
+		case "", ".":
+		case "..":
+			return "", fmt.Errorf("the tarball has an entry outside its directory: %q", name)
+		default:
+			parts = append(parts, p)
+		}
+	}
+	if len(parts) < 2 {
+		return "", nil
+	}
+	return strings.Join(parts[1:], "/"), nil
 }
 
 // writeTarball stores data under its sha512, atomically: a temp file in the same directory,

