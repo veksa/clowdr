@@ -835,3 +835,37 @@ func TestTarballPaths(t *testing.T) {
 	data := tgz(t, name, ver, "package//package.json", other)
 	mustStatus(t, e.do("PUT", "/npm/@acme%2ftool", pub, publishDoc(name, ver, data, pubOpts{})), 400)
 }
+
+// A token that rotates itself keeps its expiry: only an admin can give a token more time.
+func TestSelfRotationKeepsExpiry(t *testing.T) {
+	e := newEnv(t)
+	tok, info, err := e.h.CreateToken("short", []string{"npm:read:@acme/*"}, 48*time.Hour, Actor{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		e.advance(40 * time.Hour)
+		r := e.do("POST", "/npm/-/clowdr/token/rotate", tok, nil)
+		if r.status != 200 {
+			if i == 0 {
+				t.Fatalf("first rotation: %d %s", r.status, r.body)
+			}
+			break // expired: the chain ended
+		}
+		var tr TokenResponse
+		json.Unmarshal(r.body, &tr)
+		if !tr.Info.Expires.Equal(info.Expires) {
+			t.Fatalf("self-rotation moved the expiry from %v to %v", info.Expires, tr.Info.Expires)
+		}
+		tok = tr.Token
+	}
+	mustStatus(t, e.do("GET", "/npm/-/whoami", tok, nil), 401)
+	// An admin rotation renews the lifetime.
+	e2 := newEnv(t)
+	_, info, _ = e2.h.CreateToken("short", []string{"npm:read:@acme/*"}, 48*time.Hour, Actor{})
+	e2.advance(40 * time.Hour)
+	_, nt, err := e2.h.RotateToken("short", false, Actor{By: "admin:x"})
+	if err != nil || !nt.Expires.Equal(e2.now.Add(48*time.Hour)) {
+		t.Fatalf("admin rotation: %v %v", nt.Expires, err)
+	}
+}

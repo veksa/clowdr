@@ -110,14 +110,17 @@ func (h *Handler) RevokeToken(name string, a Actor) error {
 
 // RotateToken replaces the current token of the name (see rotate).
 func (h *Handler) RotateToken(name string, immediate bool, a Actor) (string, store.NPMToken, error) {
-	return h.rotate(func(t store.NPMToken) bool { return t.Name == name && t.ReplacedBy == "" }, immediate, a)
+	return h.rotate(func(t store.NPMToken) bool { return t.Name == name && t.ReplacedBy == "" }, immediate, true, a)
 }
 
-// rotate issues a new token with the old one's name, scopes and lifetime. The old token keeps
+// rotate issues a new token with the old one's name and scopes. With extend (an admin's
+// rotation) it gets the old one's lifetime again from now; without (a token rotating itself)
+// it expires when the old one would have, so a token cannot keep itself alive forever without
+// an admin. The old token keeps
 // working for auth.NPMRotateGrace (its Expires is cut to then, never extended), or stops at
 // once when immediate is set. A token that was rotated already cannot be rotated again: the
 // holder of the old secret must not be able to mint a second successor.
-func (h *Handler) rotate(match func(store.NPMToken) bool, immediate bool, a Actor) (string, store.NPMToken, error) {
+func (h *Handler) rotate(match func(store.NPMToken) bool, immediate, extend bool, a Actor) (string, store.NPMToken, error) {
 	now := h.now()
 	var secret string
 	var nt, old store.NPMToken
@@ -137,6 +140,11 @@ func (h *Handler) rotate(match func(store.NPMToken) bool, immediate bool, a Acto
 		}
 		secret, nt = auth.NewNPM(old.Name, old.Scopes, now, old.Expires.Sub(old.Created), h.Store.TokenIDTaken)
 		nt.RotatedFrom = old.ID
+		if !extend {
+			// Same lifetime window: Created keeps marking its start, so a later admin
+			// rotation still renews the token's full lifetime.
+			nt.Created, nt.Expires = old.Created, old.Expires
+		}
 		if immediate {
 			return []store.NPMToken{nt}, []string{old.ID}, nil
 		}
@@ -183,7 +191,7 @@ func (c *call) rotateSelf() {
 		}
 	}
 	id := c.tok.ID
-	secret, nt, err := c.h.rotate(func(t store.NPMToken) bool { return t.ID == id }, req.Now, Actor{By: "self", Addr: c.addr})
+	secret, nt, err := c.h.rotate(func(t store.NPMToken) bool { return t.ID == id }, req.Now, false, Actor{By: "self", Addr: c.addr})
 	switch {
 	case errors.Is(err, ErrTokenRotated):
 		writeErr(c.w, http.StatusConflict, "this token was rotated already; use the new one")
