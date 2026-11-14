@@ -273,6 +273,20 @@ FROM=()
 [ "$(status "$READER" "$DOC")" = 200 ] || fail "the limit of another address blocked this one"
 echo "  ok  brute force: the address is blocked after its failures, others are not"
 
+step "clowdrd restart reloads nginx when only nginx.conf changed"
+# An upgrade that changes nginx.conf but no project file (0.3 → 0.4 on a host without direct-TLS
+# domains) left nginx on the old config until a hand reload; with project files changing too,
+# their reload hid it. Put nginx on a deploy-host location without the X-Clowdr-Via header, as
+# 0.3 wrote it, restart clowdrd and expect the API through nginx again with no hand reload.
+api_through_nginx() { curl -fsS -o /dev/null -H "Authorization: Bearer $ADMIN" "$API/v1/version"; }
+api_refused() { [ "$(status "$ADMIN" "$API/v1/version")" = 404 ]; }
+sed -i '/X-Clowdr-Via deploy-host;/d' /etc/clowdr/nginx/nginx.conf
+docker exec clowdr-nginx nginx -s reload -c /etc/clowdr/nginx/nginx.conf
+eventually api_refused || fail "the API answers through a deploy host without X-Clowdr-Via: the check below would prove nothing"
+systemctl restart clowdrd
+eventually api_through_nginx || fail "nginx still runs the old nginx.conf after clowdrd restarted"
+grep -q 'X-Clowdr-Via deploy-host;' /etc/clowdr/nginx/nginx.conf || fail "clowdrd did not rewrite nginx.conf"
+
 step "no token in the logs"
 systemctl restart clowdrd # flushes the log store
 eventually curl -fsS -o /dev/null -H "Authorization: Bearer $ADMIN" "$API/v1/version"

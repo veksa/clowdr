@@ -13,7 +13,8 @@ SRC=/src
 
 OLD="${STAND_OLD_VERSION:-v0.3.1}"
 # STAND_NEW_VERSION=v0.4.0 upgrades to that release with install.sh (download, signature check)
-# instead of a build of the working tree.
+# instead of a build of the working tree. v0.4.0 itself fails nginx_follows_main_conf: it needs
+# a hand reload of nginx after the upgrade.
 NEW="${STAND_NEW_VERSION:-}"
 BASE=127-0-0-1.sslip.io
 API="https://deploy.$BASE"
@@ -62,7 +63,10 @@ npm_block() {
 	sed -i '/^npm:/,/^  publish:/d' /etc/clowdr/platform.yml
 	[ "$1" = off ] || printf 'npm:\n  publish: true\n' >>/etc/clowdr/platform.yml
 }
-install_and_wait() { # install_and_wait VERSION INSTALL_ARGS... (VERSION as /v1/version says it: 0.3.1)
+# install_and_wait VERSION INSTALL_ARGS... (VERSION as /v1/version says it: 0.3.1). The version
+# is read through nginx on the deploy host, so this also checks that nginx passes the API to
+# the new daemon; see nginx_follows_main_conf for what it cannot see.
+install_and_wait() {
 	local want=$1
 	shift
 	sh "$SRC/install.sh" --domain "$BASE" "$@" >/dev/null
@@ -109,6 +113,23 @@ upgrade() {
 		install_and_wait stand-dev --binary "$W/clowdrd"
 	fi
 }
+# nginx_follows_main_conf: the upgrade from $OLD reloads nginx anyway, because the project file
+# of a direct-TLS domain changes too; a host whose projects render the same (no direct-TLS
+# domains) gets nginx.conf changed alone, and 0.4.0 left nginx running the old one, so the API
+# answered 404 through nginx until a hand reload. Put nginx on the deploy-host location of a
+# release before 0.4.0 (no X-Clowdr-Via header), restart clowdrd and expect the API through
+# nginx again with nothing else reloading it.
+api_refused() { [ "$(code "$ADMIN" "$API/v1/version")" = 404 ]; }
+nginx_follows_main_conf() {
+	local want
+	want="$(server_version)"
+	sed -i '/X-Clowdr-Via deploy-host;/d' /etc/clowdr/nginx/nginx.conf
+	docker exec clowdr-nginx nginx -s reload -c /etc/clowdr/nginx/nginx.conf
+	within 10 api_refused || fail "the API answers through a deploy host without X-Clowdr-Via: the check proves nothing"
+	systemctl restart clowdrd
+	within 60 is_version "$want" || fail "nginx still runs the old nginx.conf after clowdrd restarted (no reload)"
+	grep -q 'X-Clowdr-Via deploy-host;' /etc/clowdr/nginx/nginx.conf || fail "clowdrd did not rewrite nginx.conf"
+}
 if [ -n "$NEW" ]; then
 	step "upgrade to $NEW"
 else
@@ -116,6 +137,8 @@ else
 	(cd "$SRC" && CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags "-X main.version=stand-dev" -o "$W/clowdrd" ./cmd/clowdr)
 fi
 upgrade
+step "the API through nginx after clowdrd restarts on a changed nginx.conf alone"
+nginx_follows_main_conf
 served v2 || fail "v2 is not served after the upgrade"
 [ "$(cc releases web -o json | jq length)" = "$RELEASES_BEFORE" ] || fail "releases lost in the upgrade"
 [ "$(admin token ls -o json | jq -r '.[].name' | sort | tr '\n' ' ')" = "$TOKENS_BEFORE" ] || fail "tokens changed in the upgrade"
@@ -203,6 +226,7 @@ release v6
 
 step "upgrade again"
 upgrade
+nginx_follows_main_conf
 served v6 || fail "v6 is not served after the second upgrade"
 [ "$(code "$TOKEN" "$REG-/whoami")" = 200 ] || fail "the npm token did not survive the rollback"
 # $OLD rewrote the history with its v6 deploy: its own fields only, so the v5 mark is gone.
