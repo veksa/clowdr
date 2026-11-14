@@ -255,7 +255,9 @@ plugin_served() {
 	curl -fsS -H "Authorization: $PLUGIN_AUTH" -o "$P/greeter.zip" "$(jq -r '.plugins[0].source.url' "$1")" || fail "the plugin zip"
 	[ "$(sha256sum <"$P/greeter.zip" | cut -d' ' -f1)" = "$(jq -r '.plugins[0].source.sha256' "$1")" ] ||
 		fail "the zip's sha256 differs from marketplace.json"
-	unzip -Z1 "$P/greeter.zip" | grep -qx '.claude-plugin/plugin.json' || fail "plugin.json is not at the top of the zip"
+	# no unzip on the stand host; python3 is there
+	python3 -c 'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$P/greeter.zip" |
+		grep -qx '.claude-plugin/plugin.json' || fail "plugin.json is not at the top of the zip"
 }
 if $NEW_HAS_PLUGINS; then
 	step "a claude code plugin"
@@ -291,7 +293,12 @@ if ! $OLD_HAS_NPM; then npm_block off; fi
 install_and_wait "${OLD#v}" --version "$OLD"
 served v5 || fail "v5 is not served after the rollback"
 [ "$(cc releases web -o json | jq length)" -ge 5 ] || fail "releases lost in the rollback"
-release v6
+if $OLD_HAS_NPM; then
+	# clowctl is $OLD's now, and from 0.4 on it checks the deprecated version locked above
+	release v6 --allow-outdated
+else
+	release v6
+fi
 if $OLD_HAS_NPM; then
 	[ "$(code "$TOKEN" "$REG-/whoami")" = 200 ] || fail "$OLD stopped serving npm"
 	if $NEW_HAS_PLUGINS; then
