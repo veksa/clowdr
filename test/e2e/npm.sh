@@ -3,11 +3,11 @@
 # throwaway VM; it installs clowdrd system-wide, takes ports 80, 443, 14000 and 15000 and adds
 # deploy.clowdr.test to /etc/hosts): install.sh with a domain, the deploy host's certificate
 # from Pebble through clowdrd's own ACME flow, then real npm and yarn 4 through nginx and TLS,
-# and the access matrix with curl.
+# the access matrix with curl, and the Claude Code plugin marketplace built from the registry.
 #
 #   sudo CLOWDR_BINARY=./clowdrd test/e2e/npm.sh
 #
-# Needs node (LTS) with npm and corepack, jq, zstd.
+# Needs node (LTS) with npm and corepack, jq, zstd, unzip.
 set -euo pipefail
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -24,7 +24,7 @@ export HOME="$WORK/home"
 mkdir -p "$HOME"
 TOKENS=() # every token handed out, for the log check
 
-for c in node npm corepack zstdcat ip; do command -v "$c" >/dev/null || fail "$c is required"; done
+for c in node npm corepack zstdcat ip unzip sha256sum; do command -v "$c" >/dev/null || fail "$c is required"; done
 grep -q " $HOST\$" /etc/hosts || echo "127.0.0.1 $HOST" >>/etc/hosts
 
 admin() { clowctl --context npm "$@"; }
@@ -190,6 +190,75 @@ admin npm token revoke e2e-machine
 [ "$(status "$CURRENT" "$REG-/whoami")" = 401 ] || fail "a revoked token still works"
 [ "$(status "$LOGIN" "$REG-/whoami")" = 401 ] || fail "revoking did not stop the token in its grace period"
 
+step "claude code plugin marketplace"
+PLUG_PUB="$(token_of plugin-publisher 30d 'npm:publish:@e2e/*')"
+PLUG="$(token_of plugin-reader 30d 'npm:read:@e2e/*' plugins:read)"
+NO_PLUG="$(token_of no-plugins 30d 'npm:read:@e2e/*')"
+ONLY_PLUG="$(token_of plugins-only 30d plugins:read)"
+TOKENS+=("$PLUG_PUB" "$PLUG" "$NO_PLUG" "$ONLY_PLUG")
+MARKET="$API/plugins/marketplace.json"
+mkdir -p "$WORK/plugin/.claude-plugin" "$WORK/plugin/commands" "$WORK/plugin/hooks" && cd "$WORK/plugin"
+cat >package.json <<EOF
+{"name": "@e2e/greeter", "version": "1.0.0", "claude-plugin": true,
+ "files": [".claude-plugin", "commands", "hooks"], "publishConfig": {"registry": "$REG"}}
+EOF
+echo '{"name": "greeter", "version": "1.0.0", "description": "Greets"}' >.claude-plugin/plugin.json
+printf -- '---\ndescription: Say hello\n---\nSay hello.\n' >commands/hello.md
+printf '#!/bin/sh\necho hi\n' >hooks/run.sh
+chmod +x hooks/run.sh
+# Claude Code updates by the plugin.json version: a package version it does not match is refused
+set_version 1.0.1
+if npm publish "--//$HOST/npm/:_authToken=$PLUG_PUB" >"$WORK/plugin-out" 2>&1; then fail "a plugin whose plugin.json version differs was published"; fi
+grep -q "must be equal" "$WORK/plugin-out" || fail "plugin version refusal: $(cat "$WORK/plugin-out")"
+set_version 1.0.0
+npm publish "--//$HOST/npm/:_authToken=$PLUG_PUB" --loglevel=warn
+
+[ "$(status "$PLUG" "$MARKET")" = 200 ] || fail "marketplace: $(head -c 300 "$WORK/body")"
+cp "$WORK/body" "$WORK/marketplace.json"
+jq -e --arg u "$API/plugins/@e2e/greeter/1.0.0.zip" '.name == "clowdr-clowdr-test" and .owner.name == "clowdr.test" and
+	(.plugins | length) == 1 and .plugins[0].name == "greeter" and .plugins[0].version == "1.0.0" and
+	.plugins[0].source.source == "archive" and .plugins[0].source.url == $u' "$WORK/marketplace.json" >/dev/null ||
+	fail "marketplace.json: $(cat "$WORK/marketplace.json")"
+ZIP="$(jq -r '.plugins[0].source.url' "$WORK/marketplace.json")"
+[ "$(status "$PLUG" "$ZIP")" = 200 ] || fail "zip: $(head -c 300 "$WORK/body")"
+[ "$(sha256sum <"$WORK/body" | cut -d' ' -f1)" = "$(jq -r '.plugins[0].source.sha256' "$WORK/marketplace.json")" ] ||
+	fail "the zip's sha256 differs from marketplace.json"
+mv "$WORK/body" "$WORK/greeter.zip"
+unzip -Z1 "$WORK/greeter.zip" | grep -qx '.claude-plugin/plugin.json' || fail "plugin.json is not at the top of the zip: $(unzip -Z1 "$WORK/greeter.zip")"
+unzip -Z "$WORK/greeter.zip" hooks/run.sh | grep -q '^-rwxr-xr-x' || fail "the hook lost its execute bit"
+{ [ "$(status "$ONLY_PLUG" "$MARKET")" = 200 ] && jq -e '.plugins == []' "$WORK/body" >/dev/null; } ||
+	fail "a token that reads no package must get an empty marketplace: $(head -c 300 "$WORK/body")"
+if command -v claude >/dev/null; then
+	# offline only: Claude Code refuses archive URLs on loopback, so it checks the file, not an install
+	claude plugin validate "$WORK/marketplace.json" || fail "claude plugin validate"
+fi
+
+# the same answers through clowctl and the headers helper it writes for Claude Code
+admin npm login --scope plugins:read --scope @e2e --name e2e-plugins
+TOKENS+=("$(home_token)")
+admin plugins ls | grep -q '^greeter@clowdr-clowdr-test  *1\.0\.0' || fail "clowctl plugins ls: $(admin plugins ls 2>&1)"
+admin plugins setup
+SETTINGS="$HOME/.claude/settings.json"
+jq -e --arg u "$MARKET" '.extraKnownMarketplaces["clowdr-clowdr-test"] | .autoUpdate == true and .source.source == "url" and .source.url == $u' \
+	"$SETTINGS" >/dev/null || fail "settings.json: $(cat "$SETTINGS")"
+HELPER="$(jq -r '.extraKnownMarketplaces["clowdr-clowdr-test"].source.headersHelper' "$SETTINGS")"
+AUTH="$(cd "$HOME/.claude" && sh -c "$HELPER" | jq -r .Authorization)"
+[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: $AUTH" "$ZIP")" = 200 ] || fail "the headers helper's token cannot download the zip"
+echo "  ok  marketplace, zip and sha256 through nginx; clowctl plugins setup and its headers helper"
+
+# refusals: a token without plugins:read, or without rights on the package, gets the 404 of a
+# package that does not exist; no token or another kind of token gets 401
+MISSING_ZIP="$API/plugins/@e2e/nope/1.0.0.zip"
+denied "npm token without plugins:read: marketplace" "$NO_PLUG" "$MARKET" 404
+same_as_missing "npm token without plugins:read: zip" "$NO_PLUG" "$ZIP" "$MISSING_ZIP"
+same_as_missing "plugins:read without package rights: zip" "$ONLY_PLUG" "$ZIP" "$MISSING_ZIP"
+same_as_missing "a version that does not exist" "$PLUG" "$API/plugins/@e2e/greeter/9.9.9.zip" "$MISSING_ZIP"
+for target in "$MARKET" "$ZIP"; do
+	denied "no token" "" "$target" 401
+	denied "admin token" "$ADMIN" "$target" 401
+	[ "$(head -c2 "$WORK/body")" != PK ] || fail "a refused request got a zip"
+done
+
 step "access matrix over nginx and TLS"
 READER="$(token_of reader 30d 'npm:read:@e2e/*')"
 OTHER_PUB="$(token_of other-publisher 30d 'npm:publish:@other/*')"
@@ -296,6 +365,7 @@ systemctl restart clowdrd # flushes the log store
 eventually curl -fsS -o /dev/null -H "Authorization: Bearer $ADMIN" "$API/v1/version"
 zstdcat /var/lib/clowdr/logs/_platform/nginx/_/*.zst >"$WORK/access.log"
 grep -q '"/npm/' "$WORK/access.log" || fail "the access log has no /npm/ requests: the check below would prove nothing"
+grep -q '"/plugins/' "$WORK/access.log" || fail "the access log has no /plugins/ requests: the check below would prove nothing"
 journalctl -u clowdrd --no-pager >"$WORK/journal.log"
 docker logs clowdr-nginx >"$WORK/nginx.log" 2>&1
 find /var/lib/clowdr/logs -name '*.zst' -exec zstdcat {} + >"$WORK/stored.log"
