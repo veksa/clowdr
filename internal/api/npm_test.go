@@ -257,8 +257,21 @@ func TestPluginsThroughAPI(t *testing.T) {
 			t.Errorf("a non-npm token: %d", st)
 		}
 	}
-	if st, _, _ := e.raw(t, "GET", "/plugins/../v1/projects", reader.Token, nil); st == 200 {
-		t.Fatal("path traversal out of /plugins/ reached the API")
+	// A path that climbs out of /plugins/ is cleaned by the router into a redirect, never
+	// served as a plugin route; followed, it reaches the API, which does not take npm tokens.
+	req, _ := http.NewRequest("GET", e.srv.URL+"/plugins/../v1/projects", nil)
+	req.Header.Set("Authorization", "Bearer "+reader.Token)
+	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	res, err := noFollow.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res.Body.Close()
+	if res.StatusCode != http.StatusTemporaryRedirect || res.Header.Get("Location") != "/v1/projects" {
+		t.Fatalf("/plugins/../v1/projects: %d %q", res.StatusCode, res.Header.Get("Location"))
+	}
+	if st, _, _ := e.raw(t, "GET", "/plugins/../v1/projects", reader.Token, nil); st != http.StatusUnauthorized {
+		t.Fatalf("/plugins/../v1/projects followed: %d, want 401", st)
 	}
 	if strings.Contains(e.logs.String(), reader.Token) {
 		t.Fatal("an npm token is in the server log")

@@ -81,11 +81,10 @@ func TestFromDeployHost(t *testing.T) {
 // npm registry and the plugin marketplace need nothing of their own; and nothing logs headers.
 func TestDeployHostPassesEveryPath(t *testing.T) {
 	main := RenderMain(Options{DeployHost: "deploy.example.com", HasCert: func(string) bool { return true }})
-	i := strings.Index(main, "listen 443 ssl;")
-	if i < 0 {
-		t.Fatal("no TLS server for the deploy host")
+	tls := tlsServer(main, "deploy.example.com")
+	if tls == "" {
+		t.Fatalf("no TLS server for the deploy host:\n%s", main)
 	}
-	tls := main[i:]
 	if strings.Count(tls, "location ") != 1 || !strings.Contains(tls, "location / {") || !strings.Contains(tls, "proxy_pass http://unix:"+APISocket) {
 		t.Fatalf("the deploy host must pass every path through one location:\n%s", tls)
 	}
@@ -96,5 +95,39 @@ func TestDeployHostPassesEveryPath(t *testing.T) {
 		if strings.Contains(main, h) {
 			t.Errorf("nginx.conf logs or uses %s", h)
 		}
+	}
+}
+
+// tlsServer is the body of the server block that listens on 443 for host, matched by braces, or
+// "" if there is none: other TLS servers in the same file do not count.
+func tlsServer(conf, host string) string {
+	for i := 0; ; {
+		j := strings.Index(conf[i:], "server {")
+		if j < 0 {
+			return ""
+		}
+		start := i + j
+		depth, end := 0, -1
+		for k := start; k < len(conf); k++ {
+			switch conf[k] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+			}
+			if depth == 0 && conf[k] == '}' {
+				end = k + 1
+				break
+			}
+		}
+		if end < 0 {
+			return ""
+		}
+		block := conf[start:end]
+		if strings.Contains(block, "listen 443 ssl;") && strings.Contains(block, "server_name "+host+";") &&
+			strings.Count(block, "server {") == 1 {
+			return block
+		}
+		i = start + len("server {")
 	}
 }
