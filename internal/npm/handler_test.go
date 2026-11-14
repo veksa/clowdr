@@ -10,6 +10,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -209,6 +210,7 @@ func noise(n int) string {
 func (l *limiter) reset() {
 	l.mu.Lock()
 	l.m = nil
+	l.order.Init()
 	l.mu.Unlock()
 }
 
@@ -768,5 +770,35 @@ func TestAuditLog(t *testing.T) {
 	e.h.Sweep(t.Context())
 	if es, _ := e.h.Audit(AuditFilter{Package: "@acme/tool"}); len(es) != 0 {
 		t.Fatalf("old audit entries kept: %d", len(es))
+	}
+}
+
+// The limiter stays bounded and fast under a flood of distinct addresses, and counts an IPv6
+// host's whole /64 as one address.
+func TestLimiterBounded(t *testing.T) {
+	var l limiter
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	start := time.Now()
+	for i := 0; i < 60_000; i++ {
+		l.fail(fmt.Sprintf("2001:db8:%x:%x::1", i>>16, i&0xffff), now)
+	}
+	if n := len(l.m); n > limiterCap || l.order.Len() != n {
+		t.Fatalf("%d entries tracked, %d in order", n, l.order.Len())
+	}
+	if d := time.Since(start); d > 5*time.Second {
+		t.Fatalf("60k failures took %v", d)
+	}
+	for i := 0; i < failMax; i++ {
+		l.fail(fmt.Sprintf("2001:db8:ffff:1::%x", i+1), now) // one /64, many addresses
+	}
+	if !l.blocked("2001:db8:ffff:1::abcd", now) || l.blocked("2001:db8:ffff:2::1", now) {
+		t.Fatal("IPv6 must count per /64")
+	}
+	if !l.blocked("2001:db8:ffff:1::abcd", now.Add(failWindow)) || l.blocked("2001:db8:ffff:1::abcd", now.Add(failWindow+time.Second)) {
+		t.Fatal("window")
+	}
+	l.prune(now.Add(failWindow + time.Second))
+	if len(l.m) != 0 || l.order.Len() != 0 {
+		t.Fatalf("prune left %d", len(l.m))
 	}
 }

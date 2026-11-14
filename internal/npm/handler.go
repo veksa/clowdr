@@ -8,6 +8,7 @@
 package npm
 
 import (
+	"container/list"
 	"encoding/json"
 	"errors"
 	"io"
@@ -541,13 +542,17 @@ func (h *Handler) record(e store.NPMAudit) {
 }
 
 // limiter counts failed authentications per client address: after failMax failures within
-// failWindow the address gets 429 until the window ends, even with a valid token.
+// failWindow the address gets 429 until the window ends, even with a valid token. IPv6
+// addresses count per /64, which one host usually holds whole. At most limiterCap addresses
+// are tracked; the one whose window started first makes room, so every operation is O(1).
 type limiter struct {
-	mu sync.Mutex
-	m  map[string]*failures
+	mu    sync.Mutex
+	m     map[string]*list.Element // of *failures
+	order list.List                // oldest window at the back
 }
 
 type failures struct {
+	key   string
 	n     int
 	since time.Time
 }
@@ -555,17 +560,29 @@ type failures struct {
 const (
 	failMax    = 20
 	failWindow = 10 * time.Minute
+	limiterCap = 4096
 )
+
+// limitKey is the address, or its /64 for IPv6.
+func limitKey(addr string) string {
+	ip := net.ParseIP(addr)
+	if ip == nil || ip.To4() != nil {
+		return addr
+	}
+	return ip.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
 
 func (l *limiter) blocked(addr string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	f := l.m[addr]
-	if f == nil {
+	e := l.m[limitKey(addr)]
+	if e == nil {
 		return false
 	}
+	f := e.Value.(*failures)
 	if now.Sub(f.since) > failWindow {
-		delete(l.m, addr)
+		l.order.Remove(e)
+		delete(l.m, f.key)
 		return false
 	}
 	return f.n >= failMax
@@ -575,30 +592,38 @@ func (l *limiter) fail(addr string, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.m == nil {
-		l.m = map[string]*failures{}
+		l.m = map[string]*list.Element{}
 	}
-	f := l.m[addr]
-	if f == nil || now.Sub(f.since) > failWindow {
-		if len(l.m) >= 10_000 {
-			l.pruneLocked(now)
+	key := limitKey(addr)
+	e := l.m[key]
+	if e != nil && now.Sub(e.Value.(*failures).since) > failWindow {
+		l.order.Remove(e)
+		delete(l.m, key)
+		e = nil
+	}
+	if e == nil {
+		for len(l.m) >= limiterCap {
+			old := l.order.Back()
+			l.order.Remove(old)
+			delete(l.m, old.Value.(*failures).key)
 		}
-		f = &failures{since: now}
-		l.m[addr] = f
+		e = l.order.PushFront(&failures{key: key, since: now})
+		l.m[key] = e
 	}
-	f.n++
+	e.Value.(*failures).n++
 }
 
+// prune drops expired entries, from the oldest until the first live one.
 func (l *limiter) prune(now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.pruneLocked(now)
-}
-
-func (l *limiter) pruneLocked(now time.Time) {
-	for a, f := range l.m {
-		if now.Sub(f.since) > failWindow {
-			delete(l.m, a)
+	for e := l.order.Back(); e != nil; e = l.order.Back() {
+		f := e.Value.(*failures)
+		if now.Sub(f.since) <= failWindow {
+			break
 		}
+		l.order.Remove(e)
+		delete(l.m, f.key)
 	}
 }
 
