@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -36,8 +37,77 @@ const helperMax = 500
 // Replaced in tests.
 var (
 	executable = os.Executable
+	argv0      = func() string { return os.Args[0] }
+	lookPath   = exec.LookPath
+	tempDir    = os.TempDir
 	helperOS   = runtime.GOOS
 )
+
+// helperPath is the path of this clowctl for Claude Code to run: the path it was started by (as
+// typed, or found on PATH) when that is this very file, so a link such as Homebrew's bin/clowctl
+// survives an upgrade; else the file itself. It refuses a name that would start the server and
+// a temporary build, and warns about a path an upgrade removes.
+func helperPath() (path, warn string, err error) {
+	exe, err := executable()
+	if err != nil {
+		return "", "", fmt.Errorf("cannot tell where clowctl is: %w", err)
+	}
+	if exe, err = filepath.Abs(exe); err != nil {
+		return "", "", err
+	}
+	path = exe
+	if a := argv0(); a != "" {
+		cand, err := a, error(nil)
+		switch {
+		case filepath.IsAbs(a):
+		case strings.ContainsAny(a, `/\`):
+			cand, err = filepath.Abs(a)
+		default:
+			if cand, err = lookPath(a); err == nil {
+				cand, err = filepath.Abs(cand)
+			}
+		}
+		if err == nil && sameFile(cand, exe) {
+			path = filepath.Clean(cand)
+		}
+	}
+	base := strings.ToLower(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+	if strings.HasPrefix(base, "clowdrd") {
+		return "", "", fmt.Errorf("%s: the helper would run under a name that starts the server (clowdrd); run setup as clowctl, through a link or copy named clowctl", path)
+	}
+	slash := filepath.ToSlash(path)
+	if strings.Contains(slash, "/go-build") || within(path, tempDir()) {
+		return "", "", fmt.Errorf("%s is a temporary build, gone after it exits; install clowctl and run setup with the installed one", path)
+	}
+	if strings.Contains(slash, "/Cellar/") {
+		warn = path + " is inside a Homebrew version folder, which an upgrade removes: run setup again after brew upgrade, or run it as the linked clowctl (`$(brew --prefix)/bin/clowctl plugins setup`)"
+	}
+	return path, warn, nil
+}
+
+func sameFile(a, b string) bool {
+	fa, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	fb, err := os.Stat(b)
+	return err == nil && os.SameFile(fa, fb)
+}
+
+// within reports whether path is dir or inside it, comparing resolved paths where they exist.
+func within(path, dir string) bool {
+	if dir == "" {
+		return false
+	}
+	if r, err := filepath.EvalSymlinks(dir); err == nil {
+		dir = r
+	}
+	if r, err := filepath.EvalSymlinks(path); err == nil {
+		path = r
+	}
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
 
 func (a *app) pluginsCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "plugins", Short: "Claude Code plugin marketplace: set it up in Claude Code, list what it offers"}
@@ -124,12 +194,12 @@ a symlink into a git work tree. Running it again changes nothing when nothing ch
 			if err != nil {
 				return err
 			}
-			exe, err := executable()
+			exe, warn, err := helperPath()
 			if err != nil {
-				return fmt.Errorf("cannot tell where clowctl is: %w", err)
-			}
-			if exe, err = filepath.Abs(exe); err != nil {
 				return err
+			}
+			if warn != "" {
+				fmt.Fprintf(a.err, "! %s\n", warn)
 			}
 			helper, err := headersHelperCommand(exe, l.Registry, helperOS)
 			if err != nil {
@@ -139,27 +209,37 @@ a symlink into a git work tree. Running it again changes nothing when nothing ch
 			if err != nil {
 				return err
 			}
-			changed, others, err := setMarketplace(path, m.Name, marketplaceURL(l.Registry), helper)
+			changed, mm, err := setMarketplace(path, m.Name, marketplaceURL(l.Registry), helper)
 			if err != nil {
 				return err
+			}
+			if mm.replaced != "" {
+				fmt.Fprintf(a.err, "! the entry %s in %s was %s; it is replaced by this server's marketplace\n", m.Name, path, mm.replaced)
 			}
 			if changed {
 				fmt.Fprintf(a.err, "✓ marketplace %s added to %s\n", m.Name, path)
 			} else {
 				fmt.Fprintf(a.err, "✓ marketplace %s is already set up in %s\n", m.Name, path)
 			}
-			for _, o := range others {
+			for _, o := range mm.others {
 				fmt.Fprintf(a.err, "! %s also lists this server as marketplace %q: remove that entry (claude plugin marketplace remove %s)\n", path, o, o)
 			}
 			if len(m.Plugins) == 0 {
 				fmt.Fprintf(a.err, "  the token %s may read no plugin yet\n", l.Name)
 			}
-			fmt.Fprintf(a.err, "  next: claude plugin marketplace update %s\n", m.Name)
 			plugin := "<plugin>"
 			if len(m.Plugins) > 0 {
 				plugin = m.Plugins[0].Name
 			}
+			fmt.Fprintf(a.err, "  next: start claude once, which adds the marketplace (in a running session: /plugin marketplace update %s)\n", m.Name)
 			fmt.Fprintf(a.err, "        claude plugin install %s@%s\n", plugin, m.Name)
+			if mm.manual {
+				fmt.Fprintf(a.err, "  autoUpdate is false for %s in %s and stays so: new versions come only with\n", m.Name, path)
+			} else {
+				fmt.Fprintf(a.err, "  new versions install by themselves (autoUpdate); by hand:\n")
+			}
+			fmt.Fprintf(a.err, "        claude plugin marketplace update %s, then claude plugin update %s@%s\n", m.Name, plugin, m.Name)
+			fmt.Fprintf(a.err, "  (claude plugin marketplace add with the URL is refused for a marketplace set up in settings)\n")
 			for _, p := range m.Plugins {
 				fmt.Fprintf(a.err, "  %s@%s %s\n", p.Name, m.Name, p.Version)
 			}
@@ -249,28 +329,25 @@ func claudeSettingsPath() (string, error) {
 
 var (
 	shSafe   = regexp.MustCompile(`^[A-Za-z0-9_@%+=:,./-]+$`)
-	cmdSafe  = regexp.MustCompile(`^[A-Za-z0-9_:./\\-]+$`)
 	urlChars = regexp.MustCompile(`^[A-Za-z0-9:/._\[\]-]+$`)
 )
 
 // headersHelperCommand is the command Claude Code runs for the headers: the absolute path of
 // this clowctl, quoted for the shell that runs it (sh, or cmd.exe on Windows), then the
-// arguments. On Windows only the path is quoted, so the line has at most two quote characters,
-// which cmd.exe keeps as they are. Claude Code takes at most 500 printable ASCII characters.
+// arguments. On Windows the path is always in double quotes, with forward slashes, and nothing
+// else is quoted: two quote characters, which cmd.exe keeps as they are, and inside them only
+// '%' and '!' (variable expansion) and '"' mean anything, so those are refused. Claude Code takes
+// at most 500 printable ASCII characters.
 func headersHelperCommand(exe, reg, goos string) (string, error) {
 	if !urlChars.MatchString(reg) {
 		return "", fmt.Errorf("registry %q: unexpected characters for a command line", reg)
 	}
 	var cmd string
 	if goos == "windows" {
-		if strings.Contains(exe, `"`) {
-			return "", fmt.Errorf("%s: a path with a quote cannot be run by cmd.exe", exe)
+		if strings.ContainsAny(exe, `"%!`) {
+			return "", fmt.Errorf("%s: cmd.exe reads %%, ! and \" in a path as its own; install clowctl under a path without them", exe)
 		}
-		q := exe
-		if !cmdSafe.MatchString(exe) {
-			q = `"` + exe + `"`
-		}
-		cmd = q + " plugins headers --registry " + reg
+		cmd = `"` + strings.ReplaceAll(exe, `\`, "/") + `" plugins headers --registry ` + reg
 	} else {
 		cmd = shQuote(exe) + " plugins headers --registry " + shQuote(reg)
 	}
@@ -299,54 +376,61 @@ type urlSource struct {
 	HeadersHelper string `json:"headersHelper"`
 }
 
+// marketMerge is what setMarketplace found in the file besides what it set.
+type marketMerge struct {
+	others   []string // other entries with this marketplace's URL
+	replaced string   // what the entry of this name was, when it was another marketplace
+	manual   bool     // the entry says "autoUpdate": false, which is kept
+}
+
 // setMarketplace writes extraKnownMarketplaces.<name> into a Claude Code settings file: source
-// and autoUpdate are set, every other key (of the file and of the entry) is kept in its place.
-// It returns whether the file changed and the names of other entries with the same URL.
-func setMarketplace(path, name, marketURL, helper string) (bool, []string, error) {
+// is set, and autoUpdate unless it is false already; every other key (of the file and of the
+// entry) is kept in its place. It returns whether the file changed.
+func setMarketplace(path, name, marketURL, helper string) (bool, marketMerge, error) {
 	if err := checkLinkedFile(path, "a settings file", "replace the link with a regular file, or set CLAUDE_CONFIG_DIR to a folder that is not shared"); err != nil {
-		return false, nil, err
+		return false, marketMerge{}, err
 	}
 	target, err := resolveTarget(path)
 	if err != nil {
-		return false, nil, err
+		return false, marketMerge{}, err
 	}
 	mode := os.FileMode(0o644)
 	old, err := os.ReadFile(target)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 	case err != nil:
-		return false, nil, err
+		return false, marketMerge{}, err
 	default:
 		if fi, err := os.Stat(target); err == nil {
 			mode = fi.Mode().Perm()
 		}
 	}
-	out, others, err := mergeMarketplace(old, name, marketURL, helper)
+	out, mm, err := mergeMarketplace(old, name, marketURL, helper)
 	if err != nil {
-		return false, nil, fmt.Errorf("%s: %w", path, err)
+		return false, marketMerge{}, fmt.Errorf("%s: %w", path, err)
 	}
 	if bytes.Equal(out, old) {
-		return false, others, nil
+		return false, mm, nil
 	}
 	if err := writeFileAtomic(path, out, mode); err != nil {
-		return false, nil, err
+		return false, marketMerge{}, err
 	}
-	return true, others, nil
+	return true, mm, nil
 }
 
 // mergeMarketplace is setMarketplace on the file's bytes. The result is indented with two spaces.
-func mergeMarketplace(old []byte, name, marketURL, helper string) ([]byte, []string, error) {
+func mergeMarketplace(old []byte, name, marketURL, helper string) ([]byte, marketMerge, error) {
+	var mm marketMerge
 	root, err := parseObject(old)
 	if err != nil {
-		return nil, nil, err
+		return nil, mm, err
 	}
 	markets := &object{}
 	if raw, ok := root.get("extraKnownMarketplaces"); ok {
 		if markets, err = parseObject(raw); err != nil {
-			return nil, nil, fmt.Errorf("extraKnownMarketplaces: %w", err)
+			return nil, mm, fmt.Errorf("extraKnownMarketplaces: %w", err)
 		}
 	}
-	var others []string
 	for _, k := range markets.keys {
 		if k == name {
 			continue
@@ -357,36 +441,70 @@ func mergeMarketplace(old []byte, name, marketURL, helper string) ([]byte, []str
 			} `json:"source"`
 		}
 		if json.Unmarshal(markets.vals[k], &e) == nil && e.Source.URL == marketURL {
-			others = append(others, k)
+			mm.others = append(mm.others, k)
 		}
 	}
 	entry := &object{}
 	if raw, ok := markets.get(name); ok {
-		if e, err := parseObject(raw); err == nil {
+		e, err := parseObject(raw)
+		if err != nil {
+			mm.replaced = "not an object (" + clip(string(raw)) + ")"
+		} else {
 			entry = e
+			var cur struct {
+				Source struct {
+					Source string `json:"source"`
+					URL    string `json:"url"`
+					Repo   string `json:"repo"`
+				} `json:"source"`
+			}
+			json.Unmarshal(raw, &cur)
+			switch src := cur.Source; {
+			case src.URL == marketURL:
+			case src.URL != "":
+				mm.replaced = "the marketplace at " + clip(src.URL)
+			case src.Repo != "":
+				mm.replaced = "the " + clip(src.Source) + " marketplace " + clip(src.Repo)
+			default:
+				mm.replaced = "another marketplace (" + clip(string(raw)) + ")"
+			}
+			if v, ok := e.get("autoUpdate"); ok && string(bytes.TrimSpace(v)) == "false" {
+				mm.manual = true
+			}
 		}
 	}
 	src, err := encodeJSON(urlSource{Source: "url", URL: marketURL, HeadersHelper: helper})
 	if err != nil {
-		return nil, nil, err
+		return nil, mm, err
 	}
 	entry.set("source", src)
-	entry.set("autoUpdate", json.RawMessage("true"))
+	if !mm.manual {
+		entry.set("autoUpdate", json.RawMessage("true"))
+	}
 	markets.set(name, entry.encode())
 	root.set("extraKnownMarketplaces", markets.encode())
 	var buf bytes.Buffer
 	if err := json.Indent(&buf, root.encode(), "", "  "); err != nil {
-		return nil, nil, err
+		return nil, mm, err
 	}
 	buf.WriteByte('\n')
 	// Unchanged content keeps the file as it was, whatever its formatting.
 	if len(bytes.TrimSpace(old)) > 0 {
 		var a, b bytes.Buffer
 		if json.Compact(&a, old) == nil && json.Compact(&b, buf.Bytes()) == nil && bytes.Equal(a.Bytes(), b.Bytes()) {
-			return old, others, nil
+			return old, mm, nil
 		}
 	}
-	return buf.Bytes(), others, nil
+	return buf.Bytes(), mm, nil
+}
+
+// clip shortens s for a message.
+func clip(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 80 {
+		return s[:77] + "..."
+	}
+	return s
 }
 
 func encodeJSON(v any) (json.RawMessage, error) {

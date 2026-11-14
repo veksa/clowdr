@@ -23,15 +23,15 @@ func TestHeadersHelperCommand(t *testing.T) {
 		{"/usr/local/bin/clowctl", "linux", "/usr/local/bin/clowctl plugins headers --registry https://deploy.example.com/npm/"},
 		{"/Users/a b/bin/clowctl", "darwin", "'/Users/a b/bin/clowctl' plugins headers --registry https://deploy.example.com/npm/"},
 		{"/home/o'neil/clowctl", "linux", `'/home/o'\''neil/clowctl' plugins headers --registry https://deploy.example.com/npm/`},
-		{`C:\tools\clowctl.exe`, "windows", `C:\tools\clowctl.exe plugins headers --registry https://deploy.example.com/npm/`},
-		{`C:\Program Files\clowdr\clowctl.exe`, "windows", `"C:\Program Files\clowdr\clowctl.exe" plugins headers --registry https://deploy.example.com/npm/`},
-		{`C:\a&b\clowctl.exe`, "windows", `"C:\a&b\clowctl.exe" plugins headers --registry https://deploy.example.com/npm/`},
+		{`C:\tools\clowctl.exe`, "windows", `"C:/tools/clowctl.exe" plugins headers --registry https://deploy.example.com/npm/`},
+		{`C:\Program Files\clowdr\clowctl.exe`, "windows", `"C:/Program Files/clowdr/clowctl.exe" plugins headers --registry https://deploy.example.com/npm/`},
+		{`C:\a&b (x86)^\clowctl.exe`, "windows", `"C:/a&b (x86)^/clowctl.exe" plugins headers --registry https://deploy.example.com/npm/`},
 	} {
 		got, err := headersHelperCommand(c.exe, reg, c.goos)
 		if err != nil || got != c.want {
 			t.Errorf("%s on %s: %q %v, want %q", c.exe, c.goos, got, err, c.want)
 		}
-		if c.goos == "windows" && strings.Count(got, `"`) > 2 {
+		if c.goos == "windows" && strings.Count(got, `"`) != 2 {
 			t.Errorf("%s: more than two quotes for cmd.exe", got)
 		}
 	}
@@ -40,6 +40,9 @@ func TestHeadersHelperCommand(t *testing.T) {
 		{"/home/zoë/clowctl", "linux"},
 		{"/home/a\nb/clowctl", "linux"},
 		{`C:\a"b\clowctl.exe`, "windows"},
+		{`C:\100%\clowctl.exe`, "windows"},
+		{`C:\%PATH%\clowctl.exe`, "windows"},
+		{`C:\wow!\clowctl.exe`, "windows"},
 	} {
 		if got, err := headersHelperCommand(bad.exe, reg, bad.goos); err == nil {
 			t.Errorf("%q accepted: %q", bad.exe, got)
@@ -47,6 +50,55 @@ func TestHeadersHelperCommand(t *testing.T) {
 	}
 	if _, err := headersHelperCommand("/bin/clowctl", "https://x.example/npm/;rm -rf", "linux"); err == nil {
 		t.Error("a registry URL with shell characters was accepted")
+	}
+}
+
+func TestHelperPath(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "Cellar", "clowdr", "0.5.0", "bin", "clowctl")
+	link := filepath.Join(dir, "bin", "clowctl")
+	daemonLink := filepath.Join(dir, "bin", "clowdrd")
+	other := filepath.Join(dir, "bin", "other")
+	for _, p := range []string{real, other} {
+		os.MkdirAll(filepath.Dir(p), 0o755)
+		os.WriteFile(p, []byte("x"), 0o755)
+	}
+	needSymlinks(t)
+	os.Symlink(real, link)
+	os.Symlink(real, daemonLink)
+	oldExe, oldArg, oldLook, oldTemp := executable, argv0, lookPath, tempDir
+	t.Cleanup(func() { executable, argv0, lookPath, tempDir = oldExe, oldArg, oldLook, oldTemp })
+	tempDir = func() string { return filepath.Join(dir, "tmp") } // t.TempDir is under the real one
+	executable = func() (string, error) { return real, nil }
+	lookPath = func(string) (string, error) { return link, nil }
+
+	for _, c := range []struct {
+		what, arg0, want, warn string
+	}{
+		{"started by a link: the link stays across upgrades", link, link, ""},
+		{"found on PATH", "clowctl", link, ""},
+		{"started by the file itself", real, real, "Homebrew version folder"},
+		{"argv[0] is another file", other, real, "Homebrew version folder"},
+		{"no argv[0]", "", real, "Homebrew version folder"},
+	} {
+		argv0 = func() string { return c.arg0 }
+		got, warn, err := helperPath()
+		if err != nil || got != c.want || !strings.Contains(warn, c.warn) || (c.warn == "" && warn != "") {
+			t.Errorf("%s: %q %q %v, want %q", c.what, got, warn, err, c.want)
+		}
+	}
+	// A daemon name would start the server when Claude Code runs the helper.
+	executable = func() (string, error) { return daemonLink, nil }
+	argv0 = func() string { return "" }
+	if _, _, err := helperPath(); err == nil || !strings.Contains(err.Error(), "clowdrd") {
+		t.Errorf("clowdrd: %v", err)
+	}
+	// go run and go test builds live in temp folders.
+	for _, p := range []string{filepath.Join(dir, "tmp", "x", "clowctl"), "/private/var/go-build123/b001/exe/clowctl"} {
+		executable = func() (string, error) { return p, nil }
+		if _, _, err := helperPath(); err == nil || !strings.Contains(err.Error(), "temporary build") {
+			t.Errorf("%s: %v", p, err)
+		}
 	}
 }
 
@@ -63,12 +115,12 @@ func TestMergeMarketplace(t *testing.T) {
     },
     "enabledPlugins": {"x@team": true}
 }`
-	out, others, err := mergeMarketplace([]byte(orig), "clowdr-example-com", url, helper)
+	out, mm, err := mergeMarketplace([]byte(orig), "clowdr-example-com", url, helper)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(others) != 1 || others[0] != "old-name" {
-		t.Fatalf("others: %v", others)
+	if len(mm.others) != 1 || mm.others[0] != "old-name" || mm.replaced != "the marketplace at https://old.example/x.json" || mm.manual {
+		t.Fatalf("merge: %+v", mm)
 	}
 	s := string(out)
 	// Keys stay in their places, values are kept, HTML characters are not escaped.
@@ -110,6 +162,22 @@ func TestMergeMarketplace(t *testing.T) {
 		out, _, err := mergeMarketplace([]byte(empty), "m", url, helper)
 		if err != nil || !strings.HasPrefix(string(out), "{\n  \"extraKnownMarketplaces\": {\n    \"m\": {") {
 			t.Fatalf("%q: %s %v", empty, out, err)
+		}
+	}
+	// autoUpdate: false is the user's choice and stays; an entry that is not an object is
+	// replaced, and said so.
+	manual := `{"extraKnownMarketplaces": {"m": {"source": {"source": "url", "url": "` + url + `"}, "autoUpdate": false}}}`
+	out, mm, err = mergeMarketplace([]byte(manual), "m", url, helper)
+	if err != nil || !mm.manual || mm.replaced != "" || !strings.Contains(string(out), `"autoUpdate": false`) || strings.Contains(string(out), `"autoUpdate": true`) {
+		t.Fatalf("autoUpdate false: %+v %s %v", mm, out, err)
+	}
+	for raw, want := range map[string]string{
+		`"x"`: `not an object ("x")`,
+		`{"source": {"source": "github", "repo": "acme/plugins"}}`: "the github marketplace acme/plugins",
+	} {
+		out, mm, err := mergeMarketplace([]byte(`{"extraKnownMarketplaces": {"m": `+raw+`}}`), "m", url, helper)
+		if err != nil || mm.replaced != want || !strings.Contains(string(out), `"autoUpdate": true`) {
+			t.Errorf("%s: %+v %v", raw, mm, err)
 		}
 	}
 	for _, bad := range []string{"[]", "{", `{"a":1} {}`, `{"extraKnownMarketplaces": []}`, "// comment\n{}"} {
@@ -202,9 +270,10 @@ func TestPluginsWorkflow(t *testing.T) {
 		return pluginTarball(t, string(b), "hello", "1.2.0"), nil
 	}
 	t.Cleanup(func() { packTarball = old })
-	oldExe := executable
+	oldExe, oldArg := executable, argv0
 	executable = func() (string, error) { return "/opt/clowdr tools/clowctl", nil }
-	t.Cleanup(func() { executable = oldExe })
+	argv0 = func() string { return "clowctl" }
+	t.Cleanup(func() { executable, argv0 = oldExe, oldArg })
 	oldOS := helperOS
 	helperOS = "linux"
 	t.Cleanup(func() { helperOS = oldOS })
@@ -230,7 +299,9 @@ func TestPluginsWorkflow(t *testing.T) {
 	contains(t, out, "hello@clowdr-127-0-0-1", "1.2.0", "Says hello")
 
 	errOut := h.ok("plugins", "setup", "--context", "test")
-	contains(t, errOut, "marketplace clowdr-127-0-0-1 added to", "claude plugin marketplace update clowdr-127-0-0-1", "claude plugin install hello@clowdr-127-0-0-1")
+	contains(t, errOut, "marketplace clowdr-127-0-0-1 added to", "start claude once", "/plugin marketplace update clowdr-127-0-0-1",
+		"claude plugin install hello@clowdr-127-0-0-1", "claude plugin marketplace update clowdr-127-0-0-1, then claude plugin update hello@clowdr-127-0-0-1",
+		"marketplace add with the URL is refused")
 	settings := filepath.Join(home, ".claude", "settings.json")
 	b, err := os.ReadFile(settings)
 	if err != nil {
