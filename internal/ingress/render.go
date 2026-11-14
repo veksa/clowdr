@@ -481,7 +481,10 @@ http {
 func acmeIndent(b *strings.Builder) { acmeBlock(b, "        ") }
 
 // renderDeployHost serves the API and registry: no body limit, no request buffering, so
-// `docker push` streams layers straight to clowdrd.
+// `docker push` streams layers straight to clowdrd. One location passes every path, so /v1/,
+// /v2/, /npm/ and /plugins/ reach clowdrd the same way, all marked with ViaHeader. The access log
+// format has no request headers, so the Authorization header of a registry client never lands
+// in it.
 func renderDeployHost(b *strings.Builder, o Options) {
 	d := o.DeployHost
 	fmt.Fprintf(b, "\n    server {\n        listen 80;\n        server_name %s;\n", d)

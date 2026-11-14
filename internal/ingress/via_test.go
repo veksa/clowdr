@@ -67,11 +67,34 @@ func TestFromDeployHost(t *testing.T) {
 		"/.well-known/acme-challenge/a/b":                     false,
 		"/.well-known/acme-challenge/..%2F..%2Fv1%2Fprojects": false,
 		"/npm/x/..%2F..%2F.well-known/acme-challenge/t":       false,
+		"/plugins/x/..%2F..%2F.well-known/acme-challenge/t":   false,
 		"/.well-known/acme-challenge/%2e%2e":                  false,
 	} {
 		r := httptest.NewRequest("GET", "http://h"+path, nil)
 		if IsACMEChallenge(r) != ok {
 			t.Errorf("%s: %v", path, !ok)
+		}
+	}
+}
+
+// The deploy host's TLS server passes every path to clowdrd through one marked location, so the
+// npm registry and the plugin marketplace need nothing of their own; and nothing logs headers.
+func TestDeployHostPassesEveryPath(t *testing.T) {
+	main := RenderMain(Options{DeployHost: "deploy.example.com", HasCert: func(string) bool { return true }})
+	i := strings.Index(main, "listen 443 ssl;")
+	if i < 0 {
+		t.Fatal("no TLS server for the deploy host")
+	}
+	tls := main[i:]
+	if strings.Count(tls, "location ") != 1 || !strings.Contains(tls, "location / {") || !strings.Contains(tls, "proxy_pass http://unix:"+APISocket) {
+		t.Fatalf("the deploy host must pass every path through one location:\n%s", tls)
+	}
+	if !strings.Contains(tls, "client_max_body_size 0;") {
+		t.Error("the deploy host must not cap bodies (registry pushes and publishes have their own limits)")
+	}
+	for _, h := range []string{"$http_authorization", "$http_cookie"} {
+		if strings.Contains(main, h) {
+			t.Errorf("nginx.conf logs or uses %s", h)
 		}
 	}
 }
