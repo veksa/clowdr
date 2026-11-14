@@ -41,6 +41,10 @@ type Handler struct {
 	Now func() time.Time
 
 	limiter limiter
+	// slots bounds publishes that read and check a body at once: each holds the body, the
+	// decoded tarball and a gzip reader in memory.
+	slotsOnce sync.Once
+	slots     chan struct{}
 	// mu serialises publishes, tag changes and the sweep: one version check and write at a time.
 	mu sync.Mutex
 }

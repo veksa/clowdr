@@ -825,7 +825,7 @@ func TestTarballPaths(t *testing.T) {
 		{[]string{"package/../package.json", other}, false},
 		{[]string{"package/x/../../etc", "x"}, false},
 	} {
-		err := checkTarball(tgz(t, name, ver, c.extra...), name, ver)
+		err := checkTarball(tgz(t, name, ver, c.extra...), name, ver, 1<<20)
 		if (err == nil) != c.ok {
 			t.Errorf("%q: %v", c.extra, err)
 		}
@@ -909,5 +909,49 @@ func TestExpiredTokensSwept(t *testing.T) {
 	}
 	if _, _, err := e.h.CreateToken("laptop", []string{"plugins:read"}, 0, Actor{}); err != nil {
 		t.Fatalf("name not freed: %v", err)
+	}
+}
+
+// A tarball that inflates far beyond what was sent is refused once it passes 4 × max_publish.
+func TestGzipBombRefused(t *testing.T) {
+	e := newEnv(t) // max_publish is 1 MiB
+	pub := e.token("ci", "npm:publish:@acme/*")
+	data := tgz(t, "@acme/tool", "1.0.0", "package/zeros", strings.Repeat("\x00", 5<<20))
+	if len(data) > 1<<20 {
+		t.Fatalf("test tarball is %d bytes", len(data))
+	}
+	r := e.do("PUT", "/npm/@acme%2ftool", pub, publishDoc("@acme/tool", "1.0.0", data, pubOpts{}))
+	mustStatus(t, r, 400)
+	if !strings.Contains(string(r.body), "unpacks to more than") {
+		t.Fatalf("%s", r.body)
+	}
+	if got := unpackLimit(1 << 30); got != 512<<20 {
+		t.Fatalf("cap: %d", got)
+	}
+}
+
+// Only a few publishes read and check their bodies at once; the next one waits for a slot.
+func TestPublishSlots(t *testing.T) {
+	e := newEnv(t)
+	pub := e.token("ci", "npm:publish:@acme/*")
+	slots := e.h.publishSlots()
+	for i := 0; i < cap(slots); i++ {
+		slots <- struct{}{}
+	}
+	done := make(chan int, 1)
+	go func() { done <- e.publish(pub, "@acme/tool", "1.0.0").status }()
+	select {
+	case st := <-done:
+		t.Fatalf("publish ran without a slot: %d", st)
+	case <-time.After(300 * time.Millisecond):
+	}
+	<-slots
+	select {
+	case st := <-done:
+		if st != 201 {
+			t.Fatalf("publish after a slot freed: %d", st)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("publish never got the freed slot")
 	}
 }

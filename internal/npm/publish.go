@@ -50,8 +50,46 @@ type versionManifest struct {
 	} `json:"dist"`
 }
 
-// maxUnpacked caps what a tarball may unpack to while package.json is looked for (gzip bombs).
-const maxUnpacked = 1 << 30
+// A tarball may unpack to 4 times npm.max_publish, at most 512 MiB, while it is checked: a
+// small gzip bomb must not keep the server busy inflating it.
+const (
+	unpackFactor   = 4
+	maxUnpackedCap = 512 << 20
+	// publishSlots is how many publishes may read and check their bodies at once.
+	publishSlots = 2
+)
+
+func unpackLimit(maxPublish int64) int64 {
+	return min(unpackFactor*maxPublish, maxUnpackedCap)
+}
+
+func (h *Handler) publishSlots() chan struct{} {
+	h.slotsOnce.Do(func() { h.slots = make(chan struct{}, publishSlots) })
+	return h.slots
+}
+
+var errTooLarge = errors.New("too large")
+
+// capReader returns errTooLarge once more than n bytes were read.
+type capReader struct {
+	r io.Reader
+	n int64
+}
+
+func (c *capReader) Read(p []byte) (int, error) {
+	if c.n < 0 {
+		return 0, errTooLarge
+	}
+	if int64(len(p)) > c.n+1 {
+		p = p[:c.n+1]
+	}
+	k, err := c.r.Read(p)
+	c.n -= int64(k)
+	if c.n < 0 {
+		return k, errTooLarge
+	}
+	return k, err
+}
 
 var tagRe = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{0,127}$`)
 
@@ -84,6 +122,13 @@ func (c *call) publish(name string) {
 		writeErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("the publish is larger than %d bytes (npm.max_publish)", max))
 		return
 	}
+	slots := c.h.publishSlots()
+	select {
+	case slots <- struct{}{}:
+		defer func() { <-slots }()
+	case <-c.r.Context().Done():
+		return
+	}
 	var body publishBody
 	if err := json.NewDecoder(http.MaxBytesReader(w, c.r.Body, max)).Decode(&body); err != nil {
 		var mbe *http.MaxBytesError
@@ -96,7 +141,7 @@ func (c *call) publish(name string) {
 		writeErr(w, http.StatusBadRequest, "the body is not a publish document")
 		return
 	}
-	v, tags, data, err := checkPublish(name, body)
+	v, tags, data, err := checkPublish(name, body, unpackLimit(max))
 	if err != nil {
 		c.audit("publish", name, v.Version, "", 400, err.Error())
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -144,7 +189,7 @@ func (c *call) publish(name string) {
 // checkPublish validates a publish body against the URL and the tarball inside it: the name,
 // version, sha512 integrity and shasum in the document must all describe the attached bytes,
 // and the package.json in the tarball must carry the same name and version.
-func checkPublish(name string, b publishBody) (store.NPMVersion, []string, []byte, error) {
+func checkPublish(name string, b publishBody, unpacked int64) (store.NPMVersion, []string, []byte, error) {
 	var v store.NPMVersion
 	if b.Name != name || (b.ID != "" && b.ID != name) {
 		return v, nil, nil, fmt.Errorf("the document is for %q, the URL for %q", b.Name, name)
@@ -185,7 +230,7 @@ func checkPublish(name string, b publishBody) (store.NPMVersion, []string, []byt
 	if subtle.ConstantTimeCompare([]byte(strings.ToLower(vm.Dist.Shasum)), []byte(hex.EncodeToString(s1[:]))) != 1 {
 		return v, nil, nil, errors.New("dist.shasum does not match the tarball")
 	}
-	if err := checkTarball(data, name, ver); err != nil {
+	if err := checkTarball(data, name, ver, unpacked); err != nil {
 		return v, nil, nil, err
 	}
 	var tags []string
@@ -239,18 +284,21 @@ func integrityMatches(sri string, sum []byte) bool {
 // first directory stripped) and an entry with ".." is refused. Exactly one entry may become
 // package.json, it must name the published package and version, and no two entries may land
 // on the same path, so nothing extracted later can replace what was checked.
-func checkTarball(data []byte, name, version string) error {
+func checkTarball(data []byte, name, version string, unpacked int64) error {
 	gz, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		return errors.New("the tarball is not gzip")
 	}
-	tr := tar.NewReader(io.LimitReader(gz, maxUnpacked))
+	tr := tar.NewReader(&capReader{r: gz, n: unpacked})
 	seen := map[string]bool{}
 	found := 0
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
 			break
+		}
+		if errors.Is(err, errTooLarge) {
+			return fmt.Errorf("the tarball unpacks to more than %d bytes", unpacked)
 		}
 		if err != nil {
 			return errors.New("the tarball is not a valid tar archive")
