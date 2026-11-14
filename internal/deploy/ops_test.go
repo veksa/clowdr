@@ -3,6 +3,7 @@ package deploy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -196,7 +197,7 @@ func TestEnsureNginx(t *testing.T) {
 }
 
 // liveNginx stands for `docker exec clowdr-nginx nginx ...`: it fails when the container
-// does not run, the way exec into a missing container does.
+// does not run or is restarting, the way exec into such a container does.
 type liveNginx struct {
 	d       *fake.Docker
 	tests   int
@@ -205,8 +206,8 @@ type liveNginx struct {
 }
 
 func (n *liveNginx) running() error {
-	if c := n.d.ByName[NginxContainer]; c == nil || !c.Running {
-		return errors.New("no such container: " + NginxContainer)
+	if c := n.d.ByName[NginxContainer]; c == nil || !c.Running || c.Restarting {
+		return fmt.Errorf("%w: container %s is not running", ingress.ErrNginxUnreachable, NginxContainer)
 	}
 	return nil
 }
@@ -226,6 +227,13 @@ func (n *liveNginx) Reload(context.Context) error {
 	n.reloads++
 	return nil
 }
+
+type unreachable struct{}
+
+func (unreachable) Test(context.Context) (string, error) {
+	return "", fmt.Errorf("%w: exec timed out", ingress.ErrNginxUnreachable)
+}
+func (unreachable) Reload(context.Context) error { return nil }
 
 func TestStartNginx(t *testing.T) {
 	ctx := context.Background()
@@ -294,8 +302,61 @@ func TestStartNginx(t *testing.T) {
 		if err := f.e.StartNginx(ctx); err != nil {
 			t.Fatal(err)
 		}
+		// nginx may run something else than the disk (a failed reload, a killed clowdrd):
+		// one checked reload on every start.
+		if ng.tests != 1 || ng.reloads != 1 {
+			t.Fatalf("one checked reload per start: tests=%d reloads=%d", ng.tests, ng.reloads)
+		}
+	})
+
+	t.Run("unchanged config that nginx rejects", func(t *testing.T) {
+		f, ng := setup(t)
+		started(t, f, ng, "")
+		want := read(f, "nginx.conf")
+		ng.testErr = errors.New("nginx -t exited with 1")
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatalf("the daemon must still start: %v", err)
+		}
+		if ng.reloads != 0 || read(f, "nginx.conf") != want {
+			t.Fatalf("reloads=%d", ng.reloads)
+		}
+	})
+
+	t.Run("inspect error writes nothing", func(t *testing.T) {
+		f, ng := setup(t)
+		old := "# written by the previous version\n"
+		started(t, f, ng, old)
+		f.d.InspectErr = errors.New("docker: context deadline exceeded")
+		if err := f.e.StartNginx(ctx); err == nil {
+			t.Fatal("an inspect error must stop the start")
+		}
+		if read(f, "nginx.conf") != old || ng.tests != 0 || ng.reloads != 0 {
+			t.Fatal("files written or nginx touched without knowing its state")
+		}
+	})
+
+	t.Run("restarting nginx gets the new files first", func(t *testing.T) {
+		f, ng := setup(t)
+		started(t, f, ng, "# written by the previous version\n")
+		f.d.ByName[NginxContainer].Restarting = true
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if read(f, "nginx.conf") != ingress.RenderMain(f.e.IngressOptions()) {
+			t.Fatal("new nginx.conf not written for the restart to pick up")
+		}
 		if ng.tests != 0 || ng.reloads != 0 {
-			t.Fatalf("nothing changed, nothing to reload: tests=%d reloads=%d", ng.tests, ng.reloads)
+			t.Fatalf("no exec into a restarting container: tests=%d reloads=%d", ng.tests, ng.reloads)
+		}
+	})
+
+	t.Run("nginx that cannot be reached is not an invalid config", func(t *testing.T) {
+		f, ng := setup(t)
+		started(t, f, ng, "")
+		f.e.Ingress.Nginx = &unreachable{}
+		err := f.e.StartNginx(ctx)
+		if err == nil || errors.Is(err, ingress.ErrInvalidConfig) || !errors.Is(err, ingress.ErrNginxUnreachable) {
+			t.Fatalf("want ErrNginxUnreachable, got %v", err)
 		}
 	})
 
@@ -344,6 +405,10 @@ func TestNginxExec(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(f.d.Execs, "\n"), NginxContainer+": nginx -s reload") {
 		t.Fatal(f.d.Execs)
+	}
+	f.d.ExecFn = func(string, []string) (string, int, error) { return "", 0, errors.New("exec refused") }
+	if _, err := n.Test(ctx); !errors.Is(err, ingress.ErrNginxUnreachable) {
+		t.Fatalf("an exec that did not run: %v", err)
 	}
 	f.d.ExecFn = func(string, []string) (string, int, error) { return "unknown directive \"x\"", 1, nil }
 	if out, err := n.Test(ctx); err == nil || !strings.Contains(out, "unknown directive") {

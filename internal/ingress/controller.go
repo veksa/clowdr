@@ -35,9 +35,23 @@ type File struct {
 
 var ErrInvalidConfig = errors.New("nginx rejected the config")
 
+// ErrNginxUnreachable marks a Test or Reload whose command could not run at all (no container,
+// exec refused, Docker not answering): nothing is known about the config then.
+var ErrNginxUnreachable = errors.New("cannot run nginx")
+
 // Apply writes files, checks the whole config and reloads. Unchanged files are skipped;
 // when nothing changed nginx is not reloaded.
 func (c *Controller) Apply(ctx context.Context, files ...File) error {
+	return c.apply(ctx, false, files)
+}
+
+// ApplyAndReload is Apply that also tests and reloads when no file changed, so nginx is
+// brought to what is on disk whatever it loaded before (clowdrd start).
+func (c *Controller) ApplyAndReload(ctx context.Context, files ...File) error {
+	return c.apply(ctx, true, files)
+}
+
+func (c *Controller) apply(ctx context.Context, force bool, files []File) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -83,11 +97,15 @@ func (c *Controller) Apply(ctx context.Context, files ...File) error {
 		}
 		changed = append(changed, backup{p, old, existed})
 	}
-	if len(changed) == 0 || c.Nginx == nil {
+	if (len(changed) == 0 && !force) || c.Nginx == nil {
 		return nil
 	}
 	if out, err := c.Nginx.Test(ctx); err != nil {
+		// Untested files are not kept either: the contract is that only checked files stay.
 		restore()
+		if errors.Is(err, ErrNginxUnreachable) {
+			return fmt.Errorf("nginx -t: %w", err)
+		}
 		return fmt.Errorf("%w: %v\n%s", ErrInvalidConfig, err, out)
 	}
 	if err := c.Nginx.Reload(ctx); err != nil {

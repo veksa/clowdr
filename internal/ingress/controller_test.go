@@ -3,6 +3,7 @@ package ingress
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,5 +67,46 @@ func TestApply(t *testing.T) {
 	// Removal.
 	if err := c.Apply(ctx, File{"conf.d/a.conf", ""}); err != nil || read("conf.d/a.conf") != "<missing>" || n.reloads != 2 {
 		t.Fatal("not removed")
+	}
+}
+
+// unreachableNginx cannot run nginx at all, as when exec into the container fails.
+type unreachableNginx struct{ reloads int }
+
+func (u *unreachableNginx) Test(context.Context) (string, error) {
+	return "", fmt.Errorf("%w: container is restarting", ErrNginxUnreachable)
+}
+func (u *unreachableNginx) Reload(context.Context) error { u.reloads++; return nil }
+
+func TestApplyNginxUnreachable(t *testing.T) {
+	dir := t.TempDir()
+	n := &unreachableNginx{}
+	c := &Controller{Dir: dir, Nginx: n}
+	ctx := context.Background()
+	os.WriteFile(filepath.Join(dir, "nginx.conf"), []byte("old"), 0o644)
+	err := c.Apply(ctx, File{"nginx.conf", "new"})
+	if err == nil || errors.Is(err, ErrInvalidConfig) || !errors.Is(err, ErrNginxUnreachable) {
+		t.Fatalf("an exec failure is not an invalid config: %v", err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "nginx.conf")); string(b) != "old" || n.reloads != 0 {
+		t.Fatal("untested file kept or nginx reloaded")
+	}
+}
+
+func TestApplyAndReload(t *testing.T) {
+	dir := t.TempDir()
+	n := &fakeNginx{dir: dir}
+	c := &Controller{Dir: dir, Nginx: n}
+	ctx := context.Background()
+	if err := c.Apply(ctx, File{"nginx.conf", "good"}); err != nil || n.tests != 1 || n.reloads != 1 {
+		t.Fatal(err)
+	}
+	// Nothing changed: still one test and one reload.
+	if err := c.ApplyAndReload(ctx, File{"nginx.conf", "good"}); err != nil || n.tests != 2 || n.reloads != 2 {
+		t.Fatalf("tests=%d reloads=%d %v", n.tests, n.reloads, err)
+	}
+	// A change: one test and one reload, not two.
+	if err := c.ApplyAndReload(ctx, File{"nginx.conf", "good v2"}); err != nil || n.tests != 3 || n.reloads != 3 {
+		t.Fatalf("tests=%d reloads=%d %v", n.tests, n.reloads, err)
 	}
 }

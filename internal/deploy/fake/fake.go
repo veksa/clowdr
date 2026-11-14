@@ -17,9 +17,10 @@ import (
 )
 
 type Container struct {
-	Config  runtime.ContainerConfig
-	Running bool
-	Exit    int
+	Config     runtime.ContainerConfig
+	Running    bool
+	Restarting bool // in Docker's restart backoff; Running stays true, as Docker reports it
+	Exit       int
 }
 
 type Docker struct {
@@ -37,6 +38,8 @@ type Docker struct {
 	Crash map[string]bool
 	// NoPull makes pulls of these references fail, as for images that exist only locally.
 	NoPull map[string]bool
+	// InspectErr makes ContainerInspect fail, as when Docker does not answer.
+	InspectErr error
 }
 
 func NewDocker() *Docker {
@@ -128,6 +131,9 @@ func (f *Docker) ContainerRemove(_ context.Context, id string) error {
 func (f *Docker) ContainerInspect(_ context.Context, id string) (runtime.ContainerInspect, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.InspectErr != nil {
+		return runtime.ContainerInspect{}, f.InspectErr
+	}
 	c, ok := f.ByName[id]
 	if !ok {
 		return runtime.ContainerInspect{}, &runtime.APIError{Status: 404, Message: "no such container"}
@@ -137,6 +143,7 @@ func (f *Docker) ContainerInspect(_ context.Context, id string) (runtime.Contain
 	ci.Config.Image = c.Config.Image
 	ci.Config.Labels = c.Config.Labels
 	ci.State.Running = c.Running
+	ci.State.Restarting = c.Restarting
 	ci.State.ExitCode = c.Exit
 	ci.NetworkSettings.Networks = map[string]struct {
 		IPAddress string

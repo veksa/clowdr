@@ -1113,7 +1113,10 @@ func (e *Engine) IngressOptions() ingress.Options {
 }
 
 // RenderAll rewrites every project's config and removes files of deleted projects.
-func (e *Engine) RenderAll(ctx context.Context) error {
+func (e *Engine) RenderAll(ctx context.Context) error { return e.renderAll(ctx, false) }
+
+// renderAll is RenderAll; reload makes nginx test and reload even when no file changed.
+func (e *Engine) renderAll(ctx context.Context, reload bool) error {
 	e.renderM.Lock()
 	defer e.renderM.Unlock()
 	projects, err := e.Store.Projects()
@@ -1139,6 +1142,9 @@ func (e *Engine) RenderAll(ctx context.Context) error {
 				files = append(files, ingress.File{Path: f})
 			}
 		}
+	}
+	if reload {
+		return e.Ingress.ApplyAndReload(ctx, files...)
 	}
 	return e.Ingress.Apply(ctx, files...)
 }
