@@ -6,12 +6,12 @@ import (
 )
 
 func TestSemver(t *testing.T) {
-	for _, v := range []string{"1.0.0", "0.0.1", "10.20.30", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-0.3.7", "1.0.0+build.1", "1.0.0-rc.1+b"} {
+	for _, v := range []string{"1.0.0", "0.0.1", "10.20.30", "1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-0.3.7"} {
 		if !validVersion(v) {
 			t.Errorf("%s refused", v)
 		}
 	}
-	for _, v := range []string{"", "1", "1.0", "v1.0.0", "01.0.0", "1.0.0-", "1.0.0-01", "1.0.0 ", "../1.0.0", "1.0.0/x", "1.0.0-a..b"} {
+	for _, v := range []string{"", "1", "1.0", "v1.0.0", "01.0.0", "1.0.0-", "1.0.0-01", "1.0.0 ", "../1.0.0", "1.0.0/x", "1.0.0-a..b", "1.0.0+build.1", "1.0.0-rc.1+b"} {
 		if validVersion(v) {
 			t.Errorf("%q accepted", v)
 		}

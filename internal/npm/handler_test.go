@@ -881,3 +881,12 @@ func TestLoginRouteIsRateLimited(t *testing.T) {
 	mustStatus(t, e.do("PUT", "/npm/-/user/org.couchdb.user:me", good, []byte(`{}`)), 429)
 	mustStatus(t, e.do("GET", "/npm/-/whoami", good, nil), 429)
 }
+
+// Build metadata would make 1.0.0 and 1.0.0+x two different tarballs for one version.
+func TestBuildMetadataRefused(t *testing.T) {
+	e := newEnv(t)
+	pub := e.token("ci", "npm:publish:@acme/*")
+	mustStatus(t, e.publish(pub, "@acme/tool", "1.0.0"), 201)
+	mustStatus(t, e.publish(pub, "@acme/tool", "1.0.0+b"), 400)
+	mustStatus(t, e.publish(pub, "@acme/tool", "1.1.0+b"), 400)
+}

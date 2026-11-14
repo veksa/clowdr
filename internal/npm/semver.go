@@ -42,9 +42,12 @@ func parseSemver(s string) (semver, bool) {
 	return v, true
 }
 
+// validVersion reports whether s may name a version here: semver without build metadata.
+// Semver ignores "+build" in precedence, so 1.0.0, 1.0.0+a and 1.0.0+b would be one version
+// to a resolver and three different tarballs to this registry.
 func validVersion(s string) bool {
 	_, ok := parseSemver(s)
-	return ok
+	return ok && !strings.Contains(s, "+")
 }
 
 func cmpUint(a, b uint64) int {
