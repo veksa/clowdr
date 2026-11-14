@@ -148,6 +148,21 @@ func tgz(t *testing.T, name, version string, extra ...string) []byte {
 	return buf.Bytes()
 }
 
+// tarOf builds a gzipped tar of exactly the given entries (path, content, ...).
+func tarOf(t *testing.T, entries ...string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for i := 0; i+1 < len(entries); i += 2 {
+		tw.WriteHeader(&tar.Header{Name: entries[i], Mode: 0o644, Size: int64(len(entries[i+1])), Typeflag: tar.TypeReg})
+		tw.Write([]byte(entries[i+1]))
+	}
+	tw.Close()
+	gz.Close()
+	return buf.Bytes()
+}
+
 type pubOpts struct {
 	docName, docVersion string // the version object's name and version, if not the published ones
 	integrity, shasum   string
@@ -818,8 +833,13 @@ func TestTarballPaths(t *testing.T) {
 		{[]string{"package//package.json", other}, false},
 		{[]string{"package/./package.json", other}, false},
 		{[]string{"package\\package.json", other}, false},
-		{[]string{"./package/package.json", other}, false},
-		{[]string{"/package/package.json", other}, false},
+		// strip: 1 drops the first raw part, even "." or "": these land nested, not on top.
+		{[]string{"./package/package.json", other}, true},
+		{[]string{"/package/package.json", other}, true},
+		// ...and these land on top of the real package.json.
+		{[]string{"./package.json", other}, false},
+		{[]string{"/package.json", other}, false},
+		{[]string{".//package.json", other}, false},
 		{[]string{"other/package.json", other}, false},
 		{[]string{"package/index.js", "1", "package/index.js", "2"}, false},
 		{[]string{"package/../package.json", other}, false},
@@ -830,8 +850,26 @@ func TestTarballPaths(t *testing.T) {
 			t.Errorf("%q: %v", c.extra, err)
 		}
 	}
+	real := `{"name":"@acme/tool","version":"1.0.0"}`
+	for _, c := range []struct {
+		entries []string
+		ok      bool
+	}{
+		{[]string{"./package/package.json", real}, false}, // lands at package/package.json: no top one
+		{[]string{"./package/package.json", real, "/package.json", other}, false},
+		{[]string{"./package.json", real}, true},
+	} {
+		err := checkTarball(tarOf(t, c.entries...), name, ver, 1<<20)
+		if (err == nil) != c.ok {
+			t.Errorf("%q: %v", c.entries, err)
+		}
+	}
 	e := newEnv(t)
 	pub := e.token("ci", "npm:publish:@acme/*")
+	for _, second := range []string{"./package.json", "/package.json"} {
+		data := tgz(t, name, ver, second, other)
+		mustStatus(t, e.do("PUT", "/npm/@acme%2ftool", pub, publishDoc(name, ver, data, pubOpts{})), 400)
+	}
 	data := tgz(t, name, ver, "package//package.json", other)
 	mustStatus(t, e.do("PUT", "/npm/@acme%2ftool", pub, publishDoc(name, ver, data, pubOpts{})), 400)
 }

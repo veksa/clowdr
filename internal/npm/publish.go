@@ -280,8 +280,8 @@ func integrityMatches(sri string, sum []byte) bool {
 }
 
 // checkTarball reads the tarball the way npm's extractor (node-tar with strip: 1) lays it out:
-// each entry name is normalised (backslashes as separators, empty and "." parts dropped, the
-// first directory stripped) and an entry with ".." is refused. Exactly one entry may become
+// each entry name is normalised (backslashes as separators, the first part stripped, then
+// empty and "." parts dropped) and an entry with ".." is refused. Exactly one entry may become
 // package.json, it must name the published package and version, and no two entries may land
 // on the same path, so nothing extracted later can replace what was checked.
 func checkTarball(data []byte, name, version string, unpacked int64) error {
@@ -346,22 +346,22 @@ func checkTarball(data []byte, name, version string, unpacked int64) error {
 }
 
 // extractedPath is where an entry lands after extraction with strip: 1, "" when it lands
-// nowhere.
+// nowhere. Like node-tar, it strips the first raw part whatever it is ("package", "." or the
+// "" before a leading slash) and only then drops empty and "." parts of the rest, as the
+// extractor does when it makes the path relative.
 func extractedPath(name string) (string, error) {
+	raw := strings.Split(strings.ReplaceAll(name, "\\", "/"), "/")
 	var parts []string
-	for _, p := range strings.Split(strings.ReplaceAll(name, "\\", "/"), "/") {
-		switch p {
-		case "", ".":
-		case "..":
+	for i, p := range raw {
+		switch {
+		case p == "..":
 			return "", fmt.Errorf("the tarball has an entry outside its directory: %q", name)
+		case i == 0, p == "", p == ".":
 		default:
 			parts = append(parts, p)
 		}
 	}
-	if len(parts) < 2 {
-		return "", nil
-	}
-	return strings.Join(parts[1:], "/"), nil
+	return strings.Join(parts, "/"), nil
 }
 
 // writeTarball stores data under its sha512, atomically: a temp file in the same directory,
