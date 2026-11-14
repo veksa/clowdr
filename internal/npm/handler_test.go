@@ -890,3 +890,24 @@ func TestBuildMetadataRefused(t *testing.T) {
 	mustStatus(t, e.publish(pub, "@acme/tool", "1.0.0+b"), 400)
 	mustStatus(t, e.publish(pub, "@acme/tool", "1.1.0+b"), 400)
 }
+
+// An expired token is swept 30 days after its expiry, which frees its name.
+func TestExpiredTokensSwept(t *testing.T) {
+	e := newEnv(t)
+	if _, _, err := e.h.CreateToken("laptop", []string{"plugins:read"}, time.Hour, Actor{}); err != nil {
+		t.Fatal(err)
+	}
+	e.advance(time.Hour + 29*24*time.Hour)
+	e.h.Sweep(t.Context())
+	if ts, _ := e.st.NPMTokens(); len(ts) != 1 {
+		t.Fatal("swept too early")
+	}
+	e.advance(24 * time.Hour)
+	e.h.Sweep(t.Context())
+	if ts, _ := e.st.NPMTokens(); len(ts) != 0 {
+		t.Fatalf("expired token kept: %+v", ts)
+	}
+	if _, _, err := e.h.CreateToken("laptop", []string{"plugins:read"}, 0, Actor{}); err != nil {
+		t.Fatalf("name not freed: %v", err)
+	}
+}

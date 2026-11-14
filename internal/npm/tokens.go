@@ -202,6 +202,9 @@ func (c *call) rotateSelf() {
 	}
 }
 
+// expiredKeep is how long an expired token stays on record before the sweep deletes it.
+const expiredKeep = 30 * 24 * time.Hour
+
 // AuditFilter selects audit entries; empty fields match everything.
 type AuditFilter struct {
 	Package string
@@ -231,7 +234,7 @@ func (h *Handler) Audit(f AuditFilter) ([]store.NPMAudit, error) {
 // Sweep is the registry's housekeeping, run by the daemon's periodic ticker: retention on
 // every package (deleting versions whose grace period is over, and their tarball unless
 // another version has the same bytes), audit entries older than 90 days or beyond the cap,
-// rotated tokens past their grace, stale failed-auth counters and leftover temp files.
+// rotated tokens past their grace and tokens expired for 30 days, stale failed-auth counters and leftover temp files.
 func (h *Handler) Sweep(ctx context.Context) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -255,7 +258,9 @@ func (h *Handler) Sweep(ctx context.Context) {
 	h.Store.UpdateNPMTokens(func(ts []store.NPMToken) ([]store.NPMToken, []string, error) {
 		var del []string
 		for _, t := range ts {
-			if t.ReplacedBy != "" && !now.Before(t.Expires) {
+			// A rotated token goes when its grace ends; an expired one a while later, so
+			// `token ls` still shows why it stopped working, and then its name is free again.
+			if (t.ReplacedBy != "" && !now.Before(t.Expires)) || now.Sub(t.Expires) >= expiredKeep {
 				del = append(del, t.ID)
 			}
 		}
