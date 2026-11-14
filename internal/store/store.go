@@ -84,6 +84,9 @@ type Release struct {
 	Containers []string      `json:"containers,omitempty"`
 	Spec       spec.Service  `json:"spec"`
 	Rollback   bool          `json:"rollback,omitempty"`
+	// AllowOutdated is set when the deploy skipped the check of locked private packages
+	// (clowctl deploy --allow-outdated).
+	AllowOutdated bool `json:"allow_outdated,omitempty"`
 	// ImageRemoved is set when GC deleted the image; a failed release keeps its status.
 	ImageRemoved bool      `json:"image_removed,omitempty"`
 	Created      time.Time `json:"created"`

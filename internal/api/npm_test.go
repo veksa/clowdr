@@ -16,6 +16,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -85,7 +86,7 @@ func TestNPMThroughAPI(t *testing.T) {
 	shop := e.projectClient(t, "shop", "example.com")
 
 	var v Version
-	if err := e.admin.Do(ctx, "GET", "/v1/version", nil, &v); err != nil || len(v.Features) != 1 || v.Features[0] != "npm" {
+	if err := e.admin.Do(ctx, "GET", "/v1/version", nil, &v); err != nil || !slices.Contains(v.Features, "npm") || !slices.Contains(v.Features, "allow-outdated") {
 		t.Fatalf("features: %+v %v", v, err)
 	}
 

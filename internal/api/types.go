@@ -17,7 +17,16 @@ type DeployRequest struct {
 	Image   string `json:"image,omitempty"`
 	Version string `json:"version,omitempty"`
 	Author  string `json:"author,omitempty"`
+	// AllowOutdated is recorded in the release: the client skipped its check of locked private
+	// packages. Sent only to servers with FeatureAllowOutdated (older ones refuse unknown fields).
+	AllowOutdated bool `json:"allow_outdated,omitempty"`
 }
+
+// Features a server may list in Version.Features.
+const (
+	FeatureNPM           = "npm"
+	FeatureAllowOutdated = "allow-outdated"
+)
 
 type RollbackRequest struct {
 	To     uint64 `json:"to,omitempty"`

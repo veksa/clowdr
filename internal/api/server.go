@@ -241,8 +241,9 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 
 func (s *Server) version(w http.ResponseWriter, r *http.Request) {
 	v := Version{Version: s.Version, Registry: s.RegistryKind, Principal: principal(r).Name()}
+	v.Features = append(v.Features, FeatureAllowOutdated)
 	if s.NPM != nil {
-		v.Features = append(v.Features, "npm")
+		v.Features = append(v.Features, FeatureNPM)
 	}
 	if info, err := s.Engine.Docker.Info(r.Context()); err == nil {
 		v.Docker = info.ServerVersion
@@ -606,6 +607,7 @@ func (s *Server) deploy(w http.ResponseWriter, r *http.Request) {
 	s.stream(w, r, func(ctx context.Context, p deploy.Progress) (*store.Release, error) {
 		rel, err := s.Engine.Deploy(ctx, deploy.Request{
 			Project: project, Spec: req.Spec, Image: image, Version: req.Version, Author: author(r, req.Author),
+			AllowOutdated: req.AllowOutdated,
 		}, p)
 		return &rel, err
 	})

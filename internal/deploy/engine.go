@@ -154,6 +154,8 @@ type Request struct {
 	Author  string
 	// Rollback marks the release in history.
 	Rollback bool
+	// AllowOutdated records that the client skipped its check of locked private packages.
+	AllowOutdated bool
 }
 
 var (
@@ -366,7 +368,7 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 	rel := store.Release{
 		Project: req.Project, Service: s.Name, Image: req.Image, Digest: req.Digest,
 		Version: req.Version, Author: req.Author, Status: store.StatusDeploying,
-		Spec: s, Rollback: req.Rollback,
+		Spec: s, Rollback: req.Rollback, AllowOutdated: req.AllowOutdated,
 	}
 	if err := e.Store.CreateRelease(&rel); err != nil {
 		return rel, err
