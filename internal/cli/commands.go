@@ -731,7 +731,7 @@ func trustForDocker(ctx context.Context, server, fingerprint string, log io.Writ
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})
 	dir := certsDirName(u.Host)
 	var dirs []string
-	if home, err := os.UserHomeDir(); err == nil {
+	if home, err := homeDir(); err == nil {
 		dirs = append(dirs, filepath.Join(home, ".docker", "certs.d", dir))
 	}
 	if goruntime.GOOS == "linux" {

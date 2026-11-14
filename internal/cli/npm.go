@@ -128,7 +128,7 @@ func npmrcAuthKey(reg string) string {
 }
 
 func homeFile(name string) (string, error) {
-	home, err := os.UserHomeDir()
+	home, err := homeDir()
 	if err != nil {
 		return "", err
 	}
@@ -211,7 +211,7 @@ func checkTokenFileLocation(path string) error {
 	if err != nil {
 		return err
 	}
-	home, err := os.UserHomeDir()
+	home, err := homeDir()
 	if err != nil {
 		return err
 	}

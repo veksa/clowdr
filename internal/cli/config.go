@@ -29,12 +29,16 @@ func userConfigPath() (string, error) {
 	if p := os.Getenv("CLOWDR_CONFIG"); p != "" {
 		return p, nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := homeDir()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(home, ".clowdr", "config"), nil
 }
+
+// homeDir is the user's home directory: $HOME on unix, %USERPROFILE% on Windows. Every home
+// lookup of the CLI goes through it.
+func homeDir() (string, error) { return os.UserHomeDir() }
 
 func loadUserConfig() (*UserConfig, error) {
 	p, err := userConfigPath()

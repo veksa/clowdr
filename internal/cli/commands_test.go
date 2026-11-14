@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,45 @@ services:
       prod: [shop.example.com]
 `
 
+// setHome points every home lookup at dir: HOME on unix, USERPROFILE on Windows (HOMEDRIVE and
+// HOMEPATH cleared), and fails the test when the CLI would still resolve another home, so no
+// test can write a developer's real ~/.npmrc or ~/.yarnrc.yml.
+func setHome(t *testing.T, dir string) {
+	t.Helper()
+	t.Setenv("HOME", dir)
+	t.Setenv("USERPROFILE", dir)
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
+	if got, err := homeDir(); err != nil || got != dir {
+		t.Fatalf("home is %q (%v), not the test's %q", got, err, dir)
+	}
+}
+
+// checkMode asserts a unix file mode; Windows has none to check.
+func checkMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	if goruntime.GOOS == "windows" {
+		return
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != want {
+		t.Fatalf("%s: mode %v, want %v", path, fi.Mode().Perm(), want)
+	}
+}
+
+// needSymlinks skips a test where this system cannot create symlinks (Windows without the
+// privilege or developer mode).
+func needSymlinks(t *testing.T) {
+	t.Helper()
+	d := t.TempDir()
+	if err := os.Symlink(filepath.Join(d, "target"), filepath.Join(d, "link")); err != nil {
+		t.Skipf("no symlinks here: %v", err)
+	}
+}
+
 func newHarness(t *testing.T) *harness {
 	t.Helper()
 	srv := apitest.New(t)
@@ -48,7 +88,7 @@ func newHarness(t *testing.T) *harness {
 	t.Setenv("CLOWDR_CONFIG", filepath.Join(dir, "userconfig"))
 	t.Setenv("CLOWDR_TOKEN", "")
 	t.Setenv("CLOWDER_TOKEN", "")
-	t.Setenv("HOME", filepath.Join(dir, "home")) // ~/.yarnrc.yml and ~/.npmrc of npm login
+	setHome(t, filepath.Join(dir, "home")) // ~/.yarnrc.yml and ~/.npmrc of npm login
 	wd, _ := os.Getwd()
 	t.Cleanup(func() { os.Chdir(wd) })
 	os.Chdir(dir)
@@ -335,8 +375,7 @@ func TestContextPinsSelfSignedCertificate(t *testing.T) {
 	h := newHarness(t)
 	srv := apitest.NewTLS(t)
 	home := t.TempDir()
-	t.Setenv("HOME", home)
-	t.Setenv("USERPROFILE", home)
+	setHome(t, home)
 	t.Setenv("DOCKER_HOST", "unix:///var/run/docker.sock") // never a developer's colima VM
 
 	// Without a pin the self-signed certificate is rejected.
