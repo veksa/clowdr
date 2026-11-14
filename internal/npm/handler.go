@@ -124,10 +124,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	segs, okSegs := splitPath(rest)
 	okSegs = ok && okSegs
 
+	now := h.now()
+	if h.limiter.blocked(addr, now) {
+		w.Header().Set("Retry-After", "600")
+		writeErr(w, http.StatusTooManyRequests, "too many failed authentications from this address, try again later")
+		return
+	}
+
 	// npm login and adduser: tokens come from clowctl, never from a password.
 	if okSegs && r.Method == http.MethodPut && len(segs) == 3 && segs[0] == "-" && segs[1] == "user" && strings.HasPrefix(segs[2], "org.couchdb.user:") {
 		msg := "this registry does not take passwords: run clowctl npm login"
 		if _, err := h.authenticate(r); err != nil {
+			h.limiter.fail(addr, now)
 			w.Header().Set("WWW-Authenticate", `Bearer realm="clowdr"`)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": msg, "reason": msg})
 			return
@@ -136,12 +144,6 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	now := h.now()
-	if h.limiter.blocked(addr, now) {
-		w.Header().Set("Retry-After", "600")
-		writeErr(w, http.StatusTooManyRequests, "too many failed authentications from this address, try again later")
-		return
-	}
 	tok, err := h.authenticate(r)
 	if err != nil {
 		h.limiter.fail(addr, now)

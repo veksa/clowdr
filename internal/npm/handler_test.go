@@ -869,3 +869,15 @@ func TestSelfRotationKeepsExpiry(t *testing.T) {
 		t.Fatalf("admin rotation: %v %v", nt.Expires, err)
 	}
 }
+
+// The login route is behind the failed-auth limiter like every other route: it cannot be used
+// to test tokens without limit.
+func TestLoginRouteIsRateLimited(t *testing.T) {
+	e := newEnv(t)
+	good := e.token("ci", "npm:read:@acme/*")
+	for i := 0; i < failMax; i++ {
+		mustStatus(t, e.do("PUT", "/npm/-/user/org.couchdb.user:me", "clwn_bad_bad", []byte(`{}`)), 401)
+	}
+	mustStatus(t, e.do("PUT", "/npm/-/user/org.couchdb.user:me", good, []byte(`{}`)), 429)
+	mustStatus(t, e.do("GET", "/npm/-/whoami", good, nil), 429)
+}
