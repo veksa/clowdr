@@ -71,3 +71,25 @@ func FuzzUnits(f *testing.F) {
 		ParseDuration(s)
 	})
 }
+
+func TestPlatformNPM(t *testing.T) {
+	p, err := ParsePlatform([]byte(DefaultPlatform))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.NPM.Publish || p.NPM.Keep != 3 || p.NPM.Grace.D().Hours() != 14*24 || p.NPM.MaxPublish != 64<<20 {
+		t.Fatalf("defaults: %+v", p.NPM)
+	}
+	p, err = ParsePlatform([]byte("npm: {publish: true, keep: 5, grace: 30d, max_publish: 200m}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !p.NPM.Publish || p.NPM.Keep != 5 || p.NPM.Grace.D().Hours() != 30*24 || p.NPM.MaxPublish != 200<<20 {
+		t.Fatalf("%+v", p.NPM)
+	}
+	for _, bad := range []string{"npm: {keep: -1}", "npm: {unknown: 1}", "npm: {grace: soon}"} {
+		if _, err := ParsePlatform([]byte(bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"gopkg.in/yaml.v3"
 
@@ -35,6 +36,21 @@ type Platform struct {
 	Logs           LogsConf                `yaml:"logs"`
 	Notify         NotifyConf              `yaml:"notify"`
 	Limits         LimitsConf              `yaml:"limits"`
+	NPM            NPMConf                 `yaml:"npm"`
+}
+
+// NPMConf configures the private npm registry at /npm/ on the deploy host.
+type NPMConf struct {
+	// Publish allows publishing on this server. Only one server should have it; the others
+	// serve what they have read-only.
+	Publish bool `yaml:"publish"`
+	// Keep is how many versions of a package retention keeps (by semver), besides every version
+	// a dist-tag points at.
+	Keep int `yaml:"keep"`
+	// Grace is how long an old version stays deprecated before the sweep deletes it.
+	Grace Duration `yaml:"grace"`
+	// MaxPublish caps one publish request body (the tarball travels base64-encoded in it).
+	MaxPublish Bytes `yaml:"max_publish"`
 }
 
 type NginxConf struct {
@@ -120,6 +136,13 @@ limits:
 
 # notify:
 #   telegram: { token: "...", chat_id: "..." }
+
+# Private npm registry at https://deploy.<domain>/npm/ (tokens: clowctl npm token).
+# npm:
+#   publish: true       # only on the one server that accepts publishes
+#   keep: 3             # versions kept per package, besides dist-tagged ones
+#   grace: 14d          # how long an old version stays deprecated before it is deleted
+#   max_publish: 64m    # largest publish request
 `
 
 func LoadPlatform(path string) (*Platform, error) {
@@ -160,6 +183,15 @@ func (p *Platform) defaults() {
 	}
 	if p.Limits.MaxBlob == 0 {
 		p.Limits.MaxBlob = 10 << 30
+	}
+	if p.NPM.Keep == 0 {
+		p.NPM.Keep = 3
+	}
+	if p.NPM.Grace == 0 {
+		p.NPM.Grace = Duration(14 * 24 * time.Hour)
+	}
+	if p.NPM.MaxPublish == 0 {
+		p.NPM.MaxPublish = 64 << 20
 	}
 	if p.Limits.Pids == 0 {
 		p.Limits.Pids = 1024
@@ -219,6 +251,12 @@ func (p *Platform) validate() error {
 		if a.Image == "" {
 			return fmt.Errorf("addons.%s: image is required", name)
 		}
+	}
+	if p.NPM.Keep < 0 {
+		return fmt.Errorf("npm.keep: must be at least 1")
+	}
+	if p.NPM.MaxPublish < 0 {
+		return fmt.Errorf("npm.max_publish: must be positive")
 	}
 	for _, tp := range p.TrustedProxies {
 		if tp != "cloudflare" && !strings.Contains(tp, "/") {
