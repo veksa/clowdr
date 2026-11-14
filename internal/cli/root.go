@@ -57,7 +57,9 @@ func newRoot(a *app) *cobra.Command {
 			if err := a.load(); err != nil {
 				return err
 			}
-			a.warnNPMExpiry(time.Now())
+			if cmd.Annotations[quietAnnotation] == "" {
+				a.warnNPMExpiry(time.Now())
+			}
 			return nil
 		},
 	}
@@ -72,7 +74,7 @@ func newRoot(a *app) *cobra.Command {
 		a.psCmd(), a.statusCmd(), a.routesCmd(), a.logsCmd(), a.accessCmd(), a.traceCmd(), a.metricsCmd(), a.sdkCmd(), a.eventsCmd(), a.scaleCmd(), a.execCmd(), a.profileCmd(), a.topCmd(), a.volumeCmd(), a.addonCmd(), a.gcCmd(),
 		a.restartCmd(), a.stopCmd(), a.startCmd(), a.rmCmd(), a.envCmd(),
 		a.contextCmd(), a.projectCmd(), a.tokenCmd(), a.platformCmd(), a.versionCmd(), a.selfUpdateCmd(),
-		a.npmCmd(),
+		a.npmCmd(), a.pluginsCmd(),
 	)
 	return root
 }

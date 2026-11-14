@@ -203,6 +203,14 @@ func (a *app) preflightTokenFiles(reg string) error {
 // not go: outside the home directory, or inside a git work tree (a dotfiles repository is often
 // pushed or synced). A regular file, or a link to a private file in home, is fine.
 func checkTokenFileLocation(path string) error {
+	return checkLinkedFile(path, "an npm token",
+		"replace the link with a regular file (the token is the only line clowctl adds), or point yarn (YARN_RC_FILENAME) and npm (NPM_CONFIG_USERCONFIG) at a file that is not shared")
+}
+
+// checkLinkedFile refuses to write what (a secret, or a file naming this machine's tools) through
+// a symlink at path that leads outside the home directory or into a git work tree; how says what
+// to do instead.
+func checkLinkedFile(path, what, how string) error {
 	fi, err := os.Lstat(path)
 	if err != nil || fi.Mode()&os.ModeSymlink == 0 {
 		return nil
@@ -216,13 +224,12 @@ func checkTokenFileLocation(path string) error {
 		return err
 	}
 	home = canonPath(home)
-	how := "replace the link with a regular file (the token is the only line clowctl adds), or point yarn (YARN_RC_FILENAME) and npm (NPM_CONFIG_USERCONFIG) at a file that is not shared"
 	if rel, err := filepath.Rel(home, target); err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return fmt.Errorf("%s links to %s, outside your home directory: an npm token is not written there; %s", path, target, how)
+		return fmt.Errorf("%s links to %s, outside your home directory: %s is not written there; %s", path, target, what, how)
 	}
 	for dir := filepath.Dir(target); ; dir = filepath.Dir(dir) {
 		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
-			return fmt.Errorf("%s links to %s, inside the git work tree %s: an npm token there could be committed or pushed; %s", path, target, dir, how)
+			return fmt.Errorf("%s links to %s, inside the git work tree %s: %s there could be committed or pushed; %s", path, target, dir, what, how)
 		}
 		if filepath.Dir(dir) == dir {
 			return nil
