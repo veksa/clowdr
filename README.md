@@ -188,6 +188,9 @@ those the project maps to a clowdr registry: on a machine with neither it guards
 `--allow-outdated` deploys anyway and marks the release in `clowctl releases`. Every command warns
 when the local npm token expires within 30 days.
 
+Tokens and scopes, CI tokens, retention, the audit log, storage and upgrading from 0.3.x:
+[docs/npm.md](docs/npm.md).
+
 ## How a deploy works
 
 1. `build` and `docker build --platform linux/amd64` run on your machine.
