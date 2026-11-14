@@ -168,6 +168,7 @@ type pubOpts struct {
 	integrity, shasum   string
 	tags                map[string]string
 	length              int64
+	fields              map[string]any // extra fields of the version object
 }
 
 // publishBody builds the body `npm publish` sends.
@@ -204,6 +205,10 @@ func publishDoc(name, version string, data []byte, o pubOpts) []byte {
 		"_attachments": map[string]any{name + "-" + version + ".tgz": map[string]any{
 			"content_type": "application/octet-stream", "data": base64.StdEncoding.EncodeToString(data), "length": o.length,
 		}},
+	}
+	vo := doc["versions"].(map[string]any)[version].(map[string]any)
+	for k, v := range o.fields {
+		vo[k] = v
 	}
 	b, _ := json.Marshal(doc)
 	return b

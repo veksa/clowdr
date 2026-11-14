@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestDefaultPlatformParses(t *testing.T) {
 	p, err := ParsePlatform([]byte(DefaultPlatform))
@@ -90,6 +93,34 @@ func TestPlatformNPM(t *testing.T) {
 	for _, bad := range []string{"npm: {keep: -1}", "npm: {keep: 0}", "npm: {unknown: 1}", "npm: {grace: soon}", "npm: {grace: -1d}", "npm: {grace: 0}", "npm: {grace: -5h}", "npm: {max_publish: 0}"} {
 		if _, err := ParsePlatform([]byte(bad)); err == nil {
 			t.Errorf("%q accepted", bad)
+		}
+	}
+}
+
+func TestPlatformPlugins(t *testing.T) {
+	p, err := ParsePlatform([]byte("plugins: {name: acme-tools, owner: Acme Inc.}"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Plugins.Name != "acme-tools" || p.Plugins.Owner != "Acme Inc." {
+		t.Fatalf("%+v", p.Plugins)
+	}
+	if p, err := ParsePlatform([]byte(DefaultPlatform)); err != nil || p.Plugins.Name != "" {
+		t.Fatalf("defaults: %+v %v", p, err)
+	}
+	for _, bad := range []string{
+		"plugins: {name: 'acme tools'}", "plugins: {name: -acme}", "plugins: {name: a..b}", "plugins: {name: a/b}",
+		"plugins: {name: claude-tools}", "plugins: {name: claudeai-x}", "plugins: {name: Anthropic-x}", "plugins: {name: inline}",
+		"plugins: {name: toString}", "plugins: {name: café}", "plugins: {unknown: 1}",
+		"plugins: {name: " + strings.Repeat("a", 129) + "}",
+	} {
+		if _, err := ParsePlatform([]byte(bad)); err == nil {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	for _, ok := range []string{"acme", "clowdr-example-com", "Acme_Tools.v2", strings.Repeat("a", 128)} {
+		if err := ValidMarketplaceName(ok); err != nil {
+			t.Errorf("%s: %v", ok, err)
 		}
 	}
 }

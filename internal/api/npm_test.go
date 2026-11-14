@@ -86,7 +86,7 @@ func TestNPMThroughAPI(t *testing.T) {
 	shop := e.projectClient(t, "shop", "example.com")
 
 	var v Version
-	if err := e.admin.Do(ctx, "GET", "/v1/version", nil, &v); err != nil || !slices.Contains(v.Features, "npm") || !slices.Contains(v.Features, "allow-outdated") {
+	if err := e.admin.Do(ctx, "GET", "/v1/version", nil, &v); err != nil || !slices.Contains(v.Features, "npm") || !slices.Contains(v.Features, "allow-outdated") || !slices.Contains(v.Features, "plugins") {
 		t.Fatalf("features: %+v %v", v, err)
 	}
 
@@ -220,13 +220,47 @@ func TestSocketReachesOnlyACME(t *testing.T) {
 	if code, body := serve("/.well-known/acme-challenge/tok_1", false); code != 200 || body != "proof" {
 		t.Fatalf("challenge: %d %s", code, body)
 	}
-	for _, p := range []string{"/v1/projects", "/v1/version", "/npm/-/whoami", "/v2/",
-		"/npm/x/..%2F..%2F.well-known/acme-challenge/tok_1", "/v1/x/..%2F..%2F.well-known/acme-challenge/tok_1"} {
+	for _, p := range []string{"/v1/projects", "/v1/version", "/npm/-/whoami", "/v2/", "/plugins/marketplace.json",
+		"/npm/x/..%2F..%2F.well-known/acme-challenge/tok_1", "/v1/x/..%2F..%2F.well-known/acme-challenge/tok_1",
+		"/plugins/x/..%2F..%2F.well-known/acme-challenge/tok_1"} {
 		if code, _ := serve(p, false); code != 404 {
 			t.Errorf("%s through a non-deploy location: %d", p, code)
 		}
 	}
 	if code, _ := serve("/v1/projects", true); code != 200 {
 		t.Fatalf("deploy host: %d", code)
+	}
+}
+
+// The plugin marketplace is mounted next to the registry and takes only npm tokens with
+// plugins:read; it stays out of the request log on success, like /npm/.
+func TestPluginsThroughAPI(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	shop := e.projectClient(t, "shop", "example.com")
+	var reader, plain npm.TokenResponse
+	if err := e.admin.Do(ctx, "POST", "/v1/npm/tokens", NPMTokenRequest{Name: "reader", Scopes: []string{"npm:read:@shop/*", "plugins:read"}}, &reader); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.admin.Do(ctx, "POST", "/v1/npm/tokens", NPMTokenRequest{Name: "plain", Scopes: []string{"npm:read:@shop/*"}}, &plain); err != nil {
+		t.Fatal(err)
+	}
+	st, _, body := e.raw(t, "GET", "/plugins/marketplace.json", reader.Token, nil)
+	if st != 200 || !strings.Contains(string(body), `"plugins": []`) {
+		t.Fatalf("marketplace: %d %s", st, body)
+	}
+	if st, _, _ := e.raw(t, "GET", "/plugins/marketplace.json", plain.Token, nil); st != 404 {
+		t.Fatalf("without plugins:read: %d", st)
+	}
+	for _, tok := range []string{e.admin.Token, shop.Token, ""} {
+		if st, h, _ := e.raw(t, "GET", "/plugins/marketplace.json", tok, nil); st != 401 || h.Get("WWW-Authenticate") == "" {
+			t.Errorf("a non-npm token: %d", st)
+		}
+	}
+	if st, _, _ := e.raw(t, "GET", "/plugins/../v1/projects", reader.Token, nil); st == 200 {
+		t.Fatal("path traversal out of /plugins/ reached the API")
+	}
+	if strings.Contains(e.logs.String(), reader.Token) {
+		t.Fatal("an npm token is in the server log")
 	}
 }
