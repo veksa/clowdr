@@ -175,12 +175,13 @@ func ParsePlatform(b []byte) (*Platform, error) {
 }
 
 // checkSetNPM refuses npm values that are written but would be replaced by a default: zero
-// is "not set" for keep and grace, so "keep: 0" would quietly mean 3.
+// is "not set" for keep, grace and max_publish, so "keep: 0" would quietly mean 3.
 func checkSetNPM(b []byte) error {
 	var probe struct {
 		NPM struct {
-			Keep  *int      `yaml:"keep"`
-			Grace *Duration `yaml:"grace"`
+			Keep       *int      `yaml:"keep"`
+			Grace      *Duration `yaml:"grace"`
+			MaxPublish *Bytes    `yaml:"max_publish"`
 		} `yaml:"npm"`
 	}
 	if err := yaml.Unmarshal(b, &probe); err != nil {
@@ -191,6 +192,9 @@ func checkSetNPM(b []byte) error {
 	}
 	if g := probe.NPM.Grace; g != nil && *g <= 0 {
 		return errors.New("npm.grace: must be longer than 0")
+	}
+	if m := probe.NPM.MaxPublish; m != nil && *m <= 0 {
+		return errors.New("npm.max_publish: must be larger than 0")
 	}
 	return nil
 }

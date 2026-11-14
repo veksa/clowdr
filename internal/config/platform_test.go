@@ -87,7 +87,7 @@ func TestPlatformNPM(t *testing.T) {
 	if !p.NPM.Publish || p.NPM.Keep != 5 || p.NPM.Grace.D().Hours() != 30*24 || p.NPM.MaxPublish != 200<<20 {
 		t.Fatalf("%+v", p.NPM)
 	}
-	for _, bad := range []string{"npm: {keep: -1}", "npm: {keep: 0}", "npm: {unknown: 1}", "npm: {grace: soon}", "npm: {grace: -1d}", "npm: {grace: 0}", "npm: {grace: -5h}"} {
+	for _, bad := range []string{"npm: {keep: -1}", "npm: {keep: 0}", "npm: {unknown: 1}", "npm: {grace: soon}", "npm: {grace: -1d}", "npm: {grace: 0}", "npm: {grace: -5h}", "npm: {max_publish: 0}"} {
 		if _, err := ParsePlatform([]byte(bad)); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
