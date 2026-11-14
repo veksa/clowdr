@@ -488,6 +488,7 @@ func renderDeployHost(b *strings.Builder, o Options) {
             proxy_set_header Host $host;
             proxy_set_header X-Forwarded-For $remote_addr;
             proxy_set_header X-Forwarded-Proto https;
+            proxy_set_header X-Forwarded-Host $http_host;
         }
     }
 `, APISocket)
