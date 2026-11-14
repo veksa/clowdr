@@ -146,16 +146,8 @@ func yamlEdit(path string, value string, keys ...string) (out []byte, mode os.Fi
 	if strings.ContainsAny(value, ":#") || value == "" {
 		v.Style = yaml.DoubleQuotedStyle
 	}
-	var buf bytes.Buffer
-	enc := yaml.NewEncoder(&buf)
-	enc.SetIndent(2)
-	if err := enc.Encode(doc); err != nil {
+	if out, err = encodeYAML(orig, doc); err != nil {
 		return nil, 0, false, err
-	}
-	enc.Close()
-	out = keepHeaderSpacing(bytes.ReplaceAll(orig, []byte("\r\n"), []byte("\n")), buf.Bytes())
-	if bytes.Contains(orig, []byte("\r\n")) {
-		out = bytes.ReplaceAll(out, []byte("\n"), []byte("\r\n"))
 	}
 	return out, mode, true, nil
 }
@@ -176,6 +168,68 @@ func keepHeaderSpacing(orig, out []byte) []byte {
 		return []byte(header + rest)
 	}
 	return out
+}
+
+// yamlAddToList adds value to the list at keys, creating it (and mappings on the way) when
+// missing; a value already in the list is not added again.
+func yamlAddToList(path, value string, private bool, keys ...string) error {
+	doc, mode, err := readYAMLDoc(path)
+	if err != nil {
+		return err
+	}
+	orig, _ := os.ReadFile(path)
+	n := doc.Content[0]
+	for _, k := range keys[:len(keys)-1] {
+		if n, err = yamlChild(n, k, true); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+	}
+	last := keys[len(keys)-1]
+	list, err := yamlChild(n, last, false)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if list == nil {
+		list = &yaml.Node{Kind: yaml.SequenceNode, Tag: "!!seq"}
+		n.Content = append(n.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: last}, list)
+	}
+	if list.Kind != yaml.SequenceNode {
+		return fmt.Errorf("%s: %s is not a list", path, last)
+	}
+	for _, item := range list.Content {
+		if item.Kind == yaml.ScalarNode && item.Value == value {
+			return nil
+		}
+	}
+	list.Content = append(list.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: value, Style: yaml.DoubleQuotedStyle})
+	out, err := encodeYAML(orig, doc)
+	if err != nil {
+		return err
+	}
+	switch {
+	case private:
+		mode = 0o600
+	case mode == 0:
+		mode = 0o644
+	}
+	return writeFileAtomic(path, out, mode)
+}
+
+// encodeYAML writes doc back in the shape of the original file: indent 2, its line endings
+// and header comment spacing.
+func encodeYAML(orig []byte, doc *yaml.Node) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := yaml.NewEncoder(&buf)
+	enc.SetIndent(2)
+	if err := enc.Encode(doc); err != nil {
+		return nil, err
+	}
+	enc.Close()
+	out := keepHeaderSpacing(bytes.ReplaceAll(orig, []byte("\r\n"), []byte("\n")), buf.Bytes())
+	if bytes.Contains(orig, []byte("\r\n")) {
+		out = bytes.ReplaceAll(out, []byte("\n"), []byte("\r\n"))
+	}
+	return out, nil
 }
 
 // npmrcSet sets "key=value" in an .npmrc, replacing a line with the same key, keeping the

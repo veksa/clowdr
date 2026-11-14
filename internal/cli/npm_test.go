@@ -326,6 +326,9 @@ func TestNPMWorkflow(t *testing.T) {
 		return tgzOf(t, string(b)), nil
 	}
 	t.Cleanup(func() { packTarball = old })
+	oldYarn := yarnVersionIn
+	yarnVersionIn = func(context.Context, string) string { return "4.14.0" }
+	t.Cleanup(func() { yarnVersionIn = oldYarn })
 	home := os.Getenv("HOME")
 	reg := registryURL(h.srv.URL)
 
@@ -379,8 +382,8 @@ func TestNPMWorkflow(t *testing.T) {
 	if v, _ := yamlGet(filepath.Join(h.dir, ".yarnrc.yml"), "npmScopes", "acme", "npmRegistryServer"); v != reg {
 		t.Fatalf("project .yarnrc.yml: %q", v)
 	}
-	if v, _ := yamlGet(filepath.Join(h.dir, ".yarnrc.yml"), "npmScopes", "acme", "npmMinimalAgeGate"); v != "0" {
-		t.Fatalf("the scope keeps yarn's age gate: %q", v)
+	if v, _ := yamlGet(filepath.Join(h.dir, ".yarnrc.yml"), "npmScopes", "acme", "npmMinimalAgeGate"); v != "" {
+		t.Fatalf("a scoped age gate, which yarn before 4.17 rejects: %q", v)
 	}
 	contains(t, h.ok("npm", "check"), "are current")
 
@@ -831,4 +834,106 @@ func TestHomeIsolated(t *testing.T) {
 	if p, _ := userConfigPath(); !strings.HasPrefix(p, h.dir) {
 		t.Fatalf("config %q is not under the test's dir", p)
 	}
+}
+
+func TestYarnVersionBands(t *testing.T) {
+	for _, c := range []struct {
+		v    string
+		gate bool
+		ok   bool
+	}{
+		{"4.9.4", false, true}, {"4.10.0", true, true}, {"4.14.1+sha512.abc", true, true}, {"4.17.0", true, true},
+		{"5.0.0", true, true}, {"1.22.22", false, true}, {"", false, false}, {"x.y", false, false},
+	} {
+		maj, min, ok := parseMajorMinor(c.v)
+		if ok != c.ok || (ok && yarnHasAgeGate(maj, min) != c.gate) {
+			t.Errorf("%q: %d.%d ok=%v gate=%v", c.v, maj, min, ok, yarnHasAgeGate(maj, min))
+		}
+	}
+}
+
+// npm setup writes what the project's yarn accepts: nothing before 4.10, the scope in
+// npmPreapprovedPackages from 4.10 on (merged, never duplicated), never the scoped gate.
+func TestNPMSetupPerYarnVersion(t *testing.T) {
+	h := newHarness(t)
+	old := yarnVersionIn
+	t.Cleanup(func() { yarnVersionIn = old })
+	reg := registryURL(h.srv.URL)
+	for _, c := range []struct {
+		name, packageManager, yarnPrints string
+		want                             []string // npmPreapprovedPackages afterwards, nil = absent
+	}{
+		{"pinned 4.9", "yarn@4.9.4", "", nil},
+		{"pinned 4.14", "yarn@4.14.0+sha512.0123", "", []string{"@acme/*"}},
+		{"pinned 4.17", "yarn@4.17.1", "", []string{"@acme/*"}},
+		{"installed 4.9", "", "4.9.4", nil},
+		{"installed 4.12", "", "4.12.0", []string{"@acme/*"}},
+		{"pinned wins over installed", "yarn@4.9.0", "4.18.0", nil},
+		{"unknown", "", "", nil},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			dir := filepath.Join(h.dir, strings.ReplaceAll(c.name, " ", "-"))
+			os.MkdirAll(dir, 0o755)
+			pj := map[string]string{"name": "p"}
+			if c.packageManager != "" {
+				pj["packageManager"] = c.packageManager
+			}
+			b, _ := json.Marshal(pj)
+			os.WriteFile(filepath.Join(dir, "package.json"), b, 0o644)
+			yarnVersionIn = func(context.Context, string) string { return c.yarnPrints }
+			os.Chdir(dir)
+			defer os.Chdir(h.dir)
+			out := h.ok("npm", "setup", "--scope", "@acme", "--context", "test")
+			if c.name == "unknown" {
+				contains(t, out, "cannot tell the project's yarn version")
+			}
+			yrc := filepath.Join(dir, ".yarnrc.yml")
+			if v, _ := yamlGet(yrc, "npmScopes", "acme", "npmRegistryServer"); v != reg {
+				t.Fatalf("no mapping: %q", v)
+			}
+			if v, _ := yamlGet(yrc, "npmScopes", "acme", "npmMinimalAgeGate"); v != "" {
+				t.Fatal("scoped age gate written")
+			}
+			got := yamlList(t, yrc, "npmPreapprovedPackages")
+			if !slices.Equal(got, c.want) {
+				t.Fatalf("npmPreapprovedPackages %v, want %v", got, c.want)
+			}
+		})
+	}
+
+	// Merging: an existing list keeps its entries, and a second run adds nothing.
+	dir := filepath.Join(h.dir, "merge")
+	os.MkdirAll(dir, 0o755)
+	os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"packageManager": "yarn@4.14.0"}`), 0o644)
+	os.WriteFile(filepath.Join(dir, ".yarnrc.yml"), []byte("# settings\nnpmPreapprovedPackages:\n  - lodash\n  - \"@acme/*\"\n"), 0o644)
+	os.Chdir(dir)
+	defer os.Chdir(h.dir)
+	h.ok("npm", "setup", "--scope", "@acme", "--scope", "@tools", "--context", "test")
+	h.ok("npm", "setup", "--scope", "@tools", "--context", "test")
+	if got := yamlList(t, filepath.Join(dir, ".yarnrc.yml"), "npmPreapprovedPackages"); !slices.Equal(got, []string{"lodash", "@acme/*", "@tools/*"}) {
+		t.Fatalf("merged list %v", got)
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, ".yarnrc.yml"))
+	if !strings.HasPrefix(string(b), "# settings\n") {
+		t.Fatalf("header lost:\n%s", b)
+	}
+	os.WriteFile(filepath.Join(dir, ".yarnrc.yml"), []byte("npmPreapprovedPackages: lodash\n"), 0o644)
+	contains(t, h.fails("npm", "setup", "--scope", "@acme", "--context", "test"), "not a list")
+}
+
+func yamlList(t *testing.T, path string, key string) []string {
+	t.Helper()
+	m, err := yamlMap(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n := m[key]
+	if n == nil {
+		return nil
+	}
+	var out []string
+	for _, item := range n.Content {
+		out = append(out, item.Value)
+	}
+	return out
 }

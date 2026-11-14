@@ -606,8 +606,11 @@ func (a *app) npmSetupCmd() *cobra.Command {
 .yarnrc.yml in this directory or above (the one in your home directory is never used), or a new
 one next to the nearest package.json. Commit the file: it is what sends the scope to this
 registry instead of the public one. The token stays in ~/.yarnrc.yml (clowctl npm login).
-It also sets the scope's npmMinimalAgeGate to 0: yarn 4 otherwise refuses versions published
-less than a day ago, which guards against hijacked public packages but would hold back your own.`,
+yarn 4.10 and newer hold back versions published less than a day ago (npmMinimalAgeGate), a
+guard against hijacked public packages that would also hold back what you just published, so
+the scope is added to npmPreapprovedPackages ("@scope/*"). The project's yarn version decides:
+the packageManager field of package.json, else yarn --version in the project. Before 4.10 the
+setting does not exist and yarn refuses unknown settings, so nothing is written.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(scopes) == 0 {
 				return errors.New("--scope is required, e.g. --scope @acme")
@@ -623,6 +626,7 @@ less than a day ago, which guards against hijacked public packages but would hol
 			if err != nil {
 				return err
 			}
+			ymaj, ymin, yarnKnown := projectYarnVersion(cmd.Context(), filepath.Dir(file))
 			for _, s := range scopes {
 				if !regexp.MustCompile(`^@[a-z0-9][a-z0-9._~-]*$`).MatchString(s) {
 					return fmt.Errorf("--scope %q: want @scope", s)
@@ -630,10 +634,14 @@ less than a day ago, which guards against hijacked public packages but would hol
 				if err := yamlSet(file, reg, false, "npmScopes", strings.TrimPrefix(s, "@"), "npmRegistryServer"); err != nil {
 					return err
 				}
-				// yarn 4 holds back versions younger than npmMinimalAgeGate (1 day), a guard against
-				// a hijacked public package; for your own scope it only delays what you just published.
-				if err := yamlSet(file, "0", false, "npmScopes", strings.TrimPrefix(s, "@"), "npmMinimalAgeGate"); err != nil {
-					return err
+				switch {
+				case !yarnKnown:
+					fmt.Fprintf(a.err, "! cannot tell the project's yarn version: if it is 4.10 or newer, add %q to npmPreapprovedPackages in %s\n", s+"/*", file)
+				case yarnHasAgeGate(ymaj, ymin):
+					// The scoped npmMinimalAgeGate would be simpler, but yarn before 4.17 rejects it.
+					if err := yamlAddToList(file, s+"/*", false, "npmPreapprovedPackages"); err != nil {
+						return err
+					}
 				}
 				if l := a.cfg.npmLogin(reg); l != nil && !slices.Contains(l.Scopes, s) {
 					l.Scopes = append(l.Scopes, s)
@@ -686,18 +694,61 @@ func packCommand(useYarn bool, yarnMajor int, out string) []string {
 	return []string{"npm", "pack", "--pack-destination", filepath.Dir(out)}
 }
 
-// yarnMajor is the major version of the yarn that runs in dir (0 when unknown).
-var yarnMajor = func(ctx context.Context, dir string) int {
+// yarnVersionIn is what `yarn --version` prints in dir ("" when yarn does not run). Replaced
+// in tests.
+var yarnVersionIn = func(ctx context.Context, dir string) string {
 	c := exec.CommandContext(ctx, "yarn", "--version")
 	c.Dir = dir
 	out, err := c.Output()
 	if err != nil {
-		return 0
+		return ""
 	}
-	major, _, _ := strings.Cut(strings.TrimSpace(string(out)), ".")
-	n, _ := strconv.Atoi(major)
-	return n
+	return strings.TrimSpace(string(out))
 }
+
+// yarnMajor is the major version of the yarn that runs in dir (0 when unknown).
+func yarnMajor(ctx context.Context, dir string) int {
+	major, _, _ := parseMajorMinor(yarnVersionIn(ctx, dir))
+	return major
+}
+
+// parseMajorMinor reads "4.14.0", "4.14.0+sha512.…" or "4.14".
+func parseMajorMinor(v string) (major, minor int, ok bool) {
+	parts := strings.SplitN(strings.TrimSpace(v), ".", 3)
+	if len(parts) < 2 {
+		return 0, 0, false
+	}
+	lead := func(s string) string { // leading digits: "0+sha512…" → "0"
+		i := 0
+		for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		return s[:i]
+	}
+	major, err1 := strconv.Atoi(parts[0])
+	minor, err2 := strconv.Atoi(lead(parts[1]))
+	return major, minor, err1 == nil && err2 == nil
+}
+
+// projectYarnVersion is the yarn version of the project in dir: the packageManager field of its
+// package.json ("yarn@4.14.0+sha512…"), else what yarn --version prints there.
+func projectYarnVersion(ctx context.Context, dir string) (major, minor int, ok bool) {
+	if b, err := os.ReadFile(filepath.Join(dir, "package.json")); err == nil {
+		var pj struct {
+			PackageManager string `json:"packageManager"`
+		}
+		if json.Unmarshal(b, &pj) == nil {
+			if v, isYarn := strings.CutPrefix(pj.PackageManager, "yarn@"); isYarn {
+				return parseMajorMinor(v)
+			}
+		}
+	}
+	return parseMajorMinor(yarnVersionIn(ctx, dir))
+}
+
+// yarnHasAgeGate reports whether yarn major.minor has npmMinimalAgeGate and
+// npmPreapprovedPackages (4.10 and newer).
+func yarnHasAgeGate(major, minor int) bool { return major > 4 || (major == 4 && minor >= 10) }
 
 // tarballManifest reads package.json from the top directory of an npm tarball.
 func tarballManifest(tgz []byte) (map[string]json.RawMessage, error) {
