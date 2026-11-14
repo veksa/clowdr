@@ -219,11 +219,12 @@ tarball answers 404 on download.
 
 ## Upgrading to 0.4.0
 
-- **nginx is re-rendered when clowdrd starts.** 0.4.0 tags requests of the deploy-host location
-  with `X-Clowdr-Via: deploy-host` and refuses anything else that reaches the API through nginx,
-  except ACME challenges. If the API answers 404 to everything after the upgrade, nginx still runs
-  an old config: check that the deploy-host location in `nginx.conf` sets that header, and restart
-  clowdrd.
+- **Reload nginx by hand after upgrading to 0.4.0.** 0.4.0 tags requests of the deploy-host
+  location with `X-Clowdr-Via: deploy-host` and refuses anything else that reaches the API through
+  nginx, except ACME challenges. It writes the new `nginx.conf` on start but does not reload nginx,
+  so the API answers 404 to everything until you run
+  `docker exec clowdr-nginx nginx -s reload`. 0.4.1 and later reload nginx by themselves; upgrading
+  straight to 0.4.1 needs nothing.
 - **Old CLIs keep working.** A 0.3.x `clowctl` deploys as before; only the `npm` commands and
   `--allow-outdated` need 0.4.0 on both ends.
 - **Rolling back to 0.3.x:** remove the `npm:` section from `platform.yml` first, because 0.3.x
