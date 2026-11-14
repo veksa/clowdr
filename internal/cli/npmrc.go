@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"bytes"
 	"errors"
 	"fmt"
@@ -100,20 +99,44 @@ func yamlMap(path string, keys ...string) (map[string]*yaml.Node, error) {
 // yamlSet sets the string at keys, creating mappings on the way, and writes the file with mode
 // (an existing file keeps its mode unless private is set, which forces 0600).
 func yamlSet(path string, value string, private bool, keys ...string) error {
-	doc, mode, err := readYAMLDoc(path)
-	if err != nil {
+	out, mode, changed, err := yamlEdit(path, value, keys...)
+	if err != nil || !changed {
+		if err == nil && private && mode != 0 && mode != 0o600 {
+			return chmodTarget(path, 0o600)
+		}
 		return err
 	}
+	switch {
+	case private:
+		mode = 0o600
+	case mode == 0:
+		mode = 0o644
+	}
+	return writeFileAtomic(path, out, mode)
+}
+
+// yamlEdit computes the new content of path with the string at keys set, without writing it.
+// changed is false when the value is already there, so a file is not rewritten (and reformatted)
+// for nothing. Line endings (CRLF) and a header comment's spacing are kept.
+func yamlEdit(path string, value string, keys ...string) (out []byte, mode os.FileMode, changed bool, err error) {
+	doc, mode, err := readYAMLDoc(path)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	orig, _ := os.ReadFile(path)
 	n := doc.Content[0]
 	for _, k := range keys[:len(keys)-1] {
 		if n, err = yamlChild(n, k, true); err != nil {
-			return fmt.Errorf("%s: %w", path, err)
+			return nil, 0, false, fmt.Errorf("%s: %w", path, err)
 		}
 	}
 	last := keys[len(keys)-1]
 	v, err := yamlChild(n, last, false)
 	if err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+		return nil, 0, false, fmt.Errorf("%s: %w", path, err)
+	}
+	if v != nil && v.Kind == yaml.ScalarNode && v.Value == value && len(orig) > 0 {
+		return orig, mode, false, nil
 	}
 	if v == nil {
 		n.Content = append(n.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: last}, &yaml.Node{Kind: yaml.ScalarNode})
@@ -127,44 +150,64 @@ func yamlSet(path string, value string, private bool, keys ...string) error {
 	enc := yaml.NewEncoder(&buf)
 	enc.SetIndent(2)
 	if err := enc.Encode(doc); err != nil {
-		return err
+		return nil, 0, false, err
 	}
 	enc.Close()
-	switch {
-	case private:
-		mode = 0o600
-	case mode == 0:
-		mode = 0o644
+	out = keepHeaderSpacing(bytes.ReplaceAll(orig, []byte("\r\n"), []byte("\n")), buf.Bytes())
+	if bytes.Contains(orig, []byte("\r\n")) {
+		out = bytes.ReplaceAll(out, []byte("\n"), []byte("\r\n"))
 	}
-	return writeFileAtomic(path, buf.Bytes(), mode)
+	return out, mode, true, nil
+}
+
+// keepHeaderSpacing drops the blank line the encoder puts after a file's leading comment block
+// when the original had none there.
+func keepHeaderSpacing(orig, out []byte) []byte {
+	lines := strings.SplitAfter(string(orig), "\n")
+	i := 0
+	for i < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[i]), "#") {
+		i++
+	}
+	if i == 0 || i >= len(lines) || strings.TrimSpace(lines[i]) == "" {
+		return out
+	}
+	header := strings.Join(lines[:i], "")
+	if rest, ok := strings.CutPrefix(string(out), header+"\n"); ok {
+		return []byte(header + rest)
+	}
+	return out
 }
 
 // npmrcSet sets "key=value" in an .npmrc, replacing a line with the same key, keeping the
-// others, and writes it with mode 0600.
+// others (and their line endings), and writes it with mode 0600.
 func npmrcSet(path, key, value string) error {
 	b, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	eol := "\n"
+	if bytes.Contains(b, []byte("\r\n")) {
+		eol = "\r\n"
+	}
+	text := strings.ReplaceAll(string(b), "\r\n", "\n")
 	var out []string
 	found := false
-	sc := bufio.NewScanner(bytes.NewReader(b))
-	sc.Buffer(make([]byte, 64<<10), 1<<20)
-	for sc.Scan() {
-		line := sc.Text()
-		if k, _, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == key {
-			if !found {
-				out = append(out, key+"="+value)
-				found = true
+	if text != "" {
+		for _, line := range strings.Split(strings.TrimSuffix(text, "\n"), "\n") {
+			if k, _, ok := strings.Cut(line, "="); ok && strings.TrimSpace(k) == key {
+				if !found {
+					out = append(out, key+"="+value)
+					found = true
+				}
+				continue
 			}
-			continue
+			out = append(out, line)
 		}
-		out = append(out, line)
 	}
 	if !found {
 		out = append(out, key+"="+value)
 	}
-	return writeFileAtomic(path, []byte(strings.Join(out, "\n")+"\n"), 0o600)
+	return writeFileAtomic(path, []byte(strings.Join(out, eol)+eol), 0o600)
 }
 
 // npmrcGet reads the value of key in an .npmrc, "" when absent.
@@ -181,9 +224,35 @@ func npmrcGet(path, key string) string {
 	return ""
 }
 
-// writeFileAtomic replaces path with data: a temp file in the same directory, then rename, so a
-// crash never leaves half a file. The mode is applied to the new file even if path existed.
+// resolveTarget follows symlinks at path, so a dotfile linked into a dotfiles repository is
+// updated where it lives instead of being replaced by a regular file. A missing path is itself.
+func resolveTarget(path string) (string, error) {
+	if fi, err := os.Lstat(path); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		return path, nil
+	}
+	t, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", path, err)
+	}
+	return t, nil
+}
+
+func chmodTarget(path string, mode os.FileMode) error {
+	t, err := resolveTarget(path)
+	if err != nil {
+		return err
+	}
+	return os.Chmod(t, mode)
+}
+
+// writeFileAtomic replaces path (the file a symlink at path points at) with data: a temp file in
+// the same directory, then rename, so a crash never leaves half a file. The mode is applied to
+// the new file even if path existed.
 func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	path, err := resolveTarget(path)
+	if err != nil {
+		return err
+	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -212,4 +281,23 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+// checkWritable fails when a file could not be written to dir (path's directory, created if
+// missing), by creating and removing a temp file there.
+func checkWritable(path string) error {
+	path, err := resolveTarget(path)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, "."+filepath.Base(path)+".check-*")
+	if err != nil {
+		return fmt.Errorf("%s is not writable: %w", dir, err)
+	}
+	f.Close()
+	return os.Remove(f.Name())
 }

@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -402,11 +403,15 @@ func TestNPMWorkflow(t *testing.T) {
 	contains(t, h.fails("deploy", "web"), "--allow-outdated")
 	h.ok("deploy", "web", "--allow-outdated")
 	contains(t, h.ok("releases", "web"), "(allow-outdated)")
-	os.WriteFile(filepath.Join(h.dir, "yarn.lock"), []byte("\"@acme/tool@npm:^1.3.0\":\n  version: 1.3.0\n  resolution: \"@acme/tool@npm:1.3.0\"\n"), 0o644)
+	os.WriteFile(filepath.Join(h.dir, "yarn.lock"), []byte("__metadata:\n  version: 8\n\n\"@acme/tool@npm:^1.3.0\":\n  version: 1.3.0\n  resolution: \"@acme/tool@npm:1.3.0\"\n"), 0o644)
 	h.ok("deploy", "web")
 	if out := h.ok("releases", "web"); strings.Count(out, "(allow-outdated)") != 1 {
 		t.Fatalf("only the first deploy skipped the check:\n%s", out)
 	}
+
+	// publishConfig.tag is the default dist-tag.
+	os.WriteFile(filepath.Join(pkg, "package.json"), []byte(`{"name":"@acme/tool","version":"1.4.0-beta.1","publishConfig":{"registry":"`+reg+`","tag":"next"}}`), 0o644)
+	contains(t, h.ok("npm", "publish", "pkg", "--context", "test"), "published @acme/tool@1.4.0-beta.1 (next)")
 
 	// Tokens: list, self-rotation (the old token works 24 h more), admin rotation --now, revoke.
 	contains(t, h.ok("npm", "token", "ls", "--context", "test"), "laptop", "npm:read:@acme/*", "active")
@@ -434,4 +439,316 @@ func TestNPMWorkflow(t *testing.T) {
 	h.ok("npm", "token", "revoke", "laptop", "--context", "test")
 	contains(t, h.fails("npm", "check"), "not accepted (expired or revoked)")
 	contains(t, h.fails("npm", "token", "revoke", "laptop", "--context", "test"), "not found")
+}
+
+// A home file that cannot take the new token must fail the command before the server is asked,
+// and a write failing after the server issued a token must not lose it.
+func TestNPMTokenSurvivesBrokenFiles(t *testing.T) {
+	h := newHarness(t)
+	home := os.Getenv("HOME")
+	reg := registryURL(h.srv.URL)
+	yrc := filepath.Join(home, ".yarnrc.yml")
+	h.ok("npm", "login", "--context", "test", "--name", "laptop", "--scope", "@acme")
+	cfg, _ := loadUserConfig()
+	first := cfg.npmLogin(reg).Token
+
+	// ~/.yarnrc.yml is not a mapping: rotation is refused and the token keeps working.
+	os.WriteFile(yrc, []byte("- not a mapping\n"), 0o600)
+	contains(t, h.fails("npm", "token", "rotate", "--now", "--context", "test"), "nothing was changed")
+	contains(t, h.fails("npm", "token", "rotate", "laptop", "--now", "--context", "test"), "nothing was changed")
+	contains(t, h.fails("npm", "login", "--context", "test", "--name", "other", "--scope", "@acme"), "nothing was changed")
+	if out := h.ok("npm", "token", "ls", "--context", "test"); strings.Contains(out, "other") || strings.Contains(out, "rotated") {
+		t.Fatalf("the server was asked:\n%s", out)
+	}
+	cfg, _ = loadUserConfig()
+	if cfg.npmLogin(reg).Token != first {
+		t.Fatal("the local token changed")
+	}
+	os.WriteFile(yrc, []byte("nodeLinker: node-modules\n"), 0o600)
+
+	// The write fails after the server rotated: the new token is saved and printed with the way out.
+	old := writeHomeTokensFn
+	writeHomeTokensFn = func(string, string) ([]string, error) { return nil, os.ErrPermission }
+	_, errOut, err := h.run("npm", "token", "rotate", "--now", "--context", "test")
+	writeHomeTokensFn = old
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	cfg, _ = loadUserConfig()
+	second := cfg.npmLogin(reg).Token
+	if second == first {
+		t.Fatal("the new token was not saved")
+	}
+	contains(t, errOut, "the new token (shown once): "+second, "clowctl npm login --context test --name laptop")
+	contains(t, h.ok("npm", "login", "--context", "test", "--name", "laptop"), "already logged in")
+	if v, _ := yamlGet(yrc, "npmRegistries", reg, "npmAuthToken"); v != second {
+		t.Fatal("login did not write the saved token")
+	}
+	if v, _ := yamlGet(yrc, "nodeLinker"); v != "node-modules" {
+		t.Fatal("lost a key")
+	}
+
+	// Other scopes on an existing login are refused with the way to get them.
+	contains(t, h.fails("npm", "login", "--context", "test", "--name", "laptop", "--scope", "@other"), "cannot change", "clowctl npm token revoke laptop")
+	h.ok("npm", "login", "--context", "test", "--name", "laptop", "--scope", "@acme")
+}
+
+func TestConfirmAllowOutdated(t *testing.T) {
+	status := http.StatusInternalServerError
+	features := []string{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if status != http.StatusOK {
+			http.Error(w, "down", status)
+			return
+		}
+		json.NewEncoder(w).Encode(api.Version{Version: "v1", Features: features})
+	}))
+	defer srv.Close()
+	var errb bytes.Buffer
+	a := &app{err: &errb}
+	c := api.NewClient(srv.URL, "clw_x_y", "")
+	if a.confirmAllowOutdated(context.Background(), c) {
+		t.Fatal("confirmed by a failing server")
+	}
+	contains(t, errb.String(), "did not confirm")
+	status = http.StatusOK
+	if a.confirmAllowOutdated(context.Background(), c) {
+		t.Fatal("confirmed without the feature")
+	}
+	features = []string{api.FeatureAllowOutdated}
+	if !a.confirmAllowOutdated(context.Background(), c) {
+		t.Fatal("not confirmed")
+	}
+}
+
+func TestUserConfigAlwaysPrivate(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "config")
+	os.WriteFile(p, []byte("current: x\n"), 0o644)
+	c := &UserConfig{path: p, Contexts: map[string]*Context{}}
+	if err := c.Save(); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Stat(p); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("mode %v", fi.Mode().Perm())
+	}
+}
+
+func TestRCFilesKeepFormAndLinks(t *testing.T) {
+	dir := t.TempDir()
+	reg := "https://deploy.example.com/npm/"
+
+	// A line longer than any scanner buffer survives.
+	nrc := filepath.Join(dir, ".npmrc")
+	long := "cafile=" + strings.Repeat("x", 2<<20)
+	os.WriteFile(nrc, []byte(long+"\r\nsave-exact=true\r\n"), 0o600)
+	if err := npmrcSet(nrc, npmrcAuthKey(reg), "t1"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(nrc)
+	if string(b) != long+"\r\nsave-exact=true\r\n"+npmrcAuthKey(reg)+"=t1\r\n" {
+		t.Fatalf("npmrc changed beyond the token line (%d bytes)", len(b))
+	}
+
+	// CRLF and the header comment's spacing are kept; an unchanged value does not rewrite.
+	yrc := filepath.Join(dir, "a.yml")
+	os.WriteFile(yrc, []byte("# header\r\nnodeLinker: node-modules\r\n"), 0o600)
+	if err := yamlSet(yrc, "t1", true, "npmRegistries", reg, "npmAuthToken"); err != nil {
+		t.Fatal(err)
+	}
+	b, _ = os.ReadFile(yrc)
+	if !strings.HasPrefix(string(b), "# header\r\nnodeLinker: node-modules\r\n") || strings.Contains(strings.ReplaceAll(string(b), "\r\n", ""), "\n") {
+		t.Fatalf("%q", b)
+	}
+	odd := filepath.Join(dir, "b.yml")
+	oddText := "npmRegistries:\n    \"" + reg + "\":\n        npmAuthToken: t1\n"
+	os.WriteFile(odd, []byte(oddText), 0o600)
+	if err := yamlSet(odd, "t1", true, "npmRegistries", reg, "npmAuthToken"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(odd); string(b) != oddText {
+		t.Fatalf("rewritten for nothing: %q", b)
+	}
+
+	// A symlinked dotfile stays a symlink; its target gets the token and mode 0600.
+	target := filepath.Join(dir, "dotfiles", "npmrc")
+	os.MkdirAll(filepath.Dir(target), 0o755)
+	os.WriteFile(target, []byte("save-exact=true\n"), 0o644)
+	link := filepath.Join(dir, "home", ".npmrc")
+	os.MkdirAll(filepath.Dir(link), 0o755)
+	os.Symlink(target, link)
+	if err := npmrcSet(link, npmrcAuthKey(reg), "t2"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Lstat(link); fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the symlink was replaced")
+	}
+	if npmrcGet(target, npmrcAuthKey(reg)) != "t2" {
+		t.Fatal("target not updated")
+	}
+	if fi, _ := os.Stat(target); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("target mode %v", fi.Mode().Perm())
+	}
+	ytarget := filepath.Join(dir, "dotfiles", "yarnrc.yml")
+	os.WriteFile(ytarget, []byte("nodeLinker: pnp\n"), 0o644)
+	ylink := filepath.Join(dir, "home", ".yarnrc.yml")
+	os.Symlink(ytarget, ylink)
+	if err := yamlSet(ylink, "t2", true, "npmRegistries", reg, "npmAuthToken"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, _ := os.Lstat(ylink); fi.Mode()&os.ModeSymlink == 0 {
+		t.Fatal("the yarnrc symlink was replaced")
+	}
+	if v, _ := yamlGet(ytarget, "npmRegistries", reg, "npmAuthToken"); v != "t2" {
+		t.Fatal("yarnrc target not updated")
+	}
+}
+
+const classicLock = `# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT THIS FILE DIRECTLY.
+# yarn lockfile v1
+
+
+"@acme/tool@^1.0.0":
+  version "1.0.0"
+  resolved "https://deploy.example.com/npm/@acme/tool/-/tool-1.0.0.tgz#abc"
+  integrity sha512-x
+
+"tool@npm:@acme/tool@^1.1.0":
+  version "1.1.0"
+  resolved "https://deploy.example.com/npm/@acme%2ftool/-/tool-1.1.0.tgz"
+
+"util@npm:@acme/util@^2.0.0":
+  version "2.0.0"
+
+left-pad@^1.3.0:
+  version "1.3.0"
+  resolved "https://registry.yarnpkg.com/left-pad/-/left-pad-1.3.0.tgz#5b8a3a7765dfe001261dde915589e782f8c94d1e"
+
+"local@file:../local":
+  version "0.0.1"
+`
+
+func TestLockfileAliases(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "yarn.lock"), []byte(classicLock), 0o644)
+	ps, err := lockedPackages(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, p := range ps {
+		got = append(got, p.Name+"@"+p.Version)
+	}
+	if want := "@acme/tool@1.0.0 @acme/tool@1.1.0 @acme/util@2.0.0 left-pad@1.3.0"; strings.Join(got, " ") != want {
+		t.Fatalf("yarn 1:\ngot  %s\nwant %s", strings.Join(got, " "), want)
+	}
+
+	pl := t.TempDir()
+	os.WriteFile(filepath.Join(pl, "package-lock.json"), []byte(`{"lockfileVersion": 3, "packages": {
+		"node_modules/tool": {"name": "@acme/tool", "version": "1.0.0"}}}`), 0o644)
+	if ps, _ := lockedPackages(pl); len(ps) != 1 || ps[0].Name != "@acme/tool" {
+		t.Fatalf("package-lock alias: %+v", ps)
+	}
+	v1 := filepath.Join(t.TempDir(), "package-lock.json")
+	os.WriteFile(v1, []byte(`{"lockfileVersion": 1, "dependencies": {"tool": {"version": "npm:@acme/tool@1.0.0"}}}`), 0o644)
+	if ps, _ := parsePackageLock(v1); len(ps) != 1 || ps[0].Name != "@acme/tool" || ps[0].Version != "1.0.0" {
+		t.Fatalf("v1 alias: %+v", ps)
+	}
+
+	bad := t.TempDir()
+	os.WriteFile(filepath.Join(bad, "yarn.lock"), []byte("something: else\n"), 0o644)
+	if _, err := lockedPackages(bad); err == nil || !strings.Contains(err.Error(), "unknown yarn.lock format") {
+		t.Fatalf("unknown format: %v", err)
+	}
+
+	ws := t.TempDir()
+	os.WriteFile(filepath.Join(ws, "package.json"), []byte(`{"workspaces": ["packages/*"], "devDependencies": {"tool": "npm:@acme/tool@^1"}}`), 0o644)
+	os.MkdirAll(filepath.Join(ws, "packages", "app"), 0o755)
+	os.WriteFile(filepath.Join(ws, "packages", "app", "package.json"), []byte(`{"peerDependencies": {"@acme/peer": "*"}, "optionalDependencies": {"u": "npm:@acme/util@2"}}`), 0o644)
+	deps, err := manifestDeps(ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"@acme/tool", "@acme/peer", "@acme/util"} {
+		if !slices.Contains(deps, want) {
+			t.Fatalf("%s missing from %v", want, deps)
+		}
+	}
+	os.WriteFile(filepath.Join(ws, "package.json"), []byte(`{"workspaces": {"packages": ["packages/app"]}}`), 0o644)
+	if deps, _ := manifestDeps(ws); !slices.Contains(deps, "@acme/peer") {
+		t.Fatalf("workspaces object: %v", deps)
+	}
+}
+
+func TestNPMCheckAliasesAndMonorepos(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", filepath.Join(root, "home"))
+	reg := "https://deploy.example.com/npm/"
+	a := &app{cfg: &UserConfig{Contexts: map[string]*Context{}, NPM: &NPMConfig{Logins: []*NPMLogin{{Registry: reg, Name: "m", Token: "t", Scopes: []string{"@acme"}}}}}}
+
+	// An alias of a private package is guarded like the package.
+	alias := filepath.Join(root, "alias")
+	os.MkdirAll(alias, 0o755)
+	os.WriteFile(filepath.Join(alias, "package.json"), []byte(`{"dependencies":{"tool":"npm:@acme/tool@^1"}}`), 0o644)
+	res, err := a.npmCheck(context.Background(), alias)
+	if err != nil || !res.Guarded || len(res.Problems) != 1 || !strings.Contains(res.Problems[0].Message, "@acme is used") {
+		t.Fatalf("alias: %+v %v", res, err)
+	}
+
+	// The mapping in the monorepo root counts under a package's own .yarnrc.yml.
+	mono := filepath.Join(root, "mono")
+	app := filepath.Join(mono, "packages", "app")
+	os.MkdirAll(app, 0o755)
+	os.WriteFile(filepath.Join(mono, ".yarnrc.yml"), []byte("npmScopes:\n  acme:\n    npmRegistryServer: "+reg+"\n"), 0o644)
+	os.WriteFile(filepath.Join(app, ".yarnrc.yml"), []byte("nodeLinker: node-modules\n"), 0o644)
+	os.WriteFile(filepath.Join(app, "package.json"), []byte(`{"dependencies":{"@acme/tool":"^1"}}`), 0o644)
+	if res, err := a.npmCheck(context.Background(), app); err != nil || !res.Guarded || len(res.Problems) != 0 {
+		t.Fatalf("monorepo: %+v %v", res, err)
+	}
+	// A nearer file wins.
+	os.WriteFile(filepath.Join(app, ".yarnrc.yml"), []byte("npmScopes:\n  acme:\n    npmRegistryServer: https://evil.example/\n"), 0o644)
+	if res, _ := a.npmCheck(context.Background(), app); len(res.Problems) != 1 || !strings.Contains(res.Problems[0].Message, "evil.example") {
+		t.Fatalf("nearer mapping: %+v", res)
+	}
+
+	// A pnpm lockfile is reported, not silently passed.
+	os.WriteFile(filepath.Join(app, ".yarnrc.yml"), []byte("nodeLinker: node-modules\n"), 0o644)
+	os.WriteFile(filepath.Join(app, "pnpm-lock.yaml"), []byte("lockfileVersion: '9.0'\n"), 0o644)
+	if res, _ := a.npmCheck(context.Background(), app); len(res.Problems) != 1 || !strings.Contains(res.Problems[0].Message, "pnpm-lock.yaml cannot be checked") {
+		t.Fatalf("pnpm: %+v", res)
+	}
+}
+
+// With HOME behind a symlink, the home .yarnrc.yml is still told apart from a project's.
+func TestHomeBehindSymlink(t *testing.T) {
+	dir := t.TempDir()
+	real := filepath.Join(dir, "real")
+	os.MkdirAll(filepath.Join(real, "proj"), 0o755)
+	os.Symlink(real, filepath.Join(dir, "link"))
+	t.Setenv("HOME", filepath.Join(dir, "link"))
+	os.WriteFile(filepath.Join(real, ".yarnrc.yml"), []byte("npmRegistries: {}\n"), 0o600)
+	os.WriteFile(filepath.Join(real, "proj", "package.json"), []byte(`{}`), 0o644)
+	p, err := projectYarnrc(filepath.Join(real, "proj"))
+	if err != nil || p != filepath.Join(real, "proj", ".yarnrc.yml") {
+		t.Fatalf("%q %v", p, err)
+	}
+	if fs := projectYarnrcs(filepath.Join(real, "proj")); len(fs) != 0 {
+		t.Fatalf("home file read as a project's: %v", fs)
+	}
+}
+
+func TestPackCommand(t *testing.T) {
+	for _, c := range []struct {
+		yarn  bool
+		major int
+		want  string
+	}{
+		{true, 1, "yarn pack --filename /t/package.tgz"},
+		{true, 4, "yarn pack --out /t/package.tgz"},
+		{true, 0, "yarn pack --out /t/package.tgz"},
+		{false, 0, "npm pack --pack-destination /t"},
+	} {
+		if got := strings.Join(packCommand(c.yarn, c.major, "/t/package.tgz"), " "); got != c.want {
+			t.Errorf("%v %d: %s", c.yarn, c.major, got)
+		}
+	}
 }

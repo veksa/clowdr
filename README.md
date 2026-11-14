@@ -180,6 +180,10 @@ clowctl npm token ls | revoke <name> | rotate [--now]
 clowctl npm audit --package @acme/tool --since 24h
 ```
 
+`npm check` reads `yarn.lock` (yarn 1 and 2+), `package-lock.json` and `npm-shrinkwrap.json`,
+counts aliases (`"tool": "npm:@acme/tool@^1"`) by their real name and reports a pnpm or bun
+lockfile as unreadable. It guards only scopes known to be private, those of your `npm login` and
+those the project maps to a clowdr registry: on a machine with neither it guards nothing.
 `clowctl deploy` runs `npm check` first in a project that uses a scope mapped to clowdr;
 `--allow-outdated` deploys anyway and marks the release in `clowctl releases`. Every command warns
 when the local npm token expires within 30 days.

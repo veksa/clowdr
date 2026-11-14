@@ -54,6 +54,9 @@ type NPMLogin struct {
 	// Scopes are the package scopes ("@acme") the token is for; checks guard them against
 	// dependency confusion.
 	Scopes []string `yaml:"scopes,omitempty"`
+	// TokenScopes are the token's own scopes ("npm:read:@acme/*"), to tell a login asking for
+	// other ones.
+	TokenScopes []string `yaml:"token_scopes,omitempty"`
 }
 
 func (c *UserConfig) npmLogin(registry string) *NPMLogin {
@@ -150,6 +153,67 @@ func writeHomeTokens(reg, token string) ([]string, error) {
 		return nil, err
 	}
 	return []string{yrc, nrc}, nil
+}
+
+// writeHomeTokensFn is writeHomeTokens, replaced in tests to make the write fail.
+var writeHomeTokensFn = writeHomeTokens
+
+// preflightTokenFiles checks, before a token is created or rotated on the server, that
+// everything the new token goes into can take it: ~/.yarnrc.yml parses with room for the
+// registry's entry, ~/.npmrc is readable, both and the clowctl config are writable. A failure
+// here changes nothing, on the server or locally.
+func (a *app) preflightTokenFiles(reg string) error {
+	yrc, err := homeFile(".yarnrc.yml")
+	if err != nil {
+		return err
+	}
+	nrc, err := homeFile(".npmrc")
+	if err != nil {
+		return err
+	}
+	nothing := " (nothing was changed: fix it and run the command again)"
+	if _, _, _, err := yamlEdit(yrc, "x", "npmRegistries", reg, "npmAuthToken"); err != nil {
+		return fmt.Errorf("%w%s", err, nothing)
+	}
+	if _, err := os.ReadFile(nrc); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w%s", err, nothing)
+	}
+	for _, p := range []string{yrc, nrc, a.cfg.path} {
+		if err := checkWritable(p); err != nil {
+			return fmt.Errorf("%w%s", err, nothing)
+		}
+	}
+	if err := a.cfg.Save(); err != nil {
+		return fmt.Errorf("%w%s", err, nothing)
+	}
+	return nil
+}
+
+// storeNewToken keeps a token the server has just issued: first in the clowctl config, then in
+// the home files. The server no longer accepts the old token (or soon will not), so on any
+// failure the new one is printed once with what to do, instead of being lost.
+func (a *app) storeNewToken(l *NPMLogin, adminContext string) ([]string, error) {
+	a.cfg.setNPMLogin(l)
+	if err := a.cfg.Save(); err != nil {
+		fmt.Fprintf(a.err, "! the server issued npm token %s, but saving it to %s failed: %v\n"+
+			"  the new token (shown once): %s\n"+
+			"  put it yourself into ~/.yarnrc.yml (npmRegistries.\"%s\".npmAuthToken) and ~/.npmrc (%s=<token>)\n",
+			l.Name, a.cfg.path, err, l.Token, l.Registry, npmrcAuthKey(l.Registry))
+		return nil, err
+	}
+	files, err := writeHomeTokensFn(l.Registry, l.Token)
+	if err != nil {
+		ctx := adminContext
+		if ctx == "" {
+			ctx = "<admin context>"
+		}
+		fmt.Fprintf(a.err, "! the server issued npm token %s and it is saved in %s, but writing the home files failed: %v\n"+
+			"  the new token (shown once): %s\n"+
+			"  fix the file, then run: clowctl npm login --context %s --name %s (it writes the saved token again)\n",
+			l.Name, a.cfg.path, err, l.Token, ctx, l.Name)
+		return nil, err
+	}
+	return files, nil
 }
 
 // needNPMServer fails with errNPMTooOld when the server does not list the npm feature.
@@ -288,6 +352,47 @@ func packageScopes(scopes []string) []string {
 	return out
 }
 
+// loginScopes are a login's token scopes, or, for a login written before they were kept, its
+// package scopes.
+func loginScopes(l *NPMLogin) []string {
+	if len(l.TokenScopes) > 0 {
+		return l.TokenScopes
+	}
+	return l.Scopes
+}
+
+// sameScopes reports whether token scopes ts are what login l already has.
+func sameScopes(ts []string, l *NPMLogin) bool {
+	a, b := slices.Clone(ts), slices.Clone(l.TokenScopes)
+	if len(b) == 0 {
+		a, b = packageScopes(ts), slices.Clone(l.Scopes)
+	}
+	sort.Strings(a)
+	sort.Strings(b)
+	return slices.Equal(a, b)
+}
+
+// samePath reports whether two paths name the same file, following symlinks (a HOME that is a
+// symlink, /var vs /private/var).
+func samePath(a, b string) bool {
+	if a == "" || b == "" {
+		return a == b
+	}
+	return canonPath(a) == canonPath(b)
+}
+
+func canonPath(p string) string {
+	p, _ = filepath.Abs(p)
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	// A file that does not exist yet: resolve its directory.
+	if d, err := filepath.EvalSymlinks(filepath.Dir(p)); err == nil {
+		return filepath.Join(d, filepath.Base(p))
+	}
+	return p
+}
+
 // parseExpiry reads "1y", "90d", "720h".
 func parseExpiry(s string) (time.Duration, error) {
 	if n, ok := strings.CutSuffix(s, "y"); ok {
@@ -322,7 +427,10 @@ find it for every project. The token's name, expiry and scopes are kept in ~/.cl
 
 --scope @acme reads every package of the scope, @acme/tool one package; a full scope such as
 npm:publish:@acme/* or plugins:read is passed as it is. Running it again with a token that still
-works only rewrites the files.`,
+works only rewrites the files; asking for other scopes then is refused (revoke, then log in).
+
+The token and its files are checked writable before the server is asked, so a broken
+~/.yarnrc.yml never costs a token.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			t, err := a.target(false)
@@ -344,6 +452,16 @@ works only rewrites the files.`,
 				ctxName = a.cfg.Current
 			}
 			if l := a.cfg.npmLogin(reg); l != nil && l.Name == name && l.Token != "" && time.Now().Before(l.Expires) {
+				if len(scopes) > 0 {
+					ts, err := tokenScopes(scopes)
+					if err != nil {
+						return err
+					}
+					if !sameScopes(ts, l) {
+						return fmt.Errorf("already logged in to %s as %s for %s; a token's scopes cannot change: clowctl npm token revoke %s --context %s, then clowctl npm login --context %s --scope ...",
+							reg, name, strings.Join(loginScopes(l), " "), name, ctxName, ctxName)
+					}
+				}
 				if _, err := a.npmTokenClient(ctx, l); err == nil {
 					files, err := writeHomeTokens(reg, l.Token)
 					if err != nil {
@@ -364,6 +482,9 @@ works only rewrites the files.`,
 			if err != nil {
 				return err
 			}
+			if err := a.preflightTokenFiles(reg); err != nil {
+				return err
+			}
 			var tr npm.TokenResponse
 			err = t.client.Do(ctx, "POST", "/v1/npm/tokens", api.NPMTokenRequest{Name: name, Scopes: ts, ExpiresIn: fmt.Sprintf("%dh", int(ttl.Hours()))}, &tr)
 			var se *api.StatusError
@@ -372,12 +493,9 @@ works only rewrites the files.`,
 			} else if err != nil {
 				return err
 			}
-			files, err := writeHomeTokens(reg, tr.Token)
+			files, err := a.storeNewToken(&NPMLogin{Registry: reg, Context: ctxName, Name: name, Token: tr.Token, Expires: tr.Info.Expires,
+				Scopes: packageScopes(ts), TokenScopes: ts}, ctxName)
 			if err != nil {
-				return err
-			}
-			a.cfg.setNPMLogin(&NPMLogin{Registry: reg, Context: ctxName, Name: name, Token: tr.Token, Expires: tr.Info.Expires, Scopes: packageScopes(ts)})
-			if err := a.cfg.Save(); err != nil {
 				return err
 			}
 			fmt.Fprintf(a.err, "✓ logged in to %s as %s (%s), expires %s; wrote %s\n", reg, name, strings.Join(ts, " "), tr.Info.Expires.Format("2006-01-02"), strings.Join(files, ", "))
@@ -395,12 +513,31 @@ func findUp(dir, name, skip string) string {
 	dir, _ = filepath.Abs(dir)
 	for {
 		p := filepath.Join(dir, name)
-		if _, err := os.Stat(p); err == nil && p != skip {
+		if _, err := os.Stat(p); err == nil && (skip == "" || !samePath(p, skip)) {
 			return p
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
 			return ""
+		}
+		dir = parent
+	}
+}
+
+// projectYarnrcs are the .yarnrc.yml files in dir and above, nearest first, without the one in
+// the home directory: yarn merges them all, the nearest winning.
+func projectYarnrcs(dir string) []string {
+	home, _ := homeFile(".yarnrc.yml")
+	var out []string
+	dir, _ = filepath.Abs(dir)
+	for {
+		p := filepath.Join(dir, ".yarnrc.yml")
+		if _, err := os.Stat(p); err == nil && !samePath(p, home) {
+			out = append(out, p)
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return out
 		}
 		dir = parent
 	}
@@ -471,12 +608,8 @@ var packTarball = func(ctx context.Context, dir string) ([]byte, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(tmp)
-	var c *exec.Cmd
-	if findUp(dir, "yarn.lock", "") != "" {
-		c = exec.CommandContext(ctx, "yarn", "pack", "--out", filepath.Join(tmp, "package.tgz"))
-	} else {
-		c = exec.CommandContext(ctx, "npm", "pack", "--pack-destination", tmp)
-	}
+	args := packCommand(findUp(dir, "yarn.lock", "") != "", yarnMajor(ctx, dir), filepath.Join(tmp, "package.tgz"))
+	c := exec.CommandContext(ctx, args[0], args[1:]...)
 	c.Dir = dir
 	if out, err := c.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("%s: %v\n%s", strings.Join(c.Args, " "), err, out)
@@ -491,6 +624,31 @@ var packTarball = func(ctx context.Context, dir string) ([]byte, error) {
 		}
 	}
 	return nil, errors.New("pack produced no .tgz")
+}
+
+// packCommand is the pack command line: yarn 2+ takes --out, yarn 1 --filename, npm a
+// destination directory.
+func packCommand(useYarn bool, yarnMajor int, out string) []string {
+	switch {
+	case useYarn && yarnMajor == 1:
+		return []string{"yarn", "pack", "--filename", out}
+	case useYarn:
+		return []string{"yarn", "pack", "--out", out}
+	}
+	return []string{"npm", "pack", "--pack-destination", filepath.Dir(out)}
+}
+
+// yarnMajor is the major version of the yarn that runs in dir (0 when unknown).
+var yarnMajor = func(ctx context.Context, dir string) int {
+	c := exec.CommandContext(ctx, "yarn", "--version")
+	c.Dir = dir
+	out, err := c.Output()
+	if err != nil {
+		return 0
+	}
+	major, _, _ := strings.Cut(strings.TrimSpace(string(out)), ".")
+	n, _ := strconv.Atoi(major)
+	return n
 }
 
 // tarballManifest reads package.json from the top directory of an npm tarball.
@@ -602,6 +760,7 @@ send it to the public registry instead.`,
 				Name          string `json:"name"`
 				PublishConfig struct {
 					Registry string `json:"registry"`
+					Tag      string `json:"tag"`
 				} `json:"publishConfig"`
 			}
 			if err := json.Unmarshal(b, &pj); err != nil {
@@ -618,6 +777,9 @@ send it to the public registry instead.`,
 			if l == nil {
 				known, _ := a.npmRegistryFor()
 				return fmt.Errorf("publishConfig.registry %s is not a clowdr registry you are logged in to (this context's is %s): clowctl npm login", reg, known)
+			}
+			if tag == "" {
+				tag = pj.PublishConfig.Tag
 			}
 			c, err := a.npmTokenClient(ctx, l)
 			if err != nil {
@@ -644,7 +806,7 @@ send it to the public registry instead.`,
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&tag, "tag", "latest", "dist-tag to point at the new version")
+	cmd.Flags().StringVar(&tag, "tag", "", "dist-tag to point at the new version (default: publishConfig.tag, else latest)")
 	return cmd
 }
 
@@ -688,13 +850,20 @@ func (a *app) npmCheck(ctx context.Context, dir string) (npmCheckResult, error) 
 	homeYarnrc, _ := homeFile(".yarnrc.yml")
 	homeNpmrc, _ := homeFile(".npmrc")
 	mapped := map[string]string{} // @scope → registry
-	yarnrc := findUp(dir, ".yarnrc.yml", homeYarnrc)
-	if yarnrc != "" {
-		scopes, err := yamlMap(yarnrc, "npmScopes")
+	yarnrcs := projectYarnrcs(dir)
+	yarnrc := ""
+	if len(yarnrcs) > 0 {
+		yarnrc = yarnrcs[0]
+	}
+	for _, f := range yarnrcs { // nearest first: a nearer file's mapping wins, as in yarn
+		scopes, err := yamlMap(f, "npmScopes")
 		if err != nil {
 			return res, err
 		}
 		for s, n := range scopes {
+			if _, dup := mapped["@"+s]; dup {
+				continue
+			}
 			if v, err := yamlChild(n, "npmRegistryServer", false); err == nil && v != nil {
 				mapped["@"+s] = normRegistry(v.Value)
 			}
@@ -727,10 +896,15 @@ func (a *app) npmCheck(ctx context.Context, dir string) (npmCheckResult, error) 
 	}
 
 	var locked []lockedPackage
-	lockDir := ""
-	for _, f := range []string{"yarn.lock", "package-lock.json"} {
+	lockDir, unsupported := "", ""
+	for _, f := range append(slices.Clone(lockfileNames), unsupportedLockfiles...) {
 		if p := findUp(dir, f, ""); p != "" && (lockDir == "" || len(filepath.Dir(p)) > len(lockDir)) {
 			lockDir = filepath.Dir(p)
+		}
+	}
+	for _, f := range unsupportedLockfiles {
+		if _, err := os.Stat(filepath.Join(lockDir, f)); lockDir != "" && err == nil {
+			unsupported = filepath.Join(lockDir, f)
 		}
 	}
 	if lockDir != "" {
@@ -761,6 +935,9 @@ func (a *app) npmCheck(ctx context.Context, dir string) (npmCheckResult, error) 
 		return res, nil
 	}
 	res.Guarded = true
+	if unsupported != "" {
+		res.Problems = append(res.Problems, npmProblem{"", fmt.Sprintf("%s cannot be checked (clowctl reads yarn.lock, package-lock.json and npm-shrinkwrap.json): its versions of %s are not verified", unsupported, strings.Join(names, ", "))})
+	}
 	where := yarnrc
 	if where == "" {
 		where = ".yarnrc.yml"
@@ -843,12 +1020,19 @@ func (a *app) npmCheckCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "check [dir]",
 		Short: "Check locked packages from clowdr registries: none deprecated or removed, every scope mapped",
-		Long: `Reads yarn.lock (yarn 2+) and package-lock.json and package.json for the project in dir
+		Long: `Reads yarn.lock, package-lock.json (or npm-shrinkwrap.json) and package.json for the project in dir
 (default: here). For every package scope tied to a clowdr registry (a scope your npm login is
 for, or one the project maps to a clowdr registry) it fails when:
   - the scope is not mapped in the project's .yarnrc.yml or .npmrc, so a machine without the
     mapping would fetch it from the public registry;
   - a locked version is deprecated by retention or already removed (yarn up <package>).
+Aliases ("tool": "npm:@acme/tool@^1") count by their real name, and the package.json files of
+declared workspaces are read too. Every .yarnrc.yml from dir up is read, as yarn merges them; the
+one in your home directory is not, since other machines do not have it. yarn 1 lockfiles are
+read; a pnpm or bun lockfile is reported as unreadable.
+
+A scope is guarded only when it is known to be private: a machine with no npm login scopes and
+no project mapping to a clowdr registry guards nothing, and the check passes.
 clowctl deploy runs the same check first; --allow-outdated skips it.`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -1020,7 +1204,7 @@ files are rewritten too, otherwise the new token is printed once for its owner.`
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			var tr npm.TokenResponse
-			var reg string
+			var reg, adminCtx string
 			if len(args) == 0 {
 				l, err := a.npmLoginFor()
 				if err != nil {
@@ -1030,6 +1214,10 @@ files are rewritten too, otherwise the new token is printed once for its owner.`
 				if err != nil {
 					return err
 				}
+				if err := a.preflightTokenFiles(l.Registry); err != nil {
+					return err
+				}
+				adminCtx = l.Context
 				if err := c.Do(ctx, "POST", "/npm/-/clowdr/token/rotate", npm.RotateRequest{Now: now}, &tr); err != nil {
 					return err
 				}
@@ -1042,10 +1230,19 @@ files are rewritten too, otherwise the new token is printed once for its owner.`
 				if err := needNPMServer(ctx, t.client); err != nil {
 					return err
 				}
+				reg = registryURL(t.client.Server)
+				if l := a.cfg.npmLogin(reg); l != nil && l.Name == args[0] {
+					if err := a.preflightTokenFiles(reg); err != nil {
+						return err
+					}
+				}
 				if err := t.client.Do(ctx, "POST", "/v1/npm/tokens/"+url.PathEscape(args[0])+"/rotate", npm.RotateRequest{Now: now}, &tr); err != nil {
 					return err
 				}
-				reg = registryURL(t.client.Server)
+				adminCtx = a.contextName
+				if adminCtx == "" {
+					adminCtx = a.cfg.Current
+				}
 			}
 			l := a.cfg.npmLogin(reg)
 			if l == nil || l.Name != tr.Info.Name {
@@ -1053,14 +1250,13 @@ files are rewritten too, otherwise the new token is printed once for its owner.`
 				fmt.Fprintf(a.err, "✓ npm token %s rotated, expires %s: give the new token (shown once) to its owner\n", tr.Info.Name, tr.Info.Expires.Format("2006-01-02"))
 				return nil
 			}
-			files, err := writeHomeTokens(reg, tr.Token)
+			nl := *l
+			nl.Token, nl.Expires = tr.Token, tr.Info.Expires
+			files, err := a.storeNewToken(&nl, adminCtx)
 			if err != nil {
 				return err
 			}
-			l.Token, l.Expires = tr.Token, tr.Info.Expires
-			if err := a.cfg.Save(); err != nil {
-				return err
-			}
+			l = &nl
 			old := "works 24 h more"
 			if now {
 				old = "stopped"
