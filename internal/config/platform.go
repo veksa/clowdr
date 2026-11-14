@@ -164,11 +164,35 @@ func ParsePlatform(b []byte) (*Platform, error) {
 	if err := dec.Decode(&p); err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
 	}
+	if err := checkSetNPM(b); err != nil {
+		return nil, err
+	}
 	p.defaults()
 	if err := p.validate(); err != nil {
 		return nil, err
 	}
 	return &p, nil
+}
+
+// checkSetNPM refuses npm values that are written but would be replaced by a default: zero
+// is "not set" for keep and grace, so "keep: 0" would quietly mean 3.
+func checkSetNPM(b []byte) error {
+	var probe struct {
+		NPM struct {
+			Keep  *int      `yaml:"keep"`
+			Grace *Duration `yaml:"grace"`
+		} `yaml:"npm"`
+	}
+	if err := yaml.Unmarshal(b, &probe); err != nil {
+		return err
+	}
+	if k := probe.NPM.Keep; k != nil && *k < 1 {
+		return fmt.Errorf("npm.keep: must be at least 1, got %d", *k)
+	}
+	if g := probe.NPM.Grace; g != nil && *g <= 0 {
+		return errors.New("npm.grace: must be longer than 0")
+	}
+	return nil
 }
 
 func (p *Platform) defaults() {
@@ -251,9 +275,6 @@ func (p *Platform) validate() error {
 		if a.Image == "" {
 			return fmt.Errorf("addons.%s: image is required", name)
 		}
-	}
-	if p.NPM.Keep < 0 {
-		return fmt.Errorf("npm.keep: must be at least 1")
 	}
 	if p.NPM.MaxPublish < 0 {
 		return fmt.Errorf("npm.max_publish: must be positive")
