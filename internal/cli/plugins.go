@@ -158,6 +158,35 @@ func (a *app) fetchMarketplace(ctx context.Context, l *NPMLogin) (*npm.Marketpla
 	return &m, nil
 }
 
+// fetchClashes reads which plugin names the login's marketplace hides because more than one
+// package the token reads has been a plugin of the name. A server without the endpoint says
+// nothing, and neither does this.
+func (a *app) fetchClashes(ctx context.Context, l *NPMLogin) []npm.Clash {
+	c, err := a.npmTokenClient(ctx, l)
+	if err != nil {
+		return nil
+	}
+	var cl npm.Clashes
+	if err := c.Do(ctx, "GET", "/plugins/-/clashes", nil, &cl); err != nil {
+		return nil
+	}
+	return cl.Clashes
+}
+
+// warnClashes prints the hidden plugin names, which only name packages the token reads.
+func (a *app) warnClashes(cl []npm.Clash, marketplace string) {
+	if len(cl) == 0 {
+		return
+	}
+	var names []string
+	for _, c := range cl {
+		names = append(names, c.Name+" ("+strings.Join(c.Packages, ", ")+")")
+	}
+	fmt.Fprintf(a.err, "! %d plugin name(s) hidden from this token's marketplace %s, because more than one package it reads has been a plugin of the name: %s\n",
+		len(cl), marketplace, strings.Join(names, "; "))
+	fmt.Fprintf(a.err, "  a name never passes from one package to another; to see one of them, use a token that reads only one of the packages, or publish the plugin under a new name\n")
+}
+
 func (a *app) pluginsSetupCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "setup",
@@ -243,6 +272,7 @@ a symlink into a git work tree. Running it again changes nothing when nothing ch
 			for _, p := range m.Plugins {
 				fmt.Fprintf(a.err, "  %s@%s %s\n", p.Name, m.Name, p.Version)
 			}
+			a.warnClashes(a.fetchClashes(cmd.Context(), l), m.Name)
 			return nil
 		},
 	}
@@ -306,7 +336,9 @@ func (a *app) pluginsLsCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			cl := a.fetchClashes(cmd.Context(), l)
 			if a.json() {
+				a.warnClashes(cl, m.Name)
 				return a.printJSON(m)
 			}
 			fmt.Fprintf(a.err, "marketplace %s, %d plugin(s) for token %s\n", m.Name, len(m.Plugins), l.Name)
@@ -314,7 +346,11 @@ func (a *app) pluginsLsCmd() *cobra.Command {
 			for _, p := range m.Plugins {
 				fmt.Fprintf(w, "%s\t%s\t%s\n", p.Name+"@"+m.Name, p.Version, p.Description)
 			}
-			return w.Flush()
+			if err := w.Flush(); err != nil {
+				return err
+			}
+			a.warnClashes(cl, m.Name)
+			return nil
 		},
 	}
 }

@@ -345,6 +345,22 @@ func TestPluginsWorkflow(t *testing.T) {
 		t.Fatalf("missing token: %q %v", stdout, err)
 	}
 	contains(t, h.fails("plugins", "headers"), "--registry is required")
+
+	// A token that reads two packages that are plugins of one name is told which name it does
+	// not get, and why.
+	h.ok("npm", "token", "revoke", "laptop", "--context", "test")
+	cfg, _ = loadUserConfig()
+	cfg.NPM = nil
+	cfg.Save()
+	h.ok("npm", "login", "--context", "test", "--name", "two-scopes", "--scope", "plugins:read", "--scope", "npm:publish:@acme/*", "--scope", "npm:publish:@beta/*")
+	os.WriteFile(filepath.Join(pkg, "package.json"), []byte(`{"name":"@beta/hello","version":"1.2.0","claude-plugin":true,"publishConfig":{"registry":"`+reg+`"}}`), 0o644)
+	contains(t, h.ok("npm", "publish", "plugin", "--context", "test"), "published @beta/hello@1.2.0")
+	out, warn, err = h.run("plugins", "ls", "--context", "test")
+	if err != nil || strings.Contains(out, "hello@") {
+		t.Fatalf("ls: %q %v", out, err)
+	}
+	contains(t, warn, "1 plugin name(s) hidden", "hello (@acme/hello, @beta/hello)", "never passes from one package to another")
+	contains(t, h.ok("plugins", "setup", "--context", "test"), "1 plugin name(s) hidden")
 }
 
 // Against a server without the marketplace the commands say so.
