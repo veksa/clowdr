@@ -9,8 +9,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -618,6 +620,62 @@ func TestPluginNameNeverChangesHands(t *testing.T) {
 
 // Claims are backfilled from versions stored before claims existed, and from 0.4 versions as
 // they pass the check.
+// reopen closes the env's store, edits its database file directly, and opens it again.
+func (e *env) reopen(edit func(tx *bolt.Tx) error) {
+	e.t.Helper()
+	path := filepath.Join(filepath.Dir(e.h.Dir), "state.db")
+	e.st.Close()
+	db, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	if err := db.Update(edit); err != nil {
+		e.t.Fatal(err)
+	}
+	db.Close()
+	st, err := store.Open(path)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	e.t.Cleanup(func() { st.Close() })
+	e.st, e.h.Store = st, st
+}
+
+func (e *env) claimed() string {
+	cl, _ := e.st.NPMPluginClaims()
+	var names []string
+	for _, c := range cl {
+		names = append(names, c.Package+"="+c.Plugin)
+	}
+	return strings.Join(names, " ")
+}
+
+// to04 makes a stored version look as 0.4 stored it: no plugin record, not checked.
+func (e *env) to04(name, version string) {
+	e.st.UpdateNPM(name, func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
+		for _, v := range vs {
+			if v.Version == version {
+				v.Plugin, v.PluginChecked = nil, false
+				return []store.NPMVersion{v}, nil
+			}
+		}
+		return nil, store.ErrNotFound
+	})
+}
+
+func dropBuckets(names ...string) func(tx *bolt.Tx) error {
+	return func(tx *bolt.Tx) error {
+		for _, n := range names {
+			if err := tx.DeleteBucket([]byte(n)); err != nil && !errors.Is(err, bolt.ErrBucketNotFound) {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
+// Claims are backfilled once from versions stored before claims existed, and from 0.4 versions
+// as they pass the check; an undecodable record does not stop the store from opening.
 func TestPluginClaimsBackfill(t *testing.T) {
 	e := newEnv(t)
 	acme := e.token("acme", "npm:publish:@acme/*")
@@ -626,45 +684,113 @@ func TestPluginClaimsBackfill(t *testing.T) {
 	mustStatus(t, e.publishPlugin(acme, "@acme/tool", "1.0.0"), 201)
 	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.0"), 201)
 	mustStatus(t, e.publishPlugin(acme, "@acme/old", "1.0.0"), 201)
-	// @acme/old as 0.4 stored it: no plugin record, not checked.
-	e.st.UpdateNPM("@acme/old", func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
-		vs[0].Plugin, vs[0].PluginChecked = nil, false
-		return vs, nil
-	})
-	// A database from before claims: the bucket is gone.
-	path := filepath.Join(filepath.Dir(e.h.Dir), "state.db")
-	e.st.Close()
-	db, err := bolt.Open(path, 0o600, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Update(func(tx *bolt.Tx) error { return tx.DeleteBucket([]byte("npm_plugin_claims")) }); err != nil {
-		t.Fatal(err)
-	}
-	db.Close()
-	st, err := store.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	e.st, e.h.Store = st, st
-	claimed := func() string {
-		cl, _ := st.NPMPluginClaims()
-		var names []string
-		for _, c := range cl {
-			names = append(names, c.Package+"="+c.Plugin)
+	e.to04("@acme/old", "1.0.0")
+
+	var logs syncBuf
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	// A database from before claims: neither the claims nor the marker, and a broken record.
+	e.reopen(func(tx *bolt.Tx) error {
+		if err := dropBuckets("npm_plugin_claims", "meta")(tx); err != nil {
+			return err
 		}
-		return strings.Join(names, " ")
-	}
-	if got := claimed(); got != "@acme/tool=tool @beta/tool=tool" {
+		return tx.Bucket([]byte("npm_versions")).Put([]byte("@acme/broken/1.0.0"), []byte("{not json"))
+	})
+	if got := e.claimed(); got != "@acme/tool=tool @beta/tool=tool" {
 		t.Fatalf("backfilled claims: %s", got)
 	}
-	// tool clashes for this token; old is checked now, and claims its name.
+	if n := strings.Count(logs.String(), "does not decode"); n != 1 {
+		t.Fatalf("undecodable record logged %d times:\n%s", n, logs.String())
+	}
+	// The backfill ran once: with the marker set, claims dropped by hand stay dropped.
+	e.reopen(dropBuckets("npm_plugin_claims"))
+	if got := e.claimed(); got != "" {
+		t.Fatalf("backfilled again: %s", got)
+	}
+	if n := strings.Count(logs.String(), "does not decode"); n != 1 {
+		t.Fatalf("the backfill ran again:\n%s", logs.String())
+	}
+	// tool still clashes for this token: a package whose latest is a plugin counts as a claimant
+	// even without its stored claim. old is checked now, and its claim is stored.
 	if m := e.marketplace(both); len(m.Plugins) != 1 || m.Plugins[0].Name != "old" {
 		t.Fatalf("plugins: %+v", m.Plugins)
 	}
-	if got := claimed(); got != "@acme/old=old @acme/tool=tool @beta/tool=tool" {
+	if got := e.claimed(); got != "@acme/old=old" {
 		t.Fatalf("claims after the check: %s", got)
+	}
+}
+
+// A 0.4 plugin version that is not latest still claims its name (the stand case: @acme/old
+// 1.0.0 a plugin, 2.0.0 not, both stored by 0.4, and a @beta/old plugin).
+func TestPluginOlderVersionClaims(t *testing.T) {
+	e := newEnv(t)
+	acme := e.token("acme", "npm:publish:@acme/*")
+	beta := e.token("beta", "npm:publish:@beta/*")
+	acmeOnly := e.token("acme-only", "npm:read:@acme/*", "plugins:read")
+	betaOnly := e.token("beta-only", "npm:read:@beta/*", "plugins:read")
+	both := e.token("both", "npm:read:@acme/*", "npm:read:@beta/*", "plugins:read")
+	mustStatus(t, e.publishPlugin(acme, "@acme/old", "1.0.0"), 201)
+	mustStatus(t, e.publish(acme, "@acme/old", "2.0.0"), 201)
+	mustStatus(t, e.publishPlugin(beta, "@beta/old", "1.0.0"), 201)
+	e.to04("@acme/old", "1.0.0")
+	e.to04("@acme/old", "2.0.0")
+	e.to04("@beta/old", "1.0.0")
+	e.reopen(dropBuckets("npm_plugin_claims")) // the marker stays: as 0.4 left the database
+
+	if m := e.marketplace(both); len(m.Plugins) != 0 {
+		t.Fatalf("two-scope token: %+v", m.Plugins)
+	}
+	r := e.do("GET", "/plugins/-/clashes", both, nil)
+	if strings.TrimSpace(string(r.body)) != `{"clashes":[{"name":"old","packages":["@acme/old","@beta/old"]}]}` {
+		t.Fatalf("clashes: %s", r.body)
+	}
+	if got := e.claimed(); got != "@acme/old=old @beta/old=old" {
+		t.Fatalf("claims: %s", got)
+	}
+	if v, _ := e.st.NPMVersion("@acme/old", "2.0.0"); v.PluginChecked || v.Plugin != nil {
+		t.Fatalf("2.0.0 has no hint and needs no check: %+v", v)
+	}
+	if m := e.marketplace(acmeOnly); len(m.Plugins) != 0 {
+		t.Fatalf("acme-only: %+v", m.Plugins)
+	}
+	if m := e.marketplace(betaOnly); len(m.Plugins) != 1 || m.Plugins[0].Name != "old" {
+		t.Fatalf("beta-only: %+v", m.Plugins)
+	}
+	es, _ := e.h.Audit(AuditFilter{Action: "plugin.clashes"})
+	if len(es) != 1 || es[0].Detail != "1 clashes: old in @acme/old and @beta/old" || es[0].Token != "both" {
+		t.Fatalf("audit: %+v", es)
+	}
+}
+
+// An unchecked 0.4 version that cannot be checked now holds its name provisionally: it hides
+// the name, and is never listed itself.
+func TestPluginProvisionalClaim(t *testing.T) {
+	e := newEnv(t)
+	acme := e.token("acme", "npm:publish:@acme/*")
+	beta := e.token("beta", "npm:publish:@beta/*")
+	acmeOnly := e.token("acme-only", "npm:read:@acme/*", "plugins:read")
+	betaOnly := e.token("beta-only", "npm:read:@beta/*", "plugins:read")
+	both := e.token("both", "npm:read:@acme/*", "npm:read:@beta/*", "plugins:read")
+	mustStatus(t, e.publishPlugin(acme, "@acme/old", "1.0.0"), 201)
+	mustStatus(t, e.publishPlugin(acme, "@acme/old", "1.1.0"), 201)
+	mustStatus(t, e.publishPlugin(beta, "@beta/old", "1.0.0"), 201)
+	e.to04("@acme/old", "1.0.0")
+	e.to04("@acme/old", "1.1.0")
+	e.reopen(dropBuckets("npm_plugin_claims"))
+	v, _ := e.st.NPMVersion("@acme/old", "1.0.0")
+	tp, _ := e.h.tarPath(v.SHA512)
+	os.Remove(tp) // 1.0.0 cannot be checked
+
+	if m := e.marketplace(both); len(m.Plugins) != 0 {
+		t.Fatalf("two-scope token: %+v", m.Plugins)
+	}
+	// 1.1.0, the latest, checks and is a plugin, but the package stays provisional for acme-only.
+	if m := e.marketplace(acmeOnly); len(m.Plugins) != 0 {
+		t.Fatalf("acme-only: %+v", m.Plugins)
+	}
+	if m := e.marketplace(betaOnly); len(m.Plugins) != 1 {
+		t.Fatalf("beta-only: %+v", m.Plugins)
 	}
 }
 

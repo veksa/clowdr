@@ -106,7 +106,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open state %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bProjects, bTokens, bServices, bReleases, bBlobs, bNPMTokens, bNPMPackages, bNPMVersions, bNPMAudit, bNPMClaims} {
+		for _, b := range [][]byte{bProjects, bTokens, bServices, bReleases, bBlobs, bNPMTokens, bNPMPackages, bNPMVersions, bNPMAudit, bNPMClaims, bMeta} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}

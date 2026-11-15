@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -21,6 +22,9 @@ var (
 	// bNPMClaims holds the packages that have ever been a Claude Code plugin, as the server
 	// checked them (never what a client said). An entry is never removed.
 	bNPMClaims = []byte("npm_plugin_claims") // key: @scope/name
+	// bMeta holds markers of one-time migrations.
+	bMeta                = []byte("meta")
+	metaClaimsBackfilled = []byte("claims_backfilled")
 )
 
 // NPMPluginClaim records that a package has been a plugin of a name: since then it takes part
@@ -40,16 +44,29 @@ func claimPlugin(tx *bolt.Tx, v NPMVersion) error {
 	return put(tx, bNPMClaims, v.Name, NPMPluginClaim{Package: v.Name, Plugin: v.Plugin.Name, Since: v.Published})
 }
 
-// backfillClaims records the claims of every stored version that is a plugin: a database from
-// before claims existed, or a write that a crash cut short, gets them on the next Open.
+// backfillClaims records, once, the claims of every stored version that is a plugin: a
+// database from before claims existed gets them on its first Open by a binary that knows them.
+// After that every write of a plugin version records its claim in the same transaction, so the
+// marker in the meta bucket ends the backfill for good. A record that does not decode is skipped
+// with a warning: it cannot be a version the registry serves, and it must not keep the server
+// from starting.
 func backfillClaims(tx *bolt.Tx) error {
-	return tx.Bucket(bNPMVersions).ForEach(func(_, b []byte) error {
+	meta := tx.Bucket(bMeta)
+	if meta.Get(metaClaimsBackfilled) != nil {
+		return nil
+	}
+	err := tx.Bucket(bNPMVersions).ForEach(func(k, b []byte) error {
 		var v NPMVersion
 		if err := json.Unmarshal(b, &v); err != nil {
-			return err
+			slog.Warn("store: a version record does not decode; skipped while backfilling plugin claims", "key", string(k), "err", err)
+			return nil
 		}
 		return claimPlugin(tx, v)
 	})
+	if err != nil {
+		return err
+	}
+	return meta.Put(metaClaimsBackfilled, []byte(time.Now().UTC().Format(time.RFC3339)))
 }
 
 // NPMPluginClaims lists every claim.

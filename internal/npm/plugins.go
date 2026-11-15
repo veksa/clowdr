@@ -678,6 +678,14 @@ func (h *Handler) pluginOf(v store.NPMVersion) (*store.NPMPlugin, error) {
 			}
 			return nil, nil
 		}
+		// A plugin: record it (and so its package's claim) before the zip, which may fail.
+		ok, err := update(p)
+		if !ok {
+			if err == nil {
+				return nil, nil // removed meanwhile
+			}
+			return fail("record", err)
+		}
 	}
 	b, err := h.makeZip(tgz, maxUnpackedCap, config.PluginMaxZipCap)
 	if err != nil {
@@ -826,14 +834,21 @@ func (c *call) listing(urlBase string) (plugins []MarketplacePlugin, clashes []C
 	}
 	claimants := map[string][]string{} // plugin name → readable packages that claim it
 	claimed := map[string]bool{}
-	for _, cl := range claims {
-		if readable[cl.Package] && !claimed[cl.Package] {
-			claimed[cl.Package] = true
-			claimants[cl.Plugin] = append(claimants[cl.Plugin], cl.Package)
+	claim := func(pkg, name string) {
+		if !claimed[pkg] {
+			claimed[pkg] = true
+			claimants[name] = append(claimants[name], pkg)
 		}
 	}
-	// The latest version of each readable claimant, and of each readable package not claimed
-	// yet (a 0.4 version is checked, and claims its name, the first time it is looked at).
+	for _, cl := range claims {
+		if readable[cl.Package] {
+			claim(cl.Package, cl.Plugin)
+		}
+	}
+	// provisional marks packages that may claim their name but are not known to: a version stored
+	// by 0.4 whose version object says "claude-plugin": true and that could not be checked yet,
+	// or a package whose versions cannot be read. They count in a clash, and are never listed.
+	provisional := map[string]bool{}
 	type state struct {
 		entry *MarketplacePlugin
 		why   string
@@ -843,9 +858,32 @@ func (c *call) listing(urlBase string) (plugins []MarketplacePlugin, clashes []C
 		if !readable[p.Name] {
 			continue
 		}
+		_, base, _ := strings.Cut(p.Name, "/")
 		pp, live, err := c.h.live(p.Name)
 		if err != nil {
-			return nil, nil, nil, err
+			c.h.log().Error("npm: plugin listing: read versions", "package", p.Name, "err", err)
+			provisional[p.Name] = true
+			claim(p.Name, base)
+			states[p.Name] = state{why: p.Name + " (versions unreadable)"}
+			continue
+		}
+		// Versions stored before the server checked plugins, at any version, not only latest:
+		// any of them may have made the package a plugin of its name.
+		for _, lv := range live {
+			if lv.Plugin != nil || lv.PluginChecked || !manifestSaysPlugin(lv.Manifest) {
+				continue
+			}
+			c.h.pluginOf(lv)
+			cur, err := c.h.Store.NPMVersion(lv.Name, lv.Version)
+			switch {
+			case err == nil && cur.Plugin != nil:
+				claim(p.Name, cur.Plugin.Name)
+			case err == nil && (cur.PluginChecked || cur.Removed):
+			case errors.Is(err, store.ErrNotFound):
+			default:
+				provisional[p.Name] = true
+				claim(p.Name, base)
+			}
 		}
 		if len(live) == 0 {
 			states[p.Name] = state{why: "no live version"}
@@ -870,11 +908,11 @@ func (c *call) listing(urlBase string) (plugins []MarketplacePlugin, clashes []C
 				Name: pl.Name, Description: pl.Description, Version: v.Version,
 				Source: ArchiveSource{Source: "archive", URL: urlBase + "/plugins/" + scope + "/" + name + "/" + v.Version + ".zip", SHA256: pl.ZipSHA256},
 			}}
-			if !claimed[p.Name] {
-				// Claimed by the check pluginOf just did (or by a write that will be backfilled).
-				claimed[p.Name] = true
-				claimants[pl.Name] = append(claimants[pl.Name], p.Name)
-			}
+			// Claimed by the check pluginOf just did (or by a write that will be backfilled).
+			claim(p.Name, pl.Name)
+		}
+		if provisional[p.Name] && states[p.Name].entry != nil {
+			states[p.Name] = state{why: p.Name + " (an older version could not be checked)"}
 		}
 	}
 	for name, cs := range claimants {
@@ -884,7 +922,7 @@ func (c *call) listing(urlBase string) (plugins []MarketplacePlugin, clashes []C
 			clashes = append(clashes, Clash{Name: name, Packages: cs})
 			skipped = append(skipped, "plugin name "+name+" in "+strings.Join(cs, " and "))
 			c.h.clash(c.tok.Name, name, cs)
-		case st.entry != nil && st.entry.Name == name:
+		case st.entry != nil && st.entry.Name == name && !provisional[cs[0]]:
 			plugins = append(plugins, *st.entry)
 		case st.why != "":
 			skipped = append(skipped, st.why)
@@ -948,6 +986,7 @@ func (c *call) marketplace() {
 // clowctl shows them; Claude Code does not read it. The same rights as the marketplace apply.
 func (c *call) clashes() {
 	if !c.rights.Plugins() {
+		c.audit("plugin.clashes", "", "", "", 404, "no plugins:read")
 		notFound(c.w)
 		return
 	}
@@ -960,6 +999,15 @@ func (c *call) clashes() {
 	if clashes == nil {
 		clashes = []Clash{}
 	}
+	var names []string
+	for _, cl := range clashes {
+		names = append(names, cl.Name+" in "+strings.Join(cl.Packages, " and "))
+	}
+	detail := fmt.Sprintf("%d clashes", len(clashes))
+	if len(names) > 0 {
+		detail += ": " + strings.Join(names, ", ")
+	}
+	c.audit("plugin.clashes", "", "", "", 200, detail)
 	writeJSON(c.w, 200, Clashes{Clashes: clashes})
 }
 
