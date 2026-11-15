@@ -775,6 +775,8 @@ func (c *call) servePlugins(segs []string) {
 	switch {
 	case len(segs) == 1 && segs[0] == "marketplace.json":
 		c.marketplace()
+	case len(segs) == 2 && segs[0] == "-" && segs[1] == "clashes":
+		c.clashes()
 	case len(segs) == 3 && strings.HasPrefix(segs[0], "@"):
 		c.pluginZip(segs[0]+"/"+segs[1], segs[2])
 	default:
@@ -782,16 +784,121 @@ func (c *call) servePlugins(segs []string) {
 	}
 }
 
-// marketplace serves marketplace.json: one entry per plugin package the token may read, at the
-// version its latest tag points at. A token that may read none gets a valid, empty marketplace;
-// a token without plugins:read gets 404.
+// Clash is a plugin name a token's marketplace leaves out because more than one package the
+// token reads has been a plugin of that name.
+type Clash struct {
+	Name     string   `json:"name"`
+	Packages []string `json:"packages"`
+}
+
+// Clashes is the answer of /plugins/-/clashes.
+type Clashes struct {
+	Clashes []Clash `json:"clashes"`
+}
+
+// listing works out what a token's marketplace lists. Each plugin name goes by its claimants, the
+// packages that have ever been a plugin of it as the server checked them (store claims, never
+// removed), among those the token reads:
 //
-// Two packages this token reads that are plugins of one name (@acme/tool and @beta/tool) are
-// both left out, for this token only: Claude Code keys an installed plugin by its name, so
-// listing either could let one scope replace the other's plugin on the machines of whoever
-// holds the token. Which packages clash is decided by what the token reads, so nothing about a
-// package leaks to a token that cannot read it, and no publish anywhere can take a name away
-// from a token that reads only one of them.
+//   - one claimant whose latest version is a plugin with its zip: listed;
+//   - more than one claimant, whatever their latest versions are now: nothing under that name;
+//   - one claimant whose latest version is not a plugin, or whose zip is unavailable: nothing.
+//
+// So a plugin name never passes from one package to another for any token: Claude Code keys an
+// installed plugin by its name, and a name that changed hands would auto-update every machine
+// that installed it to the other package's code. A name can only disappear. Which packages count
+// is decided by what the token reads, so nothing about a package leaks to a token that cannot
+// read it, and no publish anywhere is judged by other scopes.
+func (c *call) listing(urlBase string) (plugins []MarketplacePlugin, clashes []Clash, skipped []string, err error) {
+	pkgs, err := c.h.Store.NPMPackages()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	claims, err := c.h.Store.NPMPluginClaims()
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	readable := map[string]bool{}
+	for _, p := range pkgs {
+		if c.rights.CanRead(p.Name) {
+			readable[p.Name] = true
+		}
+	}
+	claimants := map[string][]string{} // plugin name → readable packages that claim it
+	claimed := map[string]bool{}
+	for _, cl := range claims {
+		if readable[cl.Package] && !claimed[cl.Package] {
+			claimed[cl.Package] = true
+			claimants[cl.Plugin] = append(claimants[cl.Plugin], cl.Package)
+		}
+	}
+	// The latest version of each readable claimant, and of each readable package not claimed
+	// yet (a 0.4 version is checked, and claims its name, the first time it is looked at).
+	type state struct {
+		entry *MarketplacePlugin
+		why   string
+	}
+	states := map[string]state{}
+	for _, p := range pkgs {
+		if !readable[p.Name] {
+			continue
+		}
+		pp, live, err := c.h.live(p.Name)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		if len(live) == 0 {
+			states[p.Name] = state{why: "no live version"}
+			continue
+		}
+		latest := latestOf(liveTags(pp.DistTags, live), live)
+		var v store.NPMVersion
+		for _, lv := range live {
+			if lv.Version == latest {
+				v = lv
+			}
+		}
+		pl, err := c.h.pluginOf(v)
+		switch {
+		case err != nil:
+			states[p.Name] = state{why: p.Name + "@" + v.Version + " (zip unavailable)"}
+		case pl == nil:
+			states[p.Name] = state{why: p.Name + "@" + v.Version + " (not a plugin)"}
+		default:
+			scope, name, _ := strings.Cut(p.Name, "/")
+			states[p.Name] = state{entry: &MarketplacePlugin{
+				Name: pl.Name, Description: pl.Description, Version: v.Version,
+				Source: ArchiveSource{Source: "archive", URL: urlBase + "/plugins/" + scope + "/" + name + "/" + v.Version + ".zip", SHA256: pl.ZipSHA256},
+			}}
+			if !claimed[p.Name] {
+				// Claimed by the check pluginOf just did (or by a write that will be backfilled).
+				claimed[p.Name] = true
+				claimants[pl.Name] = append(claimants[pl.Name], p.Name)
+			}
+		}
+	}
+	for name, cs := range claimants {
+		sort.Strings(cs)
+		switch st := states[cs[0]]; {
+		case len(cs) > 1:
+			clashes = append(clashes, Clash{Name: name, Packages: cs})
+			skipped = append(skipped, "plugin name "+name+" in "+strings.Join(cs, " and "))
+			c.h.clash(c.tok.Name, name, cs)
+		case st.entry != nil && st.entry.Name == name:
+			plugins = append(plugins, *st.entry)
+		case st.why != "":
+			skipped = append(skipped, st.why)
+		}
+	}
+	sort.Slice(plugins, func(i, j int) bool { return plugins[i].Name < plugins[j].Name })
+	sort.Slice(clashes, func(i, j int) bool { return clashes[i].Name < clashes[j].Name })
+	sort.Strings(skipped)
+	return plugins, clashes, skipped, nil
+}
+
+// marketplace serves marketplace.json: one entry per plugin name the token may be given (see
+// listing), at the version the package's latest tag points at. A token that may read none gets a
+// valid, empty marketplace; a token without plugins:read gets 404.
 func (c *call) marketplace() {
 	if !c.rights.Plugins() {
 		c.audit("plugin.list", "", "", "", 404, "no plugins:read")
@@ -814,55 +921,12 @@ func (c *call) marketplace() {
 		Description: "Private Claude Code plugins on " + host,
 		Plugins:     []MarketplacePlugin{},
 	}
-	pkgs, err := c.h.Store.NPMPackages()
+	plugins, _, skipped, err := c.listing(urlBase)
 	if err != nil {
 		writeErr(c.w, 500, "storage error")
 		return
 	}
-	sort.Slice(pkgs, func(i, j int) bool { return pkgs[i].Name < pkgs[j].Name })
-	var skipped []string
-	byName := map[string][]MarketplacePlugin{}
-	from := map[string][]string{} // plugin name → packages
-	for _, p := range pkgs {
-		if !c.rights.CanRead(p.Name) {
-			continue
-		}
-		pp, live, err := c.h.live(p.Name)
-		if err != nil || len(live) == 0 {
-			continue
-		}
-		latest := latestOf(liveTags(pp.DistTags, live), live)
-		var v store.NPMVersion
-		for _, lv := range live {
-			if lv.Version == latest {
-				v = lv
-			}
-		}
-		pl, err := c.h.pluginOf(v)
-		if err != nil {
-			skipped = append(skipped, p.Name+"@"+v.Version+" (zip unavailable)")
-			continue
-		}
-		if pl == nil {
-			continue
-		}
-		scope, name, _ := strings.Cut(p.Name, "/")
-		byName[pl.Name] = append(byName[pl.Name], MarketplacePlugin{
-			Name: pl.Name, Description: pl.Description, Version: v.Version,
-			Source: ArchiveSource{Source: "archive", URL: urlBase + "/plugins/" + scope + "/" + name + "/" + v.Version + ".zip", SHA256: pl.ZipSHA256},
-		})
-		from[pl.Name] = append(from[pl.Name], p.Name)
-	}
-	for name, es := range byName {
-		if len(es) > 1 {
-			skipped = append(skipped, "plugin name "+name+" in "+strings.Join(from[name], " and "))
-			c.h.clash(c.tok.Name, name, from[name])
-			continue
-		}
-		m.Plugins = append(m.Plugins, es[0])
-	}
-	sort.Slice(m.Plugins, func(i, j int) bool { return m.Plugins[i].Name < m.Plugins[j].Name })
-	sort.Strings(skipped)
+	m.Plugins = append(m.Plugins, plugins...)
 	detail := fmt.Sprintf("%d plugins", len(m.Plugins))
 	if len(skipped) > 0 {
 		detail += ", skipped " + strings.Join(skipped, ", ")
@@ -879,8 +943,28 @@ func (c *call) marketplace() {
 	enc.Encode(m)
 }
 
+// clashes serves /plugins/-/clashes: the plugin names this token's marketplace leaves out because
+// more than one package the token reads has been a plugin of the name, with those packages.
+// clowctl shows them; Claude Code does not read it. The same rights as the marketplace apply.
+func (c *call) clashes() {
+	if !c.rights.Plugins() {
+		notFound(c.w)
+		return
+	}
+	urlBase, _ := c.pluginsBase()
+	_, clashes, _, err := c.listing(urlBase)
+	if err != nil {
+		writeErr(c.w, 500, "storage error")
+		return
+	}
+	if clashes == nil {
+		clashes = []Clash{}
+	}
+	writeJSON(c.w, 200, Clashes{Clashes: clashes})
+}
+
 // clash logs, once per process, token and set of packages, a plugin name that two packages the
-// token reads hold.
+// token reads have claimed.
 func (h *Handler) clash(token, name string, pkgs []string) {
 	key := token + "\x00" + name + "\x00" + strings.Join(pkgs, " ")
 	h.zipMu.Lock()
@@ -892,7 +976,7 @@ func (h *Handler) clash(token, name string, pkgs []string) {
 		h.collided = map[string]bool{}
 	}
 	h.collided[key] = true
-	h.log().Warn("npm: a token reads two plugins of one name; neither is listed for it (narrow the token's scopes)",
+	h.log().Warn("npm: a token reads two packages that have been plugins of one name; neither is listed for it (narrow the token's scopes)",
 		"token", token, "plugin", name, "packages", strings.Join(pkgs, " "))
 }
 

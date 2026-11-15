@@ -106,12 +106,12 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open state %s: %w", path, err)
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		for _, b := range [][]byte{bProjects, bTokens, bServices, bReleases, bBlobs, bNPMTokens, bNPMPackages, bNPMVersions, bNPMAudit} {
+		for _, b := range [][]byte{bProjects, bTokens, bServices, bReleases, bBlobs, bNPMTokens, bNPMPackages, bNPMVersions, bNPMAudit, bNPMClaims} {
 			if _, err := tx.CreateBucketIfNotExists(b); err != nil {
 				return err
 			}
 		}
-		return nil
+		return backfillClaims(tx)
 	})
 	if err != nil {
 		db.Close()

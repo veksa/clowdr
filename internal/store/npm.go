@@ -18,7 +18,48 @@ var (
 	bNPMPackages = []byte("npm_packages") // key: @scope/name
 	bNPMVersions = []byte("npm_versions") // key: @scope/name/<version>
 	bNPMAudit    = []byte("npm_audit")    // key: <seq big-endian>
+	// bNPMClaims holds the packages that have ever been a Claude Code plugin, as the server
+	// checked them (never what a client said). An entry is never removed.
+	bNPMClaims = []byte("npm_plugin_claims") // key: @scope/name
 )
+
+// NPMPluginClaim records that a package has been a plugin of a name: since then it takes part
+// in deciding who may be listed under that name, whatever its later versions are, so a plugin
+// name never passes from one package to another (docs/plugins.md, one name per token).
+type NPMPluginClaim struct {
+	Package string    `json:"package"`
+	Plugin  string    `json:"plugin"`
+	Since   time.Time `json:"since"`
+}
+
+// claimPlugin records the claim of a version that is a plugin, once per package.
+func claimPlugin(tx *bolt.Tx, v NPMVersion) error {
+	if v.Plugin == nil || v.Plugin.Name == "" || tx.Bucket(bNPMClaims).Get([]byte(v.Name)) != nil {
+		return nil
+	}
+	return put(tx, bNPMClaims, v.Name, NPMPluginClaim{Package: v.Name, Plugin: v.Plugin.Name, Since: v.Published})
+}
+
+// backfillClaims records the claims of every stored version that is a plugin: a database from
+// before claims existed, or a write that a crash cut short, gets them on the next Open.
+func backfillClaims(tx *bolt.Tx) error {
+	return tx.Bucket(bNPMVersions).ForEach(func(_, b []byte) error {
+		var v NPMVersion
+		if err := json.Unmarshal(b, &v); err != nil {
+			return err
+		}
+		return claimPlugin(tx, v)
+	})
+}
+
+// NPMPluginClaims lists every claim.
+func (s *Store) NPMPluginClaims() (out []NPMPluginClaim, err error) {
+	err = s.db.View(func(tx *bolt.Tx) error {
+		out, err = list[NPMPluginClaim](tx, bNPMClaims, "")
+		return err
+	})
+	return
+}
 
 // ErrExists is returned when a record that must not be overwritten already exists.
 var ErrExists = errors.New("already exists")
@@ -243,6 +284,9 @@ func (s *Store) PublishNPM(v NPMVersion, tags []string) error {
 		if err := put(tx, bNPMVersions, versionKey(v.Name, v.Version), v); err != nil {
 			return err
 		}
+		if err := claimPlugin(tx, v); err != nil {
+			return err
+		}
 		return put(tx, bNPMPackages, v.Name, p)
 	})
 }
@@ -265,6 +309,9 @@ func (s *Store) UpdateNPM(name string, fn func(p *NPMPackage, vs []NPMVersion) (
 		}
 		for _, v := range changed {
 			if err := put(tx, bNPMVersions, versionKey(v.Name, v.Version), v); err != nil {
+				return err
+			}
+			if err := claimPlugin(tx, v); err != nil {
 				return err
 			}
 		}

@@ -12,10 +12,13 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	bolt "go.etcd.io/bbolt"
 
 	"github.com/veksa/clowdr/internal/config"
 	"github.com/veksa/clowdr/internal/store"
@@ -500,7 +503,7 @@ func TestPluginNameClashPerToken(t *testing.T) {
 			}
 		}
 	}
-	if n := strings.Count(e.logs.String(), "reads two plugins of one name"); n != 1 {
+	if n := strings.Count(e.logs.String(), "have been plugins of one name"); n != 1 {
 		t.Fatalf("clash logged %d times:\n%s", n, e.logs.String())
 	}
 	es, _ := e.h.Audit(AuditFilter{Action: "plugin.list", Token: "both"})
@@ -510,10 +513,158 @@ func TestPluginNameClashPerToken(t *testing.T) {
 	// Both packages keep publishing.
 	mustStatus(t, e.publishPlugin(acme, "@acme/tool", "1.0.1"), 201)
 	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.1"), 201)
-	// Once one of them is no plugin at its latest version, the other is listed again.
-	mustStatus(t, e.publish(beta, "@beta/tool", "2.0.0"), 201)
-	if m := e.marketplace(both); len(m.Plugins) != 2 || m.Plugins[1].Version != "1.0.1" || !strings.Contains(m.Plugins[1].Source.URL, "@acme/tool") {
+	// The clashes endpoint tells the two-scope token what is hidden, and nobody else anything.
+	for tok, want := range map[string]string{both: `{"clashes":[{"name":"tool","packages":["@acme/tool","@beta/tool"]}]}`, acmeOnly: `{"clashes":[]}`} {
+		r := e.do("GET", "/plugins/-/clashes", tok, nil)
+		if r.status != 200 || strings.TrimSpace(string(r.body)) != want {
+			t.Errorf("clashes for %s: %d %s", tok, r.status, r.body)
+		}
+	}
+	mustStatus(t, e.do("GET", "/plugins/-/clashes", e.token("npm-only", "npm:read:@acme/*"), nil), 404)
+	mustStatus(t, e.do("GET", "/plugins/-/clashes", "", nil), 401)
+}
+
+// A name never changes hands: once two packages a token reads have been plugins of one name,
+// nothing that happens to either of them lists the other under it for that token.
+func TestPluginNameNeverChangesHands(t *testing.T) {
+	setup := func(t *testing.T) (e *env, acme, beta, acmeOnly, betaOnly, both string) {
+		e = newEnv(t)
+		acme = e.token("acme", "npm:publish:@acme/*", "plugins:read")
+		beta = e.token("beta", "npm:publish:@beta/*")
+		acmeOnly = e.token("acme-only", "npm:read:@acme/*", "plugins:read")
+		betaOnly = e.token("beta-only", "npm:read:@beta/*", "plugins:read")
+		both = e.token("both", "npm:read:@acme/*", "npm:read:@beta/*", "plugins:read")
+		mustStatus(t, e.publishPlugin(acme, "@acme/tool", "1.0.0"), 201)
+		mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.0"), 201)
+		return
+	}
+	listed := func(e *env, tok string) string {
+		var got []string
+		for _, p := range e.marketplace(tok).Plugins {
+			got = append(got, p.Name+"="+strings.Join(strings.Split(p.Source.URL, "/")[4:6], "/"))
+		}
+		return strings.Join(got, " ")
+	}
+
+	t.Run("latest is no longer a plugin", func(t *testing.T) {
+		e, acme, _, acmeOnly, betaOnly, both := setup(t)
+		mustStatus(t, e.publish(acme, "@acme/tool", "2.0.0"), 201)
+		if got := listed(e, both); got != "" {
+			t.Fatalf("two-scope token: %q, beta took acme's name", got)
+		}
+		if got := listed(e, acmeOnly); got != "" {
+			t.Fatalf("acme-only: %q", got)
+		}
+		if got := listed(e, betaOnly); got != "tool=@beta/tool" {
+			t.Fatalf("beta-only: %q", got)
+		}
+		es, _ := e.h.Audit(AuditFilter{Action: "plugin.list", Token: "acme-only"})
+		if !strings.Contains(es[0].Detail, "@acme/tool@2.0.0 (not a plugin)") {
+			t.Fatalf("audit: %+v", es[0])
+		}
+	})
+	t.Run("zip unavailable", func(t *testing.T) {
+		e, _, _, acmeOnly, betaOnly, both := setup(t)
+		v, _ := e.st.NPMVersion("@acme/tool", "1.0.0")
+		zp, _ := e.h.zipPath(v.SHA512)
+		tp, _ := e.h.tarPath(v.SHA512)
+		os.Remove(zp)
+		os.Remove(tp) // the zip cannot be rebuilt
+		if got := listed(e, both); got != "" {
+			t.Fatalf("two-scope token: %q", got)
+		}
+		if got := listed(e, acmeOnly); got != "" {
+			t.Fatalf("acme-only: %q", got)
+		}
+		if got := listed(e, betaOnly); got != "tool=@beta/tool" {
+			t.Fatalf("beta-only: %q", got)
+		}
+	})
+	t.Run("retention removes every plugin version", func(t *testing.T) {
+		e, acme, _, acmeOnly, _, both := setup(t)
+		for _, v := range []string{"2.0.0", "2.1.0", "2.2.0", "2.3.0"} {
+			mustStatus(t, e.publish(acme, "@acme/tool", v), 201)
+		}
+		e.advance(15 * 24 * time.Hour)
+		e.h.Sweep(t.Context())
+		if v, _ := e.st.NPMVersion("@acme/tool", "1.0.0"); !v.Removed {
+			t.Fatal("retention kept the plugin version: the test proves nothing")
+		}
+		if got := listed(e, both); got != "" {
+			t.Fatalf("two-scope token: %q", got)
+		}
+		if got := listed(e, acmeOnly); got != "" {
+			t.Fatalf("acme-only: %q", got)
+		}
+		claims, _ := e.st.NPMPluginClaims()
+		if len(claims) != 2 {
+			t.Fatalf("claims: %+v", claims)
+		}
+	})
+	t.Run("a package that was never a plugin claims nothing", func(t *testing.T) {
+		e := newEnv(t)
+		acme := e.token("acme", "npm:publish:@acme/*")
+		beta := e.token("beta", "npm:publish:@beta/*")
+		both := e.token("both", "npm:read:@acme/*", "npm:read:@beta/*", "plugins:read")
+		mustStatus(t, e.publish(acme, "@acme/tool", "1.0.0"), 201)
+		forged := pubOpts{fields: map[string]any{"claude-plugin": true}}
+		mustStatus(t, e.publishData(acme, "@acme/tool", "1.0.1", tgz(t, "@acme/tool", "1.0.1"), forged), 201)
+		mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.0"), 201)
+		if got := listed(e, both); got != "tool=@beta/tool" {
+			t.Fatalf("two-scope token: %q", got)
+		}
+	})
+}
+
+// Claims are backfilled from versions stored before claims existed, and from 0.4 versions as
+// they pass the check.
+func TestPluginClaimsBackfill(t *testing.T) {
+	e := newEnv(t)
+	acme := e.token("acme", "npm:publish:@acme/*")
+	beta := e.token("beta", "npm:publish:@beta/*")
+	both := e.token("both", "npm:read:@acme/*", "npm:read:@beta/*", "plugins:read")
+	mustStatus(t, e.publishPlugin(acme, "@acme/tool", "1.0.0"), 201)
+	mustStatus(t, e.publishPlugin(beta, "@beta/tool", "1.0.0"), 201)
+	mustStatus(t, e.publishPlugin(acme, "@acme/old", "1.0.0"), 201)
+	// @acme/old as 0.4 stored it: no plugin record, not checked.
+	e.st.UpdateNPM("@acme/old", func(_ *store.NPMPackage, vs []store.NPMVersion) ([]store.NPMVersion, error) {
+		vs[0].Plugin, vs[0].PluginChecked = nil, false
+		return vs, nil
+	})
+	// A database from before claims: the bucket is gone.
+	path := filepath.Join(filepath.Dir(e.h.Dir), "state.db")
+	e.st.Close()
+	db, err := bolt.Open(path, 0o600, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Update(func(tx *bolt.Tx) error { return tx.DeleteBucket([]byte("npm_plugin_claims")) }); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	st, err := store.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	e.st, e.h.Store = st, st
+	claimed := func() string {
+		cl, _ := st.NPMPluginClaims()
+		var names []string
+		for _, c := range cl {
+			names = append(names, c.Package+"="+c.Plugin)
+		}
+		return strings.Join(names, " ")
+	}
+	if got := claimed(); got != "@acme/tool=tool @beta/tool=tool" {
+		t.Fatalf("backfilled claims: %s", got)
+	}
+	// tool clashes for this token; old is checked now, and claims its name.
+	if m := e.marketplace(both); len(m.Plugins) != 1 || m.Plugins[0].Name != "old" {
 		t.Fatalf("plugins: %+v", m.Plugins)
+	}
+	if got := claimed(); got != "@acme/old=old @acme/tool=tool @beta/tool=tool" {
+		t.Fatalf("claims after the check: %s", got)
 	}
 }
 
