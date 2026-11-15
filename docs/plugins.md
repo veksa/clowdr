@@ -147,9 +147,14 @@ package. A plugin name therefore never passes from one package to another, for a
 The server keeps a permanent **claim** for every package that has ever been a plugin, as it
 checked the tarball (never what a client said): written at the first plugin publish, or when a
 version stored by 0.4 passes the check, and never removed, not by retention, not when a later
-version is no plugin. The claims of plugins already stored are filled in when 0.5.0 opens the
-database. For each token, the marketplace takes, per plugin name, the claimants among the
-packages that token may read:
+version is no plugin. The claims of plugins already stored are filled in once, the first time
+0.5.0 opens the database (a marker in the `meta` bucket ends it; a record that does not decode is
+skipped with a warning). A version stored by 0.4 whose version object says `"claude-plugin":
+true` is checked the first time a listing looks at its package, at any version, not only
+`latest`, and the answer is recorded; until it can be checked (its tarball unreadable, say), its
+package is a **provisional** claimant of its unscoped name: it counts in a clash, and is never
+listed. So is a package whose versions cannot be read at all. For each token, the marketplace
+takes, per plugin name, the claimants among the packages that token may read:
 
 - **one claimant whose `latest` version is a plugin with its zip:** listed;
 - **more than one claimant, whatever their `latest` versions are now:** nothing under that name.
@@ -324,8 +329,9 @@ its zip is built then; if not, it is not a plugin for any purpose and the reason
 
 Two more actions in `clowctl npm audit`: `plugin.list` for each fetch of `marketplace.json` (the
 detail says how many plugins it listed, and which it left out: zips unavailable, and plugin names
-two packages the token reads share) and
-`plugin.download` for each zip, with package and version. `--action plugin` matches both.
+two packages the token reads share), `plugin.clashes` for each fetch of `/plugins/-/clashes` (the
+detail lists the hidden names and their packages), and `plugin.download` for each zip, with
+package and version. `--action plugin` matches all three.
 
 ## Storage
 
@@ -334,8 +340,9 @@ two packages the token reads share) and
   sweep removes any older than an hour (left by a crash).
 - The plugin's name, description, zip sha256 and size sit in the version's record in `state.db`.
 - The claims sit in their own bucket of `state.db`, `npm_plugin_claims`: package, plugin name and
-  since when. Older clowdrd versions do not read it and leave it as it is, so a rollback keeps
-  them.
+  since when; the marker of their one-time backfill in `meta`. Older clowdrd versions do not read
+  either and leave them as they are, so a rollback keeps them, and versions 0.4 stores meanwhile
+  are checked as described above.
 
 Retention deletes a version's zip together with its tarball, unless another live version has the
 same tarball; the periodic sweep also removes any zip no live version uses. A zip is a cache: losing it costs one rebuild, and backups may skip `npm/zips/`.
