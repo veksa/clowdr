@@ -202,8 +202,9 @@ clowctl npm audit --action publish --limit 20
 ```
 
 Actions are `read`, `download`, `publish`, `tags`, `tag.set`, `tag.delete`, `token.*` and, for the
-[plugin marketplace](plugins.md), `plugin.list` and `plugin.download`; `--action token` matches all
-three token actions, `--action plugin` both plugin ones. Entries are kept for 90 days, at most 200 000.
+[plugin marketplace](plugins.md), `plugin.list`, `plugin.clashes` and `plugin.download`; `--action token`
+matches all three token actions, `--action plugin` all three plugin ones. Entries are kept for 90 days,
+at most 200 000.
 Requests with a missing or wrong token are not recorded per request: after 20 failures in 10
 minutes an address (an IPv6 /64) gets 429 for 10 minutes, with a valid token too.
 

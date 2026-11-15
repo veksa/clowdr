@@ -197,8 +197,10 @@ grants nothing alone:
 | `plugins:read` + `npm:read:@acme/*` (or `npm:publish:…`) | 200, `@acme`'s plugins | 200 |
 
 A token without the right on a package gets for its zip exactly what a package that does not
-exist gets: the same 404, byte for byte. Failed authentications count towards the registry's
-limit (20 in 10 minutes per address, then 429 with any token).
+exist gets: the same 404, byte for byte. `/plugins/-/clashes` answers like `marketplace.json`
+(401, 404 without `plugins:read`, else 200 naming only packages the token reads). Failed
+authentications count towards the registry's limit (20 in 10 minutes per address, then 429 with
+any token).
 
 ```sh
 clowctl npm login --scope plugins:read --scope @acme
