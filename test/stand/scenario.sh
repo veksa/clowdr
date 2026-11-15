@@ -229,7 +229,7 @@ cc deploy --tag v5 --allow-outdated
 within 30 served v5 || fail "v5 is not served"
 # captured first: with pipefail, grep -q leaving at the first match can kill clowctl with SIGPIPE
 # while it still writes, and the pipeline then fails although the line was there
-OUT="$(cc releases web)"
+OUT="$(cc releases web 2>&1)" || fail "clowctl releases: $OUT"
 grep -q "v5.*(allow-outdated)" <<<"$OUT" || fail "the release does not show --allow-outdated: $OUT"
 
 step "token rotation"
@@ -259,7 +259,8 @@ plugin_served() {
 	[ "$(sha256sum <"$P/greeter.zip" | cut -d' ' -f1)" = "$(jq -r '.plugins[0].source.sha256' "$1")" ] ||
 		fail "the zip's sha256 differs from marketplace.json"
 	# no unzip on the stand host; python3 is there
-	ENTRIES="$(python3 -c 'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$P/greeter.zip")"
+	ENTRIES="$(python3 -c 'import sys, zipfile; print("\n".join(zipfile.ZipFile(sys.argv[1]).namelist()))' "$P/greeter.zip" 2>&1)" ||
+		fail "the plugin zip does not open: $ENTRIES"
 	grep -qx '.claude-plugin/plugin.json' <<<"$ENTRIES" || fail "plugin.json is not at the top of the zip: $ENTRIES"
 }
 if $NEW_HAS_PLUGINS; then
@@ -274,7 +275,7 @@ EOF
 	echo '{"name": "greeter", "version": "1.0.0", "description": "Greets"}' >"$P/pkg/.claude-plugin/plugin.json"
 	echo 'Say hello.' >"$P/pkg/commands/hello.md"
 	(cd "$P/pkg" && plug clowctl --context stand npm publish) || fail "the plugin publish"
-	OUT="$(plug clowctl --context stand plugins ls)"
+	OUT="$(plug clowctl --context stand plugins ls 2>&1)" || fail "clowctl plugins ls: $OUT"
 	grep -q '^greeter@clowdr-127-0-0-1-sslip-io  *1\.0\.0' <<<"$OUT" || fail "clowctl plugins ls: $OUT"
 	plug clowctl --context stand plugins setup
 	SETTINGS="$P/claude/settings.json"
