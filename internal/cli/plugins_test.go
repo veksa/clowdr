@@ -317,8 +317,10 @@ func TestPluginsWorkflow(t *testing.T) {
 	}
 	json.Unmarshal(b, &s)
 	m := s.Markets["clowdr-127-0-0-1"]
+	// helperPath makes the stubbed path absolute, which on Windows adds the drive letter.
+	stubExe, _ := filepath.Abs("/opt/clowdr tools/clowctl")
 	if m.Source.URL != h.srv.URL+"/plugins/marketplace.json" || !m.AutoUpdate ||
-		m.Source.HeadersHelper != "'/opt/clowdr tools/clowctl' plugins headers --registry "+reg {
+		m.Source.HeadersHelper != shQuote(stubExe)+" plugins headers --registry "+reg {
 		t.Fatalf("%s", b)
 	}
 	contains(t, h.ok("plugins", "setup", "--context", "test"), "already set up")
