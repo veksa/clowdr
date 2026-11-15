@@ -208,8 +208,9 @@ clowctl plugins ls
 ```
 
 `setup` stores no token in Claude Code's settings: Claude Code runs `clowctl plugins headers`,
-which prints the machine's npm token, on every fetch. Two packages a token reads with one plugin
-name are both left out for that token, so no scope can replace another's plugin. Publish rules,
+which prints the machine's npm token, on every fetch. A plugin name never passes from one package
+to another: two packages a token reads that have ever been plugins of one name are both left out
+for that token, so no scope can replace another's plugin. Publish rules,
 the marketplace name, the zip format and access: [docs/plugins.md](docs/plugins.md).
 
 ## How a deploy works

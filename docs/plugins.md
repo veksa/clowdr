@@ -142,28 +142,42 @@ Everything else is the npm registry's: one version per publish, immutable versio
 ### One name per token
 
 Claude Code installs, updates and keys a plugin by its name and the marketplace's, never by the
-package. So when a token reads two packages that are plugins of one name (`@acme/tool` and
-`@beta/tool`), the marketplace lists **neither** of them for that token, logs the clash once as a
-warning, and names both packages in the audit entry of each listing (`skipped plugin name tool in
-@acme/tool and @beta/tool`). Every other token sees what it reads as before.
+package. A plugin name therefore never passes from one package to another, for any token.
 
-Why per token, and why neither:
+The server keeps a permanent **claim** for every package that has ever been a plugin, as it
+checked the tarball (never what a client said): written at the first plugin publish, or when a
+version stored by 0.4 passes the check, and never removed, not by retention, not when a later
+version is no plugin. The claims of plugins already stored are filled in when 0.5.0 opens the
+database. For each token, the marketplace takes, per plugin name, the claimants among the
+packages that token may read:
 
-- **No takeover.** Listing either one would let whoever publishes in the other scope replace the
+- **one claimant whose `latest` version is a plugin with its zip:** listed;
+- **more than one claimant, whatever their `latest` versions are now:** nothing under that name.
+  The clash is logged once as a warning, both packages are named in the audit entry of each
+  listing (`skipped plugin name tool in @acme/tool and @beta/tool`), and `clowctl plugins ls`
+  and `setup` say which names are hidden (from `/plugins/-/clashes`, which answers only about
+  packages the token reads);
+- **one claimant whose `latest` version is not a plugin, or whose zip is unavailable:** nothing
+  under that name either. It never falls through to another package.
+
+Every other token sees what it reads as before. Why it works this way:
+
+- **No takeover.** If the name could move, whoever publishes in the other scope could replace the
   code of `tool@clowdr-example-com` on every machine with that token, through `autoUpdate`,
-  without anyone installing anything. Leaving both out means a name a token already gets can only
-  disappear, never change hands.
-- **No leak.** Whether a clash exists is worked out from the packages the token may read, so a
-  token learns nothing about a package outside its rights, and a publisher learns nothing about
-  other scopes: there is no cross-scope check at publish, and no answer that depends on one.
+  without anyone installing anything: when `@acme/tool`'s `latest` stops being a plugin, or its
+  zip is missing for a moment, `@beta/tool` would step in. A name can only disappear.
+- **No leak.** Which packages count is worked out from what the token may read, so a token
+  learns nothing about a package outside its rights, and a publisher learns nothing about other
+  scopes: there is no cross-scope check at publish, and no answer that depends on one.
 - **No squatting.** Any scope may publish a plugin of any name; a name nobody owns server-wide
-  cannot be taken away from the scope that needs it. Only a token an admin deliberately gave
-  access to both scopes is affected.
+  cannot be taken away from the scope that needs it. Only a token an admin gave access to both
+  scopes is affected.
 
-On a clash, narrow the token's scopes so it reads only one of the packages (tokens' scopes do
-not change: create a new token and revoke the old one), or rename one plugin and move its
-package's `latest` to the renamed version. There is still no unpublish. A package whose `latest`
-version is not a plugin takes no part in a clash.
+On a machine that installed the plugin, an entry that disappears shows in `claude plugin list`
+as failed to load, not found in the marketplace, and stops updating. To give that token one of
+the plugins again, narrow its scopes so it reads only one of the packages (a token's scopes do
+not change: create a new token and revoke the old one), or publish the plugin under a new name
+in a new package and install that. There is still no unpublish, and a claim is never released.
 
 ## Access
 
@@ -253,7 +267,7 @@ lacks `plugins:read` or the server is older than 0.5.0) and writes Claude Code's
   folder or into a git work tree.
 
 ```sh
-clowctl plugins ls        # what the marketplace offers this machine's token
+clowctl plugins ls        # what the marketplace offers this machine's token, and which names it hides
 ```
 
 ### Updates
@@ -319,6 +333,9 @@ two packages the token reads share) and
   from, written atomically. A build in progress keeps its files under `npm/zips/.upload-*`; the
   sweep removes any older than an hour (left by a crash).
 - The plugin's name, description, zip sha256 and size sit in the version's record in `state.db`.
+- The claims sit in their own bucket of `state.db`, `npm_plugin_claims`: package, plugin name and
+  since when. Older clowdrd versions do not read it and leave it as it is, so a rollback keeps
+  them.
 
 Retention deletes a version's zip together with its tarball, unless another live version has the
 same tarball; the periodic sweep also removes any zip no live version uses. A zip is a cache: losing it costs one rebuild, and backups may skip `npm/zips/`.
