@@ -190,6 +190,8 @@ Every query takes `--since`, `--until`, `--include-test` and `-o json`. Keys are
   installs) refuse it rather than ignore it.
 - `--math`: `total`, `uniques`, `dau`, `wau`, `mau`, `per_user_avg`, and over `--prop`: `sum`,
   `avg`, `p50`, `p75`, `p90`, `p95`, `p99` (nearest rank).
+- For `any`, `total` and `per_user_avg` count the events that made an actor active (passive events
+  such as `$set` or a renewal are left out), in rollups and raw records alike.
 - The last row of a trend (`total` in JSON) is the whole range, never the last bucket: the sum of
   the buckets for `total` and `sum`; the distinct actors of the range for `uniques`, so it is at
   most the sum of the buckets; all events over those actors for `per_user_avg`; every value of the

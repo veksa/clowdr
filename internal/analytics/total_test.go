@@ -15,12 +15,15 @@ func TestTrendsTotalIsWholeRange(t *testing.T) {
 		{"any", "uniques", "week", 5},
 		{"episode_viewed", "uniques", "day", 1},
 		{"episode_viewed", "per_user_avg", "day", 3},
+		{"any", "total", "day", 24},
+		{"any", "per_user_avg", "day", round2(24.0 / 5)},
 		{"any", "dau", "day", round2(8.0 / 3)},
 		{"any", "dau", "month", round2(8.0 / 3)},
 		{"any", "wau", "day", 5},
 		{"any", "mau", "week", 5},
 	}
 	for _, c := range cases {
+		var rollupPoints []float64
 		for _, raw := range []bool{false, true} {
 			r := e.query(spec("trends", func(s *Spec) {
 				s.Events = []string{c.event}
@@ -39,6 +42,12 @@ func TestTrendsTotalIsWholeRange(t *testing.T) {
 			}
 			if kind := r.Series[0].TotalKind; (kind == "average") != (c.math == "dau" || c.math == "wau" || c.math == "mau") {
 				t.Errorf("%s/%s: total kind %q", c.math, r.Source, kind)
+			}
+			// Every bucket agrees too: for any, both count the events that made an actor active.
+			if !raw {
+				rollupPoints = points(r.Series[0])
+			} else if !eq(points(r.Series[0]), rollupPoints) {
+				t.Errorf("%s/%s/%s: raw points %v, rollup points %v", c.event, c.math, c.interval, points(r.Series[0]), rollupPoints)
 			}
 			if got := r.Series[0].Total; got != c.want {
 				t.Errorf("%s/%s/%s from %s: total %v, want %v (points %v)", c.event, c.math, c.interval, r.Source, got, c.want, points(r.Series[0]))

@@ -457,7 +457,13 @@ func (q *qctx) cell(d *DayRollup, event, dim, val string) (int, *Bitmap) {
 	for _, p := range d.Parts(q.spec.IncludeTest) {
 		if isAny(event) {
 			if dim == "" {
-				n += p.Active.Card()
+				// The count is the events that made an actor active, as raw records count it,
+				// not the actors: Active has no count of its own.
+				for name, e := range p.Events {
+					if !passive[name] {
+						n += e.N
+					}
+				}
 				u.Or(p.Active)
 			} else if c := p.ActiveBy[dim][val]; c != nil {
 				n += c.N
