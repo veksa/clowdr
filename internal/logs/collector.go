@@ -44,6 +44,9 @@ const TraceMark = `{"$":"trace"`
 // MetricMark starts every metric point a service writes to stdout (docs/metrics.md).
 const MetricMark = `{"$":"metric"`
 
+// AnalyticsMark starts every analytics record a service writes to stdout (docs/analytics.md).
+const AnalyticsMark = `{"$":"analytics"`
+
 // Forward handles a line from docker's fluentd driver.
 func (c *Collector) Forward(tag string, r Record) {
 	parts := strings.Split(tag, ".")
@@ -59,6 +62,8 @@ func (c *Collector) Forward(tag string, r Record) {
 		kind = KindTrace
 	case strings.HasPrefix(r.Line, MetricMark):
 		kind = KindMetric
+	case strings.HasPrefix(r.Line, AnalyticsMark):
+		kind = KindAnalytics
 	}
 	c.emit(Key{parts[0], kind, parts[1]}, Line{T: r.Time.UnixNano(), R: rel, I: rep, E: r.Stderr, L: r.Line})
 }

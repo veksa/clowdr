@@ -25,6 +25,7 @@ type Deploy struct {
 	AcceptFrom []string           `yaml:"accept_from"` // projects whose services may join this project's network (expose_to)
 	Services   map[string]Service `yaml:"services"`
 	Logs       *LogsConf          `yaml:"logs"`
+	Analytics  *AnalyticsConf     `yaml:"analytics"`
 
 	// Dir is the directory deploy.yml was loaded from; service paths are relative to it.
 	Dir string `yaml:"-"`
@@ -94,6 +95,8 @@ type LogsConf struct {
 	Trace  *Retention `yaml:"trace"`
 	Metric *Retention `yaml:"metric"`
 	Access *Retention `yaml:"access"`
+	// Analytics is the raw analytics stream, the hot window of queries (docs/analytics.md).
+	Analytics *Retention `yaml:"analytics"`
 }
 
 type Retention struct {
@@ -135,10 +138,15 @@ func LoadDeploy(path string) (*Deploy, error) {
 	return d, nil
 }
 
-func ParseDeploy(b []byte) (*Deploy, error) {
-	var d Deploy
+func newStrictDecoder(b []byte) *yaml.Decoder {
 	dec := yaml.NewDecoder(bytes.NewReader(b))
 	dec.KnownFields(true)
+	return dec
+}
+
+func ParseDeploy(b []byte) (*Deploy, error) {
+	var d Deploy
+	dec := newStrictDecoder(b)
 	if err := dec.Decode(&d); err != nil {
 		return nil, err
 	}
@@ -182,6 +190,11 @@ func (d *Deploy) validate() error {
 		}
 		if e.Server == "" && e.Context == "" {
 			return fmt.Errorf("envs.%s: server or context is required", name)
+		}
+	}
+	if d.Analytics != nil {
+		if err := d.Analytics.Validate(); err != nil {
+			return err
 		}
 	}
 	for _, a := range d.Addons {

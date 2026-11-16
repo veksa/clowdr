@@ -193,6 +193,7 @@ logs:
   trace:  { retention: 7d, max: 2GB }
   metric: { retention: 30d, max: 500MB }
   access: { retention: 30d, max: 500MB }
+  analytics: { retention: 35d, max: 2GB }   # raw analytics events: the hot window of queries
 
 limits:
   reserve_memory: 150m
@@ -333,6 +334,9 @@ func (p *Platform) defaults() {
 	}
 	if p.Logs.Access == nil {
 		p.Logs.Access = &Retention{Retention: Duration(30 * 24 * 3600e9), Max: 500 << 20}
+	}
+	if p.Logs.Analytics == nil {
+		p.Logs.Analytics = &Retention{Retention: Duration(35 * 24 * 3600e9), Max: 2 << 30}
 	}
 }
 

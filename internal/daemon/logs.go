@@ -45,6 +45,8 @@ func startLogs(ctx context.Context, o Options, st *store.Store, plat func() *con
 				r = p.Logs.Trace
 			case logs.KindMetric:
 				r = p.Logs.Metric
+			case logs.KindAnalytics:
+				r = p.Logs.Analytics
 			}
 			if k.Kind == logs.KindAccess || k.Kind == logs.KindNginx {
 				r = p.Logs.Access

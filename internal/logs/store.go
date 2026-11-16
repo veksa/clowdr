@@ -34,6 +34,8 @@ const (
 	KindMetric = "metric" // metric points a service (or clowdrd) writes once a minute (see MetricMark)
 	KindAccess = "access"
 	KindNginx  = "nginx"
+	// KindAnalytics holds the product analytics records a service writes (see AnalyticsMark).
+	KindAnalytics = "analytics"
 )
 
 // maxLine bounds one stored line when it is read back: trace records carry prompts and
@@ -586,6 +588,39 @@ func moveSegment(from, to string) error {
 		return err
 	}
 	return os.Remove(from)
+}
+
+// Streams lists the stream names of one kind of a project: on disk and buffered.
+func (s *Store) Streams(project, kind string) []string {
+	seen := map[string]bool{}
+	es, _ := os.ReadDir(filepath.Join(s.DataDir, project, kind))
+	for _, e := range es {
+		if e.IsDir() {
+			seen[e.Name()] = true
+		}
+	}
+	bs, _ := os.ReadDir(filepath.Join(s.BufDir, project, kind))
+	for _, e := range bs {
+		n := strings.TrimSuffix(strings.TrimSuffix(e.Name(), ".wal"), ".flushing")
+		if n != e.Name() {
+			seen[n] = true
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for n := range seen {
+		out = append(out, n)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Oldest returns the hour of a stream's oldest segment, or zero without segments.
+func (s *Store) Oldest(k Key) time.Time {
+	segs := s.segments(k)
+	if len(segs) == 0 {
+		return time.Time{}
+	}
+	return segs[0].hour
 }
 
 // DiskUsage returns bytes used by a stream on disk.
