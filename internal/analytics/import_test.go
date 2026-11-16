@@ -64,7 +64,7 @@ func TestImportMergesIntoTheArchiveAndRebuilds(t *testing.T) {
 		"not a record",
 	}
 	var msgs []string
-	rep, err := p.Import(ctx, lines, func(m string) { msgs = append(msgs, m) })
+	rep, err := p.Import(ctx, lines, ImportOptions{}, func(m string) { msgs = append(msgs, m) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestImportMergesIntoTheArchiveAndRebuilds(t *testing.T) {
 		t.Fatalf("the skipped day was not reported: %q", msgs)
 	}
 
-	again, err := p.Import(ctx, lines, nil)
+	again, err := p.Import(ctx, lines, ImportOptions{}, nil)
 	if err != nil || again.Imported != 0 || again.Present != 4 || len(again.Days) != 0 {
 		t.Fatalf("a second import: %+v %v", again, err)
 	}
@@ -116,7 +116,7 @@ func TestImportLeavesOutDaysOfTheStream(t *testing.T) {
 	rep, err := p.Import(context.Background(), []string{
 		importRecord("old-1", before+"T10:00:00.000Z", "episode_viewed", "u_a", ""),
 		importRecord("old-2", first+"T00:00:01.000Z", "episode_viewed", "u_a", ""),
-	}, nil)
+	}, ImportOptions{}, nil)
 	if err != nil || rep.Imported != 1 || strings.Join(rep.Skipped, ",") != first {
 		t.Fatalf("%+v %v", rep, err)
 	}
@@ -125,9 +125,66 @@ func TestImportLeavesOutDaysOfTheStream(t *testing.T) {
 	}
 }
 
+// Asked for, records of days the stream covers go into it as late records: deduplicated by id
+// against the stream, their days recomputed; days past the late window are refused.
+func TestImportIntoLiveDays(t *testing.T) {
+	// The store names segments by the wall clock: the stream begins today, ten days before the
+	// manager's now. Its first day is past the late window, five days later is inside it.
+	wall := time.Now().UTC().Truncate(24 * time.Hour).Add(12 * time.Hour)
+	first := wall.Format(DayLayout)
+	inside := wall.AddDate(0, 0, 5).Format(DayLayout)
+	e, f := importEnv(t, wall.AddDate(0, 0, 10))
+	e.feed(wall, importRecord("live-1", first+"T12:00:00.000Z", "episode_viewed", "u_a", ""))
+	e.ls.FlushAll() // the first segment; later lines stay in the buffer (a segment is named by the wall clock)
+	e.feed(time.Time{}, importRecord("live-2", inside+"T09:00:00.000Z", "episode_viewed", "u_b", ""))
+	p := e.project()
+	ctx := context.Background()
+	if _, err := p.Recompute([]string{inside}); err != nil {
+		t.Fatal(err)
+	}
+	tail := []string{
+		importRecord("tail-1", inside+"T10:00:00.000Z", "episode_viewed", "", "dev-0003"),
+		importRecord("live-2", inside+"T09:00:00.000Z", "episode_viewed", "u_b", ""), // the stream has it
+		importRecord("tail-2", first+"T13:00:00.000Z", "episode_viewed", "u_c", ""),  // past the late window
+	}
+
+	plain, err := p.Import(ctx, tail, ImportOptions{}, nil)
+	if err != nil || plain.Imported != 0 || plain.SkippedRecords != 3 {
+		t.Fatalf("without live days: %+v %v", plain, err)
+	}
+
+	var msgs []string
+	rep, err := p.Import(ctx, tail, ImportOptions{LiveDays: true}, func(m string) { msgs = append(msgs, m) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Imported != 1 || rep.Present != 1 || strings.Join(rep.Live, ",") != inside ||
+		strings.Join(rep.TooLate, ",") != first || rep.TooLateRecords != 1 || len(rep.Days) != 0 {
+		t.Fatalf("report %+v", rep)
+	}
+	if len(f.objects) != 0 {
+		t.Fatalf("live days were written to the archive: %d objects", len(f.objects))
+	}
+	if !strings.Contains(strings.Join(msgs, "\n"), "late window") {
+		t.Fatalf("the refused day was not reported: %q", msgs)
+	}
+	res := e.query(Spec{Kind: "trends", Events: []string{"episode_viewed"}, Since: inside, Until: inside + "T23:59:59Z", Interval: "day"})
+	if res.Series[0].Total != 2 {
+		t.Fatalf("the recomputed day counts %v events, want 2", res.Series[0].Total)
+	}
+
+	again, err := p.Import(ctx, tail, ImportOptions{LiveDays: true}, nil)
+	if err != nil || again.Imported != 0 || again.Present != 2 {
+		t.Fatalf("a second import: %+v %v", again, err)
+	}
+	if res := e.query(Spec{Kind: "trends", Events: []string{"episode_viewed"}, Since: inside, Until: inside + "T23:59:59Z", Interval: "day"}); res.Series[0].Total != 2 {
+		t.Fatalf("after a second import the day counts %v", res.Series[0].Total)
+	}
+}
+
 func TestImportNeedsTheArchive(t *testing.T) {
 	e := newEnv(t, time.Date(2026, 11, 16, 9, 0, 0, 0, time.UTC))
-	if _, err := e.project().Import(context.Background(), []string{importRecord("x-1", "2026-10-01T10:00:00.000Z", "a_b", "u_a", "")}, nil); err == nil ||
+	if _, err := e.project().Import(context.Background(), []string{importRecord("x-1", "2026-10-01T10:00:00.000Z", "a_b", "u_a", "")}, ImportOptions{}, nil); err == nil ||
 		!strings.Contains(err.Error(), "archive") {
 		t.Fatalf("imported without an archive: %v", err)
 	}

@@ -557,7 +557,7 @@ func (a *app) anRebuildCmd() *cobra.Command {
 }
 
 func (a *app) anImportCmd() *cobra.Command {
-	var dryRun, allowInvalid bool
+	var dryRun, allowInvalid, liveDays bool
 	cmd := &cobra.Command{
 		Use:   "import <file>...",
 		Short: "Bring records from elsewhere into the archive and rebuild from the first day they touch (admin token)",
@@ -568,10 +568,14 @@ rebuilt from the first day it touched. Importing the same file again changes not
 
 The files are checked here first, as by "clowctl analytics check"; a file with invalid
 records is refused unless --allow-invalid (they are left out). Days the project's stream
-already covers are left out and listed. Needs the archive (analytics.archive and its
+already covers are left out and listed; with --include-live-days they go into the stream
+as late records received now (deduplicated by id against it, their days recomputed) — only
+days within the late window (the last 8 days), so a tail that keeps arriving elsewhere is
+imported at least weekly. Days before the stream need the archive (analytics.archive and its
 secrets). Records of history should say src "import".`,
 		Example: `  clowctl analytics import --dry-run history.ndjson.zst
-  clowctl analytics import history.ndjson.zst -e prod`,
+  clowctl analytics import history.ndjson.zst -e prod
+  clowctl analytics import --include-live-days tail.ndjson.zst -e prod`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			rep, err := analytics.CheckFiles(args)
@@ -595,7 +599,11 @@ secrets). Records of history should say src "import".`,
 					return err
 				}
 				fmt.Fprintf(a.err, "→ %s (%d KB)\n", path, len(body)>>10)
-				ev, err := t.client.Stream(cmd.Context(), "POST", api.Path("projects", t.project, "analytics", "import"),
+				path := api.Path("projects", t.project, "analytics", "import")
+				if liveDays {
+					path += "?live_days=1"
+				}
+				ev, err := t.client.Stream(cmd.Context(), "POST", path,
 					api.RawBody{R: bytes.NewReader(body), Type: "application/zstd"}, a.progress)
 				if err != nil {
 					return err
@@ -610,6 +618,7 @@ secrets). Records of history should say src "import".`,
 	}
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "only check the files")
 	cmd.Flags().BoolVar(&allowInvalid, "allow-invalid", false, "send files with invalid records (the server leaves them out)")
+	cmd.Flags().BoolVar(&liveDays, "include-live-days", false, "take records of days the stream covers too, as late records (the last 8 days only)")
 	return cmd
 }
 

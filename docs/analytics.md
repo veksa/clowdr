@@ -224,6 +224,18 @@ Days from the first day of the stream on are left out and listed: clowdr archive
 received, and an imported file would hide that day's own records. A history that overlaps the
 stream is cut at the day before it begins.
 
+A source that keeps sending elsewhere for a while (old app builds that still report to the previous
+tool) is brought in with `--include-live-days`: records of days the stream covers go into it as
+late records received now, under the service `import`, deduplicated by `id` against the window, and
+their days' rollups are recomputed; the daily archive takes them with the day they were received
+on. Like any late record, one counts only within the late window — its day at most 8 days ago —
+so such a tail is imported at least weekly; older days are left out and listed. Records of the
+same events the services now write themselves must not be in such a file, or they count twice.
+
+```sh
+clowctl analytics import --include-live-days tail.ndjson.zst -e prod
+```
+
 ## API
 
 | Route | |
@@ -234,7 +246,7 @@ stream is cut at the day before it begins.
 | `POST …/analytics/digest?day=&dry_run=1` | the digest text; sent unless `dry_run` |
 | `GET`, `PUT`, `DELETE …/analytics/config` | the `analytics:` block |
 | `PUT …/analytics/secrets/{name}` | `{"value": …}`; empty removes it |
-| `POST …/analytics/import` | admin token; body: records as NDJSON, or NDJSON+zstd (at most 1 GB); writes them into the archive and rebuilds, streams progress (see "Importing history") |
+| `POST …/analytics/import?live_days=1` | admin token; body: records as NDJSON, or NDJSON+zstd (at most 1 GB); writes them into the archive and rebuilds, streams progress; `live_days=1` takes days of the stream as late records (see "Importing history") |
 | `POST …/analytics/rebuild?since=` | admin token; re-indexes from the stream and the archive, streams progress. From the first day the project has, the index is built from scratch; from a later day it is kept (actor numbers in older rollups, persons, links and install keys before that day) and the records are applied on top |
 
 A server with analytics lists `analytics` in `GET /v1/version` features.

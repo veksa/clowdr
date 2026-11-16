@@ -142,6 +142,13 @@ func TestAnalyticsAPI(t *testing.T) {
 	if err := e.admin.Do(ctx, "POST", path("import"), history("\n"), nil); err == nil || !strings.Contains(err.Error(), "no records") {
 		t.Fatalf("an empty import: %v", err)
 	}
+	// Live days need no archive: today's record goes into the stream as a late one.
+	today := `{"$":"analytics","v":1,"id":"h-2","ts":"` + time.Now().UTC().Format(time.RFC3339) + `","e":"episode_viewed","u":"871","src":"import"}` + "\n"
+	var liveMsgs []string
+	if done, err := e.admin.Stream(ctx, "POST", path("import")+"?live_days=1", history(today), func(ev Event) { liveMsgs = append(liveMsgs, ev.Message) }); err != nil || done.Error != "" ||
+		!strings.Contains(strings.Join(liveMsgs, "\n"), "into the stream") {
+		t.Fatalf("a live import: %+v %v %q", done, err, liveMsgs)
+	}
 
 	if err := c.Do(ctx, "DELETE", path("config"), nil, &ch); err != nil || !ch["changed"] {
 		t.Fatal(err)

@@ -221,7 +221,8 @@ const maxImportBody = 1 << 30
 
 // analyticsImport takes records from elsewhere (NDJSON, or NDJSON+zstd) into the archive, then
 // rebuilds the index and the rollups from the first day they touched; progress streams like a
-// deploy. Records of days the stream covers are left out and reported.
+// deploy. Records of days the stream covers are left out and reported, or with ?live_days=1 go
+// into the stream as late records (days within the late window only).
 func (s *Server) analyticsImport(w http.ResponseWriter, r *http.Request) {
 	p, ok := s.analyticsProject(w, r)
 	if !ok {
@@ -241,18 +242,24 @@ func (s *Server) analyticsImport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "no records")
 		return
 	}
-	if _, _, err := p.S3(); err != nil {
+	opts := analytics.ImportOptions{LiveDays: r.URL.Query().Get("live_days") == "1"}
+	// Without live days every record goes to the archive; with them, some may not need it, and
+	// those that do fail in the stream.
+	if _, _, err := p.S3(); err != nil && !opts.LiveDays {
 		writeErr(w, 400, "an import goes to the archive: "+err.Error())
 		return
 	}
 	s.stream(w, r, func(ctx context.Context, progress deploy.Progress) (*store.Release, error) {
-		rep, err := p.Import(ctx, lines, func(msg string) { progress("%s", msg) })
+		rep, err := p.Import(ctx, lines, opts, func(msg string) { progress("%s", msg) })
 		if rep != nil {
 			for _, pr := range rep.Problems {
 				progress("%s", pr)
 			}
-			progress("%d records: %d imported, %d there already, %d invalid left out, %d with warnings, %d in days the stream covers left out",
-				rep.Records, rep.Imported, rep.Present, rep.Invalid, rep.Warnings, rep.SkippedRecords)
+			progress("%d records: %d imported, %d there already, %d invalid left out, %d with warnings, %d in days the stream covers left out, %d older than the late window left out",
+				rep.Records, rep.Imported, rep.Present, rep.Invalid, rep.Warnings, rep.SkippedRecords, rep.TooLateRecords)
+			if len(rep.Live) > 0 {
+				progress("into the stream: %s", strings.Join(rep.Live, ", "))
+			}
 			if len(rep.Days) > 0 {
 				progress("days %s…%s", rep.Days[0], rep.Days[len(rep.Days)-1])
 			}
