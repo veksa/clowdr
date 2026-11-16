@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/veksa/clowdr/internal/analytics"
 	"github.com/veksa/clowdr/internal/auth"
 	"github.com/veksa/clowdr/internal/deploy"
 	"github.com/veksa/clowdr/internal/ingress"
@@ -46,6 +47,8 @@ type Server struct {
 	StateDir string
 	// NPM serves the private npm registry at /npm/; nil leaves it out.
 	NPM *npm.Handler
+	// Analytics is product analytics (docs/analytics.md); nil answers its routes with 501.
+	Analytics *analytics.Manager
 }
 
 type ctxKey struct{}
@@ -102,6 +105,7 @@ func (s *Server) Handler() http.Handler {
 	a("GET /v1/projects/{project}/metrics/{name}", s.metricQuery)
 	a("GET /v1/projects/{project}/events", s.events)
 	s.registerOps(a)
+	s.registerAnalytics(a, admin)
 
 	if s.Registry != nil {
 		mux.Handle("/v2/", s.Registry)
@@ -246,6 +250,9 @@ func (s *Server) version(w http.ResponseWriter, r *http.Request) {
 	v.Features = append(v.Features, FeatureAllowOutdated)
 	if s.NPM != nil {
 		v.Features = append(v.Features, FeatureNPM, FeaturePlugins)
+	}
+	if s.Analytics != nil {
+		v.Features = append(v.Features, FeatureAnalytics)
 	}
 	if info, err := s.Engine.Docker.Info(r.Context()); err == nil {
 		v.Docker = info.ServerVersion

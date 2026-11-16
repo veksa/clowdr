@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/veksa/clowdr/internal/analytics"
 	"github.com/veksa/clowdr/internal/api"
 	"github.com/veksa/clowdr/internal/auth"
 	"github.com/veksa/clowdr/internal/config"
@@ -33,6 +34,7 @@ type Server struct {
 	Store      *store.Store
 	Logs       *logs.Store
 	Events     *monitor.Events
+	Analytics  *analytics.Manager
 	Dir        string
 	// Cert is the self-signed certificate of a NewTLS server.
 	Cert *x509.Certificate
@@ -76,7 +78,9 @@ func start(t testing.TB, tls bool) *Server {
 		events.Emit(ctx, monitor.Event{Project: project, Service: service, Kind: kind, Severity: sev, Message: msg}, "")
 	}
 
-	s := &api.Server{Store: st, Engine: eng, Log: log, Version: "test", RegistryKind: "fs", Logs: ls, Events: events, StateDir: dir}
+	am := &analytics.Manager{Dir: filepath.Join(dir, "analytics"), Logs: ls, Log: log}
+	t.Cleanup(am.Close)
+	s := &api.Server{Store: st, Engine: eng, Log: log, Version: "test", RegistryKind: "fs", Logs: ls, Events: events, StateDir: dir, Analytics: am}
 	s.Registry = &registry.Handler{
 		Store: &registry.FSStore{Dir: filepath.Join(dir, "registry")}, Owners: st,
 		Authorize: s.RegistryAuthorize, Log: log,
@@ -98,7 +102,7 @@ func start(t testing.TB, tls bool) *Server {
 	if err := st.PutToken(tok); err != nil {
 		t.Fatal(err)
 	}
-	return &Server{URL: srv.URL, AdminToken: secret, API: s, Docker: d, Store: st, Logs: ls, Events: events, Dir: dir, Cert: srv.Certificate()}
+	return &Server{URL: srv.URL, AdminToken: secret, API: s, Docker: d, Store: st, Logs: ls, Events: events, Analytics: am, Dir: dir, Cert: srv.Certificate()}
 }
 
 // Project creates a project with its allowed domains and returns a token for it.

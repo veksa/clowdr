@@ -16,11 +16,13 @@ import (
 	"time"
 
 	"github.com/veksa/clowdr/internal/acme"
+	"github.com/veksa/clowdr/internal/analytics"
 	"github.com/veksa/clowdr/internal/api"
 	"github.com/veksa/clowdr/internal/auth"
 	"github.com/veksa/clowdr/internal/config"
 	"github.com/veksa/clowdr/internal/deploy"
 	"github.com/veksa/clowdr/internal/ingress"
+	"github.com/veksa/clowdr/internal/logs"
 	"github.com/veksa/clowdr/internal/monitor"
 	"github.com/veksa/clowdr/internal/notify"
 	"github.com/veksa/clowdr/internal/npm"
@@ -102,14 +104,28 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 	// to disk in compressed batches.
 	mon := &monitor.Monitor{Docker: docker, Store: st, Prober: eng.Prober, Platform: func() *config.Platform { return current }, StateDir: o.StateDir, Log: log}
 	mon.Init()
-	logStore, stopLogs, err := startLogs(ctx, o, st, func() *config.Platform { return current }, mon.OnLine, log)
+	// Product analytics (docs/analytics.md): records from the same log pipeline, indexed and
+	// rolled up per project. Closed after the logs stop, so the last lines reach the index.
+	am := &analytics.Manager{Dir: filepath.Join(o.StateDir, "analytics"), Log: log}
+	defer am.Close()
+	onLine := func(k logs.Key, l logs.Line) {
+		mon.OnLine(k, l)
+		am.OnLine(k, l)
+	}
+	logStore, stopLogs, err := startLogs(ctx, o, st, func() *config.Platform { return current }, onLine, log)
 	if err != nil {
 		return err
 	}
 	defer stopLogs()
+	am.Logs = logStore
+	am.Exists = func(project string) bool { _, err := st.Project(project); return err == nil }
+	am.Retention = func() time.Duration { return current.Logs.Analytics.Retention.D() }
 	eng.Syslog = true
 	eng.LogTail = logStore.Tail
-	eng.MoveLogs = logStore.RenameProject
+	eng.MoveLogs = func(old, name string) {
+		am.RenameProject(old, name)
+		logStore.RenameProject(old, name)
+	}
 	eng.LogConfig = fluentdLogConfig
 	events := &monitor.Events{Logs: logStore}
 	if tg := plat.Notify.Telegram; tg.Token != "" && tg.ChatID != "" {
@@ -131,6 +147,7 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 		}
 	}
 	go mon.Run(ctx)
+	go am.Run(ctx)
 
 	// nginx: make sure the container runs on the current config (checked reload if it already ran).
 	if err := eng.StartNginx(ctx); err != nil {
@@ -150,7 +167,7 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 		return err
 	}
 
-	srv := &api.Server{Store: st, Engine: eng, Log: log, Version: o.Version, RegistryKind: regKind, Logs: logStore, Events: events, StateDir: o.StateDir}
+	srv := &api.Server{Store: st, Engine: eng, Log: log, Version: o.Version, RegistryKind: regKind, Logs: logStore, Events: events, StateDir: o.StateDir, Analytics: am}
 	reg := &registry.Handler{Store: regStore, Owners: st, Authorize: srv.RegistryAuthorize, Log: log,
 		OnTag: func(_ context.Context, repo, tag string, _ registry.Descriptor) {
 			eng.Pushed(registry.ImagePrefix + repo + ":" + tag)
