@@ -72,7 +72,12 @@ type Series struct {
 	Breakdown string  `json:"breakdown,omitempty"`
 	Points    []Point `json:"points"`
 	Previous  []Point `json:"previous,omitempty"`
+	// Total is the whole range: the sum of the buckets for total and sum, the distinct actors
+	// of the range for uniques, the events per one of them for per_user_avg, the value over
+	// every number of the range for avg and the percentiles, and the average daily value for
+	// dau, wau and mau, which TotalKind then says.
 	Total     float64 `json:"total"`
+	TotalKind string  `json:"total_kind,omitempty"` // "average" when Total is a daily average
 }
 
 // FunnelStep is one step of a funnel.
@@ -923,7 +928,17 @@ func (q *qctx) trendsRollup(res *Result, since, until time.Time, fs []filter) ([
 				}
 				return q.cell(r, ev, lookDim, lookVal)
 			}
+			// rolling is the actors of the lookback window that ends on end (wau, mau).
+			rolling := func(end time.Time) *Bitmap {
+				u := newBitmap()
+				for _, d := range days(end.AddDate(0, 0, -lookback), end) {
+					_, b := cellOf(d)
+					u.Or(b)
+				}
+				return u
+			}
 			ser := Series{Event: ev, Breakdown: v}
+			var allDays []string // every day of the range the buckets counted, for the total
 			for _, b := range bs {
 				var inRange []string
 				for _, d := range days(b.start, b.end.Add(-time.Nanosecond)) {
@@ -934,6 +949,7 @@ func (q *qctx) trendsRollup(res *Result, since, until time.Time, fs []filter) ([
 				if len(inRange) == 0 {
 					continue
 				}
+				allDays = append(allDays, inRange...)
 				var val float64
 				switch s.Math {
 				case "total":
@@ -963,26 +979,55 @@ func (q *qctx) trendsRollup(res *Result, since, until time.Time, fs []filter) ([
 					}
 					val = round2(float64(sum) / float64(len(inRange)))
 				case "wau", "mau":
-					end := dayTime(inRange[len(inRange)-1])
-					u := newBitmap()
-					for _, d := range days(end.AddDate(0, 0, -lookback), end) {
-						_, b := cellOf(d)
-						u.Or(b)
-					}
-					val = float64(u.Card())
+					val = float64(rolling(dayTime(inRange[len(inRange)-1])).Card())
 				}
 				ser.Points = append(ser.Points, Point{T: b.label, V: val})
 				if s.Math == "total" {
 					ser.Total += val
 				}
 			}
-			if s.Math != "total" && len(ser.Points) > 0 {
-				ser.Total = ser.Points[len(ser.Points)-1].V
+			if s.Math != "total" && len(allDays) > 0 {
+				ser.Total = rollupTotal(s.Math, allDays, cellOf, rolling)
 			}
+			ser.TotalKind = totalKind(s.Math)
 			out = append(out, ser)
 		}
 	}
 	return out, nil
+}
+
+// rollupTotal is the whole-range value of a series whose math does not add up across buckets:
+// uniques counts the distinct actors of every day of the range, per_user_avg divides all the
+// events by them, and dau, wau and mau are the average of the daily value over the days.
+func rollupTotal(m string, ds []string, cellOf func(string) (int, *Bitmap), rolling func(time.Time) *Bitmap) float64 {
+	switch m {
+	case "uniques", "per_user_avg":
+		u, n := newBitmap(), 0
+		for _, d := range ds {
+			c, b := cellOf(d)
+			n += c
+			u.Or(b)
+		}
+		if m == "uniques" {
+			return float64(u.Card())
+		}
+		if u.Card() == 0 {
+			return 0
+		}
+		return round2(float64(n) / float64(u.Card()))
+	case "dau", "wau", "mau":
+		sum := 0
+		for _, d := range ds {
+			if m == "dau" {
+				_, b := cellOf(d)
+				sum += b.Card()
+			} else {
+				sum += rolling(dayTime(d)).Card()
+			}
+		}
+		return round2(float64(sum) / float64(len(ds)))
+	}
+	return 0
 }
 
 func partsOf(d *DayRollup, includeTest bool) []*Part {
@@ -1082,10 +1127,15 @@ func (q *qctx) trendsRaw(ctx context.Context, res *Result, since, until time.Tim
 			for _, br := range brs {
 				ser := Series{Event: ev, Breakdown: br}
 				var all []float64
+				events, actors := 0, map[string]bool{} // the whole range, for the total
 				for _, b := range bs {
 					a := accs[key{ev, br, b.label}]
 					if a == nil {
 						a = &acc{actors: map[string]bool{}}
+					}
+					events += a.n
+					for ak := range a.actors {
+						actors[ak] = true
 					}
 					var v float64
 					switch s.Math {
@@ -1102,6 +1152,9 @@ func (q *qctx) trendsRaw(ctx context.Context, res *Result, since, until time.Tim
 						for d := b.start; d.Before(b.end) && d.Format(DayLayout) <= today; d = d.AddDate(0, 0, 1) {
 							if s.Interval == "hour" {
 								break
+							}
+							if d.Before(since.Truncate(24*time.Hour)) || d.After(until) {
+								continue // a day of the bucket outside the range, as in rollups
 							}
 							n++
 							sum += len(daily[key{ev, br, d.Format(DayLayout)}])
@@ -1137,16 +1190,47 @@ func (q *qctx) trendsRaw(ctx context.Context, res *Result, since, until time.Tim
 					}
 				case "sum", "avg", "p50", "p75", "p90", "p95", "p99":
 					ser.Total = aggregate(s.Math, all)
-				default:
-					if len(ser.Points) > 0 {
-						ser.Total = ser.Points[len(ser.Points)-1].V
+				case "uniques":
+					ser.Total = float64(len(actors))
+				case "per_user_avg":
+					if len(actors) > 0 {
+						ser.Total = round2(float64(events) / float64(len(actors)))
+					}
+				case "dau", "wau", "mau":
+					// The average of the daily value over the days of the range, as in rollups.
+					n, sum := 0, 0
+					for _, d := range days(since, until) {
+						if d > today {
+							break
+						}
+						u := map[string]bool{}
+						for _, w := range days(dayTime(d).AddDate(0, 0, -lookback), dayTime(d)) {
+							for ak := range daily[key{ev, br, w}] {
+								u[ak] = true
+							}
+						}
+						n++
+						sum += len(u)
+					}
+					if n > 0 {
+						ser.Total = round2(float64(sum) / float64(n))
 					}
 				}
+				ser.TotalKind = totalKind(s.Math)
 				*out = append(*out, ser)
 			}
 		}
 		return nil
 	})
+}
+
+// totalKind says what Series.Total is when it is not a count over the range.
+func totalKind(m string) string {
+	switch m {
+	case "dau", "wau", "mau":
+		return "average"
+	}
+	return ""
 }
 
 func aggregate(m string, vals []float64) float64 {

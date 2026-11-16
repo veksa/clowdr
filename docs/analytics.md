@@ -190,6 +190,13 @@ Every query takes `--since`, `--until`, `--include-test` and `-o json`. Keys are
   installs) refuse it rather than ignore it.
 - `--math`: `total`, `uniques`, `dau`, `wau`, `mau`, `per_user_avg`, and over `--prop`: `sum`,
   `avg`, `p50`, `p75`, `p90`, `p95`, `p99` (nearest rank).
+- The last row of a trend (`total` in JSON) is the whole range, never the last bucket: the sum of
+  the buckets for `total` and `sum`; the distinct actors of the range for `uniques`, so it is at
+  most the sum of the buckets; all events over those actors for `per_user_avg`; every value of the
+  range for `avg` and the percentiles. `dau`, `wau` and `mau` do not add up over a range, so theirs
+  is the average of the daily value (daily actives, or the 7- and 30-day actives as of each day)
+  over the days of the range up to today: the row reads `AVG`, and JSON adds
+  `"total_kind": "average"`.
 - `paths`: `--from` / `--to` a screen, `--depth` 3 to 5 (default 3), `--limit` (default 20, at most
   1000); the top screens come as a table of their own (`screens` in JSON).
 

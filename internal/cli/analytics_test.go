@@ -61,6 +61,7 @@ func TestAnalyticsCommands(t *testing.T) {
 	p.Sync()
 
 	contains(t, h.ok("analytics", "trends", "episode_viewed", "--since", day0), "TIME", "episode_viewed", "TOTAL", "3")
+	contains(t, h.ok("analytics", "trends", "episode_viewed", "--since", day0, "--math", "dau"), "AVG")
 	out, errOut, err := h.run("analytics", "trends", "episode_viewed", "--since", day0, "--breakdown", "episode_number", "--where", "pf=android")
 	if err != nil {
 		t.Fatal(err, errOut)

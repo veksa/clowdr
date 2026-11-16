@@ -718,7 +718,12 @@ func (a *app) printSeries(series []analytics.Series) {
 		}
 		fmt.Fprintln(w, strings.Join(cells, "\t"))
 	}
-	totals := []string{"TOTAL"}
+	// dau, wau and mau do not add up over a range: the server sends their daily average.
+	label := "TOTAL"
+	if series[0].TotalKind == "average" {
+		label = "AVG"
+	}
+	totals := []string{label}
 	for _, s := range series {
 		totals = append(totals, num(s.Total))
 		if len(s.Previous) > 0 {
