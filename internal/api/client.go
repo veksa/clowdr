@@ -61,9 +61,18 @@ func (c *Client) Host() string {
 	return u.Host
 }
 
+// RawBody is a request body sent as it is, not as JSON.
+type RawBody struct {
+	R    io.Reader
+	Type string
+}
+
 func (c *Client) req(ctx context.Context, method, path string, body any) (*http.Response, error) {
 	var rd io.Reader
-	if body != nil {
+	contentType := "application/json"
+	if raw, ok := body.(RawBody); ok {
+		rd, contentType = raw.R, raw.Type
+	} else if body != nil {
 		b, err := json.Marshal(body)
 		if err != nil {
 			return nil, err
@@ -80,7 +89,7 @@ func (c *Client) req(ctx context.Context, method, path string, body any) (*http.
 		return nil, fmt.Errorf("%s: use https (plain http only to localhost)", c.Server)
 	}
 	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Content-Type", contentType)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	resp, err := c.HTTP.Do(req)

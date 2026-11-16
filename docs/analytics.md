@@ -48,7 +48,7 @@ personal data and prints the record):
 | `s` | session id |
 | `app`, `pf`, `ff` | app (`mobile`, `landing`, `dashboard`, `server`, …), platform (`ios`, `android`, `web`, `server`, …), form factor (`phone`, `tablet`, `desktop`, …) |
 | `av`, `b`, `os`, `lc`, `cc`, `env` | app version, build, OS version, 2-letter language, ISO-2 country, environment |
-| `src` | `client` or `server` |
+| `src` | `client` or `server`; `import` for records brought in with `clowctl analytics import` |
 | `dm` | dimensions: at most 4 short strings (≤ 64 characters, numbers written as strings) plus `suspect`; rollups are cut by them |
 | `p` | other properties: numbers, booleans, strings ≤ 200; only in the raw window and the archive |
 | `set`, `once` | person properties to set, or set if not yet set |
@@ -58,8 +58,8 @@ personal data and prints the record):
 Optional fields are left out rather than written empty. The record never carries an IP address,
 email, name or message text.
 
-`clowctl analytics check <file>` validates a saved stdout offline and runs it through the same
-indexer and rollups as the server, on a temporary state.
+`clowctl analytics check <file>` validates a saved stdout (or an import file, plain or `.zst`)
+offline and runs it through the same indexer and rollups as the server, on a temporary state.
 
 ### Events clowdr reads
 
@@ -203,6 +203,27 @@ clowctl analytics archive --since 2026-09-01 --until 2026-09-30 > urls.txt   # p
 duckdb -c "select e, count(*) from read_ndjson([$(sed "s/.*/'&'/" urls.txt | paste -sd,)]) group by 1"
 ```
 
+## Importing history
+
+Records a product kept before it counted with clowdr come in with one command, once the archive is
+configured:
+
+```sh
+clowctl analytics import --dry-run history.ndjson.zst    # the check only, nothing sent
+clowctl analytics import history.ndjson.zst -e prod      # admin token
+```
+
+The file holds records of this format (NDJSON, or NDJSON+zstd), `src: "import"` by convention. The
+CLI checks it as `clowctl analytics check` does and refuses invalid records unless
+`--allow-invalid` (the server then leaves them out). The server writes each record into the
+archived raw file of its **event** day, merged with what that file holds and deduplicated by `id`,
+then rebuilds from the first day it touched — from scratch when that is the project's first day,
+which an import of older history usually is. Importing the same file again changes nothing.
+
+Days from the first day of the stream on are left out and listed: clowdr archives them from what it
+received, and an imported file would hide that day's own records. A history that overlaps the
+stream is cut at the day before it begins.
+
 ## API
 
 | Route | |
@@ -213,6 +234,7 @@ duckdb -c "select e, count(*) from read_ndjson([$(sed "s/.*/'&'/" urls.txt | pas
 | `POST …/analytics/digest?day=&dry_run=1` | the digest text; sent unless `dry_run` |
 | `GET`, `PUT`, `DELETE …/analytics/config` | the `analytics:` block |
 | `PUT …/analytics/secrets/{name}` | `{"value": …}`; empty removes it |
+| `POST …/analytics/import` | admin token; body: records as NDJSON, or NDJSON+zstd (at most 1 GB); writes them into the archive and rebuilds, streams progress (see "Importing history") |
 | `POST …/analytics/rebuild?since=` | admin token; re-indexes from the stream and the archive, streams progress. From the first day the project has, the index is built from scratch; from a later day it is kept (actor numbers in older rollups, persons, links and install keys before that day) and the records are applied on top |
 
 A server with analytics lists `analytics` in `GET /v1/version` features.

@@ -166,7 +166,8 @@ func Check(readers []io.Reader, names []string) (*CheckReport, error) {
 	return rep, nil
 }
 
-// CheckFiles runs Check over files by path ("-" is stdin).
+// CheckFiles runs Check over files by path ("-" is stdin); a file compressed with zstd is read
+// uncompressed.
 func CheckFiles(paths []string) (*CheckReport, error) {
 	var rs []io.Reader
 	for _, p := range paths {
@@ -179,7 +180,12 @@ func CheckFiles(paths []string) (*CheckReport, error) {
 			return nil, err
 		}
 		defer f.Close()
-		rs = append(rs, f)
+		rc, err := RecordsReader(f)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", p, err)
+		}
+		defer rc.Close()
+		rs = append(rs, rc)
 	}
 	return Check(rs, paths)
 }

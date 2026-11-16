@@ -2,7 +2,10 @@ package api
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/veksa/clowdr/internal/analytics"
@@ -45,6 +48,8 @@ func (s *Server) registerAnalytics(a, admin func(string, http.HandlerFunc)) {
 	a("PUT "+base+"/secrets/{name}", s.analyticsSecret)
 	// A rebuild rewrites the index and every rollup from the archive: the admin's call.
 	admin("POST "+base+"/rebuild", s.analyticsRebuild)
+	// An import writes into the archive and rebuilds from the first day it touches: the same.
+	admin("POST "+base+"/import", s.analyticsImport)
 }
 
 // analyticsProject resolves the project of the request; it answers 501 on a server without
@@ -208,5 +213,53 @@ func (s *Server) analyticsRebuild(w http.ResponseWriter, r *http.Request) {
 	}
 	s.stream(w, r, func(ctx context.Context, progress deploy.Progress) (*store.Release, error) {
 		return nil, p.Rebuild(ctx, since, func(msg string) { progress("%s", msg) })
+	})
+}
+
+// maxImportBody bounds the body of an import (compressed, usually).
+const maxImportBody = 1 << 30
+
+// analyticsImport takes records from elsewhere (NDJSON, or NDJSON+zstd) into the archive, then
+// rebuilds the index and the rollups from the first day they touched; progress streams like a
+// deploy. Records of days the stream covers are left out and reported.
+func (s *Server) analyticsImport(w http.ResponseWriter, r *http.Request) {
+	p, ok := s.analyticsProject(w, r)
+	if !ok {
+		return
+	}
+	lines, err := analytics.ReadImport(http.MaxBytesReader(w, r.Body, maxImportBody))
+	if err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			writeErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("an import body is at most %d MB: split the file", maxImportBody>>20))
+			return
+		}
+		writeErr(w, 400, "bad records: "+err.Error())
+		return
+	}
+	if len(lines) == 0 {
+		writeErr(w, 400, "no records")
+		return
+	}
+	if _, _, err := p.S3(); err != nil {
+		writeErr(w, 400, "an import goes to the archive: "+err.Error())
+		return
+	}
+	s.stream(w, r, func(ctx context.Context, progress deploy.Progress) (*store.Release, error) {
+		rep, err := p.Import(ctx, lines, func(msg string) { progress("%s", msg) })
+		if rep != nil {
+			for _, pr := range rep.Problems {
+				progress("%s", pr)
+			}
+			progress("%d records: %d imported, %d there already, %d invalid left out, %d with warnings, %d in days the stream covers left out",
+				rep.Records, rep.Imported, rep.Present, rep.Invalid, rep.Warnings, rep.SkippedRecords)
+			if len(rep.Days) > 0 {
+				progress("days %s…%s", rep.Days[0], rep.Days[len(rep.Days)-1])
+			}
+			if len(rep.Skipped) > 0 {
+				progress("left out: %s", strings.Join(rep.Skipped, ", "))
+			}
+		}
+		return nil, err
 	})
 }

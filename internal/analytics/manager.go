@@ -87,6 +87,7 @@ type Project struct {
 	restoreAt  time.Time            // next look into the archive for a lost index
 	rollupMu   sync.Mutex
 	indexMu    sync.Mutex
+	archMu     sync.Mutex // raw days of the archive: the daily upload and an import
 }
 
 func (m *Manager) now() time.Time {

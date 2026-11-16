@@ -100,6 +100,8 @@ func (p *Project) ArchiveDue(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	p.archMu.Lock()
+	defer p.archMu.Unlock()
 	now := p.m.now()
 	a := p.archiveState()
 	start := p.WindowStart().Truncate(24 * time.Hour)

@@ -30,6 +30,16 @@ func TestAnalyticsCommands(t *testing.T) {
 	os.WriteFile(good, []byte(`{"$":"analytics","v":1,"id":"1","ts":"2026-11-10T10:00:00Z","e":"$pageview","d":"d1","app":"mobile","pf":"ios"}`+"\n"), 0o644)
 	contains(t, h.ok("analytics", "check", good), "1 records (0 invalid")
 
+	// An import is checked here first: invalid records stop it before anything is sent, a dry
+	// run stops after the check, and without an archive the server refuses it.
+	if _, _, err := h.run("analytics", "import", fixture); err == nil {
+		t.Fatal("imported a file with invalid records")
+	}
+	contains(t, h.ok("analytics", "import", "--dry-run", good), "1 records (0 invalid")
+	if _, errOut, err := h.run("analytics", "import", good); err == nil || !strings.Contains(err.Error()+errOut, "archive") {
+		t.Fatalf("imported without an archive: %v %s", err, errOut)
+	}
+
 	// Feed the fixture as received now-ish, shifted so its days are the last three.
 	f, _ := os.Open(fixture)
 	defer f.Close()

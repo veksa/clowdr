@@ -237,8 +237,8 @@ func Validate(r *Record) []string {
 	if r.FF != "" && !knownFF[r.FF] {
 		out = append(out, fmt.Sprintf("unknown ff %q", r.FF))
 	}
-	if r.Src != "" && r.Src != "client" && r.Src != "server" && r.Src != "posthog" {
-		out = append(out, fmt.Sprintf("src %q is neither client nor server", r.Src))
+	if r.Src != "" && r.Src != "client" && r.Src != "server" && r.Src != "import" {
+		out = append(out, fmt.Sprintf("src %q is not client, server or import", r.Src))
 	}
 	if r.CC != "" && (len(r.CC) != 2 || strings.ToUpper(r.CC) != r.CC) {
 		out = append(out, fmt.Sprintf("cc %q is not ISO-2 upper case", r.CC))

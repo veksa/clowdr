@@ -130,6 +130,19 @@ func TestAnalyticsAPI(t *testing.T) {
 		t.Fatal("rebuild without since")
 	}
 
+	// An import is the admin's as well, and goes to the archive.
+	history := func(lines string) RawBody { return RawBody{R: strings.NewReader(lines), Type: "application/x-ndjson"} }
+	old := `{"$":"analytics","v":1,"id":"h-1","ts":"2026-01-02T10:00:00.000Z","e":"episode_viewed","u":"870","src":"import"}` + "\n"
+	if _, err := c.Stream(ctx, "POST", path("import"), history(old), func(Event) {}); err == nil {
+		t.Fatal("a project token imported")
+	}
+	if err := e.admin.Do(ctx, "POST", path("import"), history(old), nil); err == nil || !strings.Contains(err.Error(), "archive") {
+		t.Fatalf("an import without an archive: %v", err)
+	}
+	if err := e.admin.Do(ctx, "POST", path("import"), history("\n"), nil); err == nil || !strings.Contains(err.Error(), "no records") {
+		t.Fatalf("an empty import: %v", err)
+	}
+
 	if err := c.Do(ctx, "DELETE", path("config"), nil, &ch); err != nil || !ch["changed"] {
 		t.Fatal(err)
 	}

@@ -1,16 +1,19 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/url"
+	"os"
 	"slices"
 	"sort"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 
@@ -35,12 +38,14 @@ S3 bucket and sends a daily digest to Telegram. Test persons are left out unless
   clowctl analytics installs --since 30d
   clowctl analytics person 870
   clowctl analytics digest --dry-run
-  clowctl analytics check records.ndjson`,
+  clowctl analytics check records.ndjson
+  clowctl analytics import history.ndjson.zst`,
 	}
 	cmd.AddCommand(
 		a.anTrendsCmd(), a.anFunnelCmd(), a.anRetentionCmd(), a.anStickinessCmd(), a.anLifecycleCmd(),
 		a.anPathsCmd(), a.anPersonCmd(), a.anEventsCmd(), a.anInstallsCmd(), a.anCatalogCmd(),
 		a.anStatusCmd(), a.anArchiveCmd(), a.anDigestCmd(), a.anCheckCmd(), a.anSecretCmd(), a.anRebuildCmd(),
+		a.anImportCmd(),
 	)
 	return cmd
 }
@@ -549,6 +554,80 @@ func (a *app) anRebuildCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&since, "since", "", "first day to rebuild (records before it are kept as they are)")
 	return cmd
+}
+
+func (a *app) anImportCmd() *cobra.Command {
+	var dryRun, allowInvalid bool
+	cmd := &cobra.Command{
+		Use:   "import <file>...",
+		Short: "Bring records from elsewhere into the archive and rebuild from the first day they touch (admin token)",
+		Long: `Takes analytics records kept before the project counted with clowdr (NDJSON, or NDJSON
+compressed with zstd: .ndjson.zst) and writes each into the archived raw file of its event
+day, merged with what is there and deduplicated by id; then the index and the rollups are
+rebuilt from the first day it touched. Importing the same file again changes nothing.
+
+The files are checked here first, as by "clowctl analytics check"; a file with invalid
+records is refused unless --allow-invalid (they are left out). Days the project's stream
+already covers are left out and listed. Needs the archive (analytics.archive and its
+secrets). Records of history should say src "import".`,
+		Example: `  clowctl analytics import --dry-run history.ndjson.zst
+  clowctl analytics import history.ndjson.zst -e prod`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			rep, err := analytics.CheckFiles(args)
+			if err != nil {
+				return err
+			}
+			a.printCheck(rep)
+			if rep.Invalid > 0 && !allowInvalid {
+				return fmt.Errorf("%d invalid records: fix the file, or --allow-invalid to leave them out", rep.Invalid)
+			}
+			if dryRun {
+				return nil
+			}
+			t, err := a.target(true)
+			if err != nil {
+				return err
+			}
+			for _, path := range args {
+				body, err := importBody(path)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(a.err, "→ %s (%d KB)\n", path, len(body)>>10)
+				ev, err := t.client.Stream(cmd.Context(), "POST", api.Path("projects", t.project, "analytics", "import"),
+					api.RawBody{R: bytes.NewReader(body), Type: "application/zstd"}, a.progress)
+				if err != nil {
+					return err
+				}
+				if ev.Error != "" {
+					return errors.New(ev.Error)
+				}
+			}
+			fmt.Fprintln(a.err, "✓ imported")
+			return nil
+		},
+	}
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "only check the files")
+	cmd.Flags().BoolVar(&allowInvalid, "allow-invalid", false, "send files with invalid records (the server leaves them out)")
+	return cmd
+}
+
+// importBody reads a file of records as zstd: as it is when compressed already.
+func importBody(path string) ([]byte, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	if bytes.HasPrefix(b, []byte{0x28, 0xb5, 0x2f, 0xfd}) {
+		return b, nil
+	}
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedBetterCompression))
+	if err != nil {
+		return nil, err
+	}
+	defer enc.Close()
+	return enc.EncodeAll(b, nil), nil
 }
 
 // ─── Printing ────────────────────────────────────────────────────────────────
