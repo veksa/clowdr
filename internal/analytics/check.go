@@ -97,6 +97,9 @@ func Check(readers []io.Reader, names []string) (*CheckReport, error) {
 		return nil, err
 	}
 	defer st.Close()
+	// A throwaway state: no fsync per record, or a file of a few hundred thousand records takes
+	// hours instead of seconds.
+	st.db.NoSync = true
 	// Index in order, as the indexer would, one record per batch so an install key seen in an
 	// earlier file decides a later install.
 	for i := range recs {
