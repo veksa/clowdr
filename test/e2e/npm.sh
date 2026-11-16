@@ -51,10 +51,10 @@ same_as_missing() {
 	a="$(status "$tok" "$url" "$@")"
 	grep -iv '^date:' "$WORK/headers" >"$WORK/h1"
 	# A HEAD (-I) prints its headers as the body: the date there moves with the clock too.
-	grep -iv '^date:' "$WORK/body" >"$WORK/b1"
+	grep -iv '^date:' "$WORK/body" >"$WORK/b1" || true
 	b="$(status "$tok" "$missing" "$@")"
 	grep -iv '^date:' "$WORK/headers" >"$WORK/h2"
-	grep -iv '^date:' "$WORK/body" >"$WORK/b2"
+	grep -iv '^date:' "$WORK/body" >"$WORK/b2" || true
 	[ "$a" = 404 ] || fail "$what: $url answered $a, want 404"
 	[ "$a" = "$b" ] && cmp -s "$WORK/h1" "$WORK/h2" && cmp -s "$WORK/b1" "$WORK/b2" ||
 		fail "$what: differs from a missing package: $(diff "$WORK/h1" "$WORK/h2"; diff "$WORK/b1" "$WORK/b2")"
