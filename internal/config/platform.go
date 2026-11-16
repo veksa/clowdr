@@ -40,6 +40,19 @@ type Platform struct {
 	Limits         LimitsConf              `yaml:"limits"`
 	NPM            NPMConf                 `yaml:"npm"`
 	Plugins        PluginsConf             `yaml:"plugins"`
+	Analytics      PlatformAnalyticsConf   `yaml:"analytics"`
+}
+
+// PlatformAnalyticsConf is the server's side of product analytics (docs/analytics.md).
+type PlatformAnalyticsConf struct {
+	Archive struct {
+		// AllowPrivate lists archive endpoints (host:port, as in the endpoint URL) that may be
+		// on a private, loopback or link-local address: an S3 on this host or its network. Any
+		// other endpoint that resolves there is refused, since a project token sets it.
+		AllowPrivate []string `yaml:"allow_private"`
+	} `yaml:"archive"`
+	// RollupCache is how much decoded rollups queries keep in memory (default 256m).
+	RollupCache Bytes `yaml:"rollup_cache"`
 }
 
 // PluginsConf configures the Claude Code plugin marketplace at /plugins/ on the deploy host
@@ -214,6 +227,12 @@ limits:
 
 # Claude Code plugin marketplace at https://deploy.<domain>/plugins/marketplace.json, built from
 # the npm packages marked "claude-plugin": true (users: clowctl plugins setup).
+# Product analytics (docs/analytics.md).
+# analytics:
+#   archive:
+#     allow_private: [127.0.0.1:9000]   # archive endpoints allowed on private addresses (an S3 on this host)
+#   rollup_cache: 256m                  # decoded rollups kept for queries
+#
 # plugins:
 #   name: clowdr-example-com   # marketplace name (default: clowdr-<domain, dots as dashes>)
 #   owner: Example Inc.        # shown as the owner (default: the domain)

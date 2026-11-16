@@ -17,7 +17,7 @@ On top of the raw stream clowdr keeps, per project:
   sessions, installs, groups, as compressed bitmaps — enough for trends, retention, stickiness and
   lifecycle over any period, long after the raw records left the hot window;
 - an **archive** in the project's own S3 bucket: raw days, rollups and a weekly snapshot of the
-  index, so a lost disk is rebuilt with `clowctl analytics rebuild`;
+  index, so a lost disk comes back by itself once the config and the secrets are set again;
 - a **daily digest** and **install notifications** in the project's Telegram chat.
 
 Test persons (person property `test: true`, configurable) are left out of every number unless a
@@ -132,8 +132,28 @@ The archive lays out objects as `<prefix>/v1/<project>/raw/YYYY/MM/YYYY-MM-DD.nd
 and `…/state/YYYY-MM-DD.ndjson.zst` (Sundays). A raw day goes up after it ends (from 01:30 UTC)
 and is retried hourly; the digest warns about days that did not.
 
-The hot window is `logs.analytics` in platform.yml. An older clowdrd refuses a platform.yml that
-has it, so update clowdrd before adding it.
+**A lost disk.** When a project with an archive has an empty index (a new disk, a new server),
+clowdrd restores it within a minute of `clowctl apply` and the secrets: the archived rollups the
+disk lacks, the latest snapshot (actors and groups keep the numbers those rollups refer to, and
+the catalog comes back too) and the raw days since that snapshot, applied on top. Rollup queries
+then answer as before. Without a snapshot it indexes every archived raw day from scratch instead.
+
+**The endpoint must be public.** A project token sets the archive endpoint, and clowdrd connects
+to it from inside the server, so an endpoint that resolves to a loopback, private, link-local
+(the cloud metadata service) or similar address is refused when dialled, whatever name it goes
+by. An S3 on the same host or network is allowed by the server's admin in platform.yml.
+
+The server's side lives in platform.yml (an older clowdrd refuses these keys, so update clowdrd
+before adding them):
+
+```yaml
+logs:
+  analytics: { retention: 35d, max: 2GB }   # the hot window of raw records
+analytics:
+  archive:
+    allow_private: [127.0.0.1:9000]         # archive endpoints (host:port as in the URL) allowed on private addresses
+  rollup_cache: 256m                        # decoded rollups kept in memory for queries
+```
 
 ## Reading
 

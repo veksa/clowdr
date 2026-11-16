@@ -120,6 +120,8 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 	am.Logs = logStore
 	am.Exists = func(project string) bool { _, err := st.Project(project); return err == nil }
 	am.Retention = func() time.Duration { return current.Logs.Analytics.Retention.D() }
+	am.RollupCache = func() int64 { return int64(current.Analytics.RollupCache) }
+	am.AllowPrivate = func() []string { return current.Analytics.Archive.AllowPrivate }
 	eng.Syslog = true
 	eng.LogTail = logStore.Tail
 	eng.MoveLogs = func(old, name string) {

@@ -3,8 +3,10 @@ package analytics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -90,7 +92,41 @@ type fakeS3 struct {
 	types   map[string]string
 	fail    int // answer 500 to this many requests
 	puts    int
+	page    int // keys per list page; 0 = 1000
+	lists   int
 	srv     *httptest.Server
+}
+
+// list answers ListObjectsV2, a page at a time.
+func (f *fakeS3) list(w http.ResponseWriter, prefix, token string) {
+	f.lists++
+	var keys []string
+	for k := range f.objects {
+		if strings.HasPrefix(k, prefix) && k > token {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	page := f.page
+	if page == 0 {
+		page = 1000
+	}
+	truncated := len(keys) > page
+	if truncated {
+		keys = keys[:page]
+	}
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?><ListBucketResult>`)
+	for _, k := range keys {
+		fmt.Fprintf(&b, "<Contents><Key>%s</Key></Contents>", k)
+	}
+	if truncated {
+		fmt.Fprintf(&b, "<IsTruncated>true</IsTruncated><NextContinuationToken>%s</NextContinuationToken>", keys[len(keys)-1])
+	} else {
+		b.WriteString("<IsTruncated>false</IsTruncated>")
+	}
+	b.WriteString("</ListBucketResult>")
+	w.Write([]byte(b.String()))
 }
 
 func newFakeS3(t *testing.T) *fakeS3 {
@@ -143,6 +179,10 @@ func (f *fakeS3) serve(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	key := strings.TrimPrefix(r.URL.Path, "/bucket/")
+	if q := r.URL.Query(); r.Method == "GET" && q.Get("list-type") == "2" {
+		f.list(w, q.Get("prefix"), q.Get("continuation-token"))
+		return
+	}
 	switch r.Method {
 	case "PUT":
 		b := make([]byte, r.ContentLength)

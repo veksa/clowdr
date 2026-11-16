@@ -540,19 +540,27 @@ type snapshotLine struct {
 	N uint32          `json:"n,omitempty"` // actor numbers: actor_ids values are keys, not JSON
 }
 
-// snapshotBuckets go into the weekly snapshot; meta (config, secrets) does not.
-var snapshotBuckets = [][]byte{bActors, bPersons, bLinks, bInstall}
+// snapshotBuckets go into the weekly snapshot, with the catalog from meta; the rest of meta
+// (config, secrets, schedules) does not.
+var snapshotBuckets = [][]byte{bActors, bPersons, bLinks, bInstall, bGroups}
 
-// WriteSnapshot writes actors, persons, links and install keys as NDJSON.
+// snapshotCatalog is the snapshot line of the catalog.
+const snapshotCatalog = "catalog"
+
+// WriteSnapshot writes actors, persons, links, install keys, groups and the catalog as NDJSON.
+// Actor and group numbers travel with them: archived rollups refer to them.
 func (s *State) WriteSnapshot(w io.Writer) error {
 	enc := json.NewEncoder(w)
 	return s.db.View(func(tx *bolt.Tx) error {
 		for _, name := range snapshotBuckets {
 			err := tx.Bucket(name).ForEach(func(k, v []byte) error {
 				l := snapshotLine{B: string(name), K: string(k)}
-				if string(name) == string(bLinks) {
+				switch string(name) {
+				case string(bLinks):
 					l.V, _ = json.Marshal(string(v))
-				} else {
+				case string(bGroups):
+					l.N = binary.BigEndian.Uint32(v)
+				default:
 					l.V = json.RawMessage(v)
 				}
 				return enc.Encode(l)
@@ -561,16 +569,30 @@ func (s *State) WriteSnapshot(w io.Writer) error {
 				return err
 			}
 		}
+		if v := tx.Bucket(bMeta).Get([]byte(snapshotCatalog)); v != nil {
+			return enc.Encode(snapshotLine{B: snapshotCatalog, V: json.RawMessage(v)})
+		}
 		return nil
 	})
 }
 
-// ReadSnapshot loads a snapshot into an empty state.
+// Empty reports whether the index has no actors: a new or lost state.
+func (s *State) Empty() bool {
+	empty := true
+	s.View(func(t *Tx) error {
+		k, _ := t.tx.Bucket(bActorIDs).Cursor().First()
+		empty = k == nil
+		return nil
+	})
+	return empty
+}
+
+// ReadSnapshot loads a snapshot into an empty state (Restore makes sure it is).
 func (s *State) ReadSnapshot(r io.Reader) error {
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 64<<10), 16<<20)
 	return s.db.Update(func(tx *bolt.Tx) error {
-		var maxID uint32
+		var maxID, maxGroup uint32
 		for sc.Scan() {
 			var l snapshotLine
 			if err := json.Unmarshal(sc.Bytes(), &l); err != nil {
@@ -599,9 +621,21 @@ func (s *State) ReadSnapshot(r io.Reader) error {
 				if err := tx.Bucket([]byte(l.B)).Put([]byte(l.K), l.V); err != nil {
 					return err
 				}
+			case string(bGroups):
+				if err := tx.Bucket(bGroups).Put([]byte(l.K), idKey(l.N)); err != nil {
+					return err
+				}
+				maxGroup = max(maxGroup, l.N)
+			case snapshotCatalog:
+				if err := tx.Bucket(bMeta).Put([]byte(snapshotCatalog), l.V); err != nil {
+					return err
+				}
 			}
 		}
 		if err := sc.Err(); err != nil {
+			return err
+		}
+		if err := tx.Bucket(bGroups).SetSequence(uint64(maxGroup)); err != nil {
 			return err
 		}
 		return tx.Bucket(bActorIDs).SetSequence(uint64(maxID))

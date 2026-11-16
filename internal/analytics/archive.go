@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -348,4 +349,123 @@ func (p *Project) fetchRawDay(ctx context.Context, c *S3, base, day string) ([]s
 		}
 	}
 	return lines, parts, nil
+}
+
+// Restore fills a new or lost index from the archive: the archived rollups the disk lacks, the
+// latest state snapshot (actors and groups keep the numbers those rollups refer to) and the raw
+// days received since that snapshot, applied on top. Without a snapshot it indexes every
+// archived raw day from scratch and leaves the archived rollups alone (their numbers would not
+// match). It reports whether there was anything to restore.
+func (p *Project) Restore(ctx context.Context, progress func(string)) (bool, error) {
+	if progress == nil {
+		progress = func(string) {}
+	}
+	c, base, err := p.S3()
+	if err != nil {
+		return false, err
+	}
+	snaps, err := c.List(ctx, base+"/state/")
+	if err != nil {
+		return false, err
+	}
+	raws, err := c.List(ctx, base+"/raw/")
+	if err != nil {
+		return false, err
+	}
+	if len(snaps) == 0 && len(raws) == 0 {
+		return false, nil
+	}
+	// The archive knows its raw days, so status and archive links do not probe for them.
+	a := p.archiveState()
+	for _, k := range raws {
+		name := k[strings.LastIndex(k, "/")+1:]
+		day := name[:min(len(name), len(DayLayout))]
+		if _, err := time.Parse(DayLayout, day); err != nil {
+			continue
+		}
+		if strings.HasPrefix(name[len(day):], "-") {
+			a.Raw[day] = 24
+		} else if a.Raw[day] == 0 {
+			a.Raw[day] = 1
+		}
+	}
+	p.state.SetMeta("archive", a)
+
+	if len(snaps) == 0 {
+		first := ""
+		for d := range a.Raw {
+			if first == "" || d < first {
+				first = d
+			}
+		}
+		progress("no state snapshot: indexing every archived raw day from " + first)
+		return true, p.rebuild(ctx, dayTime(first), progress, false)
+	}
+
+	latest := snaps[len(snaps)-1]
+	snapDay := strings.TrimSuffix(latest[strings.LastIndex(latest, "/")+1:], ".ndjson.zst")
+	if _, err := time.Parse(DayLayout, snapDay); err != nil {
+		return false, fmt.Errorf("snapshot %s: not a day", latest)
+	}
+	body, err := c.Get(ctx, latest)
+	if err != nil {
+		return false, err
+	}
+	raw, err := decompress(body)
+	if err != nil {
+		return false, fmt.Errorf("snapshot %s: %w", snapDay, err)
+	}
+
+	rolls, err := c.List(ctx, base+"/rollup/")
+	if err != nil {
+		return false, err
+	}
+	got := 0
+	for _, k := range rolls {
+		day := strings.TrimSuffix(k[strings.LastIndex(k, "/")+1:], ".roll.zst")
+		if _, err := time.Parse(DayLayout, day); err != nil {
+			continue
+		}
+		if _, err := os.Stat(rollupPath(p.dir, day)); err == nil {
+			continue
+		}
+		b, err := c.Get(ctx, k)
+		if err != nil {
+			return false, err
+		}
+		if _, err := decodeRollup(b); err != nil {
+			return false, fmt.Errorf("archived rollup %s: %w", day, err)
+		}
+		if err := writeFileAtomic(rollupPath(p.dir, day), b); err != nil {
+			return false, err
+		}
+		got++
+	}
+	progress(fmt.Sprintf("%d rollups from the archive", got))
+
+	p.indexMu.Lock()
+	if !p.state.Empty() {
+		p.indexMu.Unlock()
+		return false, errors.New("the index is not empty: a restore only fills a new or lost one (use rebuild)")
+	}
+	err = p.state.ReadSnapshot(bytes.NewReader(raw))
+	p.indexMu.Unlock()
+	if err != nil {
+		return false, fmt.Errorf("snapshot %s: %w", snapDay, err)
+	}
+	progress("index from the snapshot of " + snapDay)
+	// The snapshot was taken during its day: what was received from the day before on is
+	// applied again (indexing is idempotent) and its rollups recomputed.
+	return true, p.rebuild(ctx, dayTime(snapDay).AddDate(0, 0, -1), progress, true)
+}
+
+func writeFileAtomic(path string, b []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o640); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }

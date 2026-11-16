@@ -21,6 +21,12 @@ import (
 // before `since` would be lost. A later `since` keeps the index and applies the records on top
 // of it (indexing is idempotent).
 func (p *Project) Rebuild(ctx context.Context, since time.Time, progress func(string)) error {
+	return p.rebuild(ctx, since, progress, false)
+}
+
+// rebuild is Rebuild; keep applies the records to the index as it is even from the first day
+// (after a restore from a snapshot, whose numbers the archived rollups share).
+func (p *Project) rebuild(ctx context.Context, since time.Time, progress func(string), keep bool) error {
 	if progress == nil {
 		progress = func(string) {}
 	}
@@ -38,7 +44,7 @@ func (p *Project) Rebuild(ctx context.Context, since time.Time, progress func(st
 	defer p.indexMu.Unlock()
 	started := p.m.now()
 
-	full := !since.After(dayTime(p.firstKnownDay()))
+	full := !keep && !since.After(dayTime(p.firstKnownDay()))
 	if full {
 		progress("from the first day: the index is built from scratch")
 	} else {

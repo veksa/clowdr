@@ -1,6 +1,7 @@
 package analytics
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -277,15 +278,89 @@ func (q *qctx) loadExclude() {
 
 // ─── Rollup reading ──────────────────────────────────────────────────────────
 
-type cachedRollup struct {
-	mod  time.Time
-	roll *DayRollup
+// DefaultRollupCache is how much decoded rollups the query cache keeps unless platform.yml
+// says otherwise (analytics.rollup_cache).
+const DefaultRollupCache = 256 << 20
+
+// rollupCache keeps decoded rollups, least recently used out first, within a byte budget
+// estimated by their JSON size: a busy project's day is megabytes, an idle one's kilobytes, so
+// a count says nothing about memory.
+type rollupCache struct {
+	mu    sync.Mutex
+	limit int64
+	used  int64
+	ll    *list.List
+	m     map[string]*list.Element
 }
 
-var (
-	rollCacheMu sync.Mutex
-	rollCache   = map[string]cachedRollup{}
-)
+type cachedRollup struct {
+	path string
+	mod  time.Time
+	roll *DayRollup
+	size int64
+}
+
+var rollCache = &rollupCache{limit: DefaultRollupCache, ll: list.New(), m: map[string]*list.Element{}}
+
+// SetRollupCacheLimit sets the byte budget of the rollup cache; 0 or less is the default.
+func SetRollupCacheLimit(n int64) {
+	if n <= 0 {
+		n = DefaultRollupCache
+	}
+	rollCache.mu.Lock()
+	rollCache.limit = n
+	rollCache.evict()
+	rollCache.mu.Unlock()
+}
+
+func (c *rollupCache) get(path string, mod time.Time) *DayRollup {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.m[path]
+	if !ok {
+		return nil
+	}
+	cr := e.Value.(*cachedRollup)
+	if !cr.mod.Equal(mod) {
+		c.remove(e)
+		return nil
+	}
+	c.ll.MoveToFront(e)
+	return cr.roll
+}
+
+func (c *rollupCache) put(path string, mod time.Time, r *DayRollup, size int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e, ok := c.m[path]; ok {
+		c.remove(e)
+	}
+	if size > c.limit {
+		return // larger than the whole budget: read it, do not keep it
+	}
+	c.m[path] = c.ll.PushFront(&cachedRollup{path: path, mod: mod, roll: r, size: size})
+	c.used += size
+	c.evict()
+}
+
+func (c *rollupCache) evict() {
+	for c.used > c.limit && c.ll.Len() > 0 {
+		c.remove(c.ll.Back())
+	}
+}
+
+func (c *rollupCache) remove(e *list.Element) {
+	cr := e.Value.(*cachedRollup)
+	c.ll.Remove(e)
+	delete(c.m, cr.path)
+	c.used -= cr.size
+}
+
+func (c *rollupCache) stats() (n int, used int64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ll.Len(), c.used
+}
 
 // day returns the rollup of a day (cached by file time), or nil.
 // ensureRollups computes the missing rollups of days in the hot window, so a query does not
@@ -337,23 +412,23 @@ func (p *Project) day(day string) *DayRollup {
 	if err != nil {
 		return nil
 	}
-	rollCacheMu.Lock()
-	c, ok := rollCache[path]
-	rollCacheMu.Unlock()
-	if ok && c.mod.Equal(fi.ModTime()) {
-		return c.roll
+	if r := rollCache.get(path, fi.ModTime()); r != nil {
+		return r
 	}
-	r, err := LoadRollup(p.dir, day)
-	if err != nil || r == nil {
+	b, err := os.ReadFile(path)
+	if err != nil {
 		return nil
 	}
-	rollCacheMu.Lock()
-	if len(rollCache) > 2000 {
-		rollCache = map[string]cachedRollup{}
+	raw, err := decompress(b)
+	if err != nil {
+		return nil
 	}
-	rollCache[path] = cachedRollup{mod: fi.ModTime(), roll: r}
-	rollCacheMu.Unlock()
-	return r
+	var r DayRollup
+	if json.Unmarshal(raw, &r) != nil {
+		return nil
+	}
+	rollCache.put(path, fi.ModTime(), &r, int64(len(raw)))
+	return &r
 }
 
 // days lists the days of [from, to], inclusive.

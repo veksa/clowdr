@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -170,9 +171,16 @@ func (c *S3) client() *http.Client {
 }
 
 func (c *S3) do(ctx context.Context, method, key string, body []byte, contentType string) (*http.Response, error) {
+	return c.doQuery(ctx, method, key, nil, body, contentType)
+}
+
+func (c *S3) doQuery(ctx context.Context, method, key string, query url.Values, body []byte, contentType string) (*http.Response, error) {
 	u, err := c.objectURL(key)
 	if err != nil {
 		return nil, err
+	}
+	if len(query) > 0 {
+		u.RawQuery = canonicalQuery(query)
 	}
 	var rd io.Reader
 	hash := emptySHA256
@@ -255,6 +263,43 @@ func (c *S3) Head(ctx context.Context, key string) (int64, error) {
 	resp.Body.Close()
 	n, _ := strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
 	return n, nil
+}
+
+// List returns the keys under a prefix, sorted (ListObjectsV2, every page).
+func (c *S3) List(ctx context.Context, prefix string) ([]string, error) {
+	var keys []string
+	token := ""
+	for page := 0; page < 10000; page++ {
+		q := url.Values{"list-type": {"2"}, "prefix": {prefix}}
+		if token != "" {
+			q.Set("continuation-token", token)
+		}
+		resp, err := c.doQuery(ctx, "GET", "", q, nil, "")
+		if err != nil {
+			return nil, err
+		}
+		var out struct {
+			Contents []struct {
+				Key string `xml:"Key"`
+			} `xml:"Contents"`
+			IsTruncated           bool   `xml:"IsTruncated"`
+			NextContinuationToken string `xml:"NextContinuationToken"`
+		}
+		err = xml.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&out)
+		resp.Body.Close()
+		if err != nil {
+			return nil, fmt.Errorf("s3 list %s: %w", prefix, err)
+		}
+		for _, o := range out.Contents {
+			keys = append(keys, o.Key)
+		}
+		if !out.IsTruncated || out.NextContinuationToken == "" {
+			break
+		}
+		token = out.NextContinuationToken
+	}
+	sort.Strings(keys)
+	return keys, nil
 }
 
 // Presign returns a GET URL valid for expires (at most 7 days).

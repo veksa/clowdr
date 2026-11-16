@@ -44,6 +44,13 @@ type Manager struct {
 	Logs *logs.Store
 	// Retention is the hot window of raw records (platform.yml logs.analytics).
 	Retention func() time.Duration
+	// RollupCache is the byte budget of decoded rollups kept for queries (platform.yml
+	// analytics.rollup_cache); nil or 0 is DefaultRollupCache.
+	RollupCache func() int64
+	// AllowPrivate lists archive endpoints (host:port) that may resolve to private, loopback
+	// or link-local addresses (platform.yml analytics.archive.allow_private): an S3 on the same
+	// host. Any other endpoint that does is refused when dialled.
+	AllowPrivate func() []string
 	// Exists reports whether a project still exists; the schedule skips deleted ones (their
 	// directory stays until removed by hand). Nil: every project exists.
 	Exists func(project string) bool
@@ -56,6 +63,7 @@ type Manager struct {
 	Telegram func(token, chat string) Sender
 
 	mu       sync.Mutex
+	guarded  *http.Client // the S3 client: public addresses only (netguard.go)
 	projects map[string]*Project
 	closed   bool
 }
@@ -76,6 +84,7 @@ type Project struct {
 	eachSent   int                  // per-install messages sent in eachHour
 	eachMissed map[string]int       // hour → installs over the per-message limit
 	noRollup   map[string]time.Time // day → when a query last found nothing to roll up
+	restoreAt  time.Time            // next look into the archive for a lost index
 	rollupMu   sync.Mutex
 	indexMu    sync.Mutex
 }
@@ -107,7 +116,12 @@ func (m *Manager) httpClient() *http.Client {
 	if m.HTTP != nil {
 		return m.HTTP
 	}
-	return &http.Client{Timeout: 5 * time.Minute}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.guarded == nil {
+		m.guarded = guardedClient(m.AllowPrivate, 5*time.Minute)
+	}
+	return m.guarded
 }
 
 func (m *Manager) sender(token, chat string) Sender {
@@ -365,6 +379,19 @@ func (p *Project) WindowStart() time.Time {
 	return start
 }
 
+// streamFrom is where the raw records on disk begin: the window start, or now when the stream
+// holds nothing yet (a new disk).
+func (p *Project) streamFrom() time.Time {
+	if p.m.Logs != nil {
+		for _, svc := range p.m.Logs.Streams(p.name, logs.KindAnalytics) {
+			if !p.m.Logs.Oldest(logs.Key{Project: p.name, Kind: logs.KindAnalytics, Name: svc}).IsZero() {
+				return p.WindowStart()
+			}
+		}
+	}
+	return p.m.now()
+}
+
 // ─── Rollups ─────────────────────────────────────────────────────────────────
 
 // lateDays is how far back an event may arrive and still count in its day's rollup: the
@@ -380,23 +407,10 @@ func (p *Project) Recompute(days []string) ([]string, error) {
 	p.rollupMu.Lock()
 	defer p.rollupMu.Unlock()
 	sort.Strings(days)
-	first, err := time.Parse(DayLayout, days[0])
-	if err != nil {
-		return nil, err
-	}
-	want := map[string]bool{}
 	for _, d := range days {
-		want[d] = true
-	}
-	// An event is received after its day began (at most minutes before, by clock skew the
-	// server clamps), so the stream from an hour before the first day covers every day asked.
-	recs, err := p.readRecords(first.Add(-time.Hour), time.Time{}, func(r *Record) bool { return want[r.Day()] })
-	if err != nil {
-		return nil, err
-	}
-	byDay := map[string][]Record{}
-	for _, r := range recs {
-		byDay[r.Day()] = append(byDay[r.Day()], r)
+		if _, err := time.Parse(DayLayout, d); err != nil {
+			return nil, err
+		}
 	}
 	exclude := map[string]any{"test": true}
 	if c := p.Config(); c != nil {
@@ -404,15 +418,29 @@ func (p *Project) Recompute(days []string) ([]string, error) {
 	}
 	var changed []string
 	now := p.m.now()
+	windowStart := p.streamFrom()
 	for _, d := range days {
-		if len(byDay[d]) == 0 {
+		// One day at a time: memory holds one day's records, not the whole late window.
+		recs, err := p.dayRecords(d)
+		if err != nil {
+			return changed, err
+		}
+		if len(recs) == 0 {
 			if old, _ := LoadRollup(p.dir, d); old == nil {
 				continue // nothing then, nothing now
 			}
 		}
-		roll, err := ComputeDay(p.state, d, byDay[d], exclude, now)
+		roll, err := ComputeDay(p.state, d, recs, exclude, now)
 		if err != nil {
 			return changed, err
+		}
+		// A day the stream does not hold from its start (a new disk, a restored index, a
+		// window trimmed by age) is recomputed from part of its records: a rollup that counts
+		// fewer events than the one on disk lost data, and the one on disk stays.
+		if dayTime(d).Before(windowStart) {
+			if old, _ := LoadRollup(p.dir, d); old != nil && old.eventCount() > roll.eventCount() {
+				continue
+			}
 		}
 		ok, err := SaveRollup(p.dir, roll)
 		if err != nil {
@@ -430,6 +458,33 @@ func (p *Project) Recompute(days []string) ([]string, error) {
 	}
 	p.state.SetMeta("rollups_computed", now.Format(time.RFC3339))
 	return changed, nil
+}
+
+// dayRecords reads the records of one event day (UTC). An event is received after its day began
+// (at most minutes before, by clock skew the server clamps), so the stream is read from an hour
+// before the day. A line is parsed only when its ts names the day or a neighbour (an offset
+// moves the UTC day by less than one), which keeps a pass over a busy week cheap.
+func (p *Project) dayRecords(day string) ([]Record, error) {
+	d := dayTime(day)
+	marks := []string{
+		`"ts":"` + d.AddDate(0, 0, -1).Format(DayLayout),
+		`"ts":"` + day,
+		`"ts":"` + d.AddDate(0, 0, 1).Format(DayLayout),
+	}
+	var out []Record
+	err := p.ReadRaw(d.Add(-time.Hour), time.Time{}, func(_ time.Time, line string) {
+		hit := !strings.Contains(line, `"ts":"`) // not compact JSON: parse it to know
+		for _, m := range marks {
+			hit = hit || strings.Contains(line, m)
+		}
+		if !hit {
+			return
+		}
+		if r, err := Parse(line); err == nil && r.Day() == day {
+			out = append(out, r)
+		}
+	})
+	return out, err
 }
 
 func mergeDays(a, b []string) []string {
@@ -497,6 +552,9 @@ func (m *Manager) Run(ctx context.Context) {
 
 // Tick runs whatever is due for every project.
 func (m *Manager) Tick(ctx context.Context) {
+	if m.RollupCache != nil {
+		SetRollupCacheLimit(m.RollupCache())
+	}
 	for _, name := range m.Projects() {
 		if m.Exists != nil && !m.Exists(name) {
 			continue
@@ -516,6 +574,27 @@ func (p *Project) tick(ctx context.Context) {
 	}
 	now := p.m.now()
 	log := p.m.log().With("project", p.name)
+
+	// A lost disk (or a new server): the index comes back from the archive before anything
+	// is rolled up on top of an empty one.
+	if cfg.ArchiveOn() {
+		p.mu.Lock()
+		due := !now.Before(p.restoreAt)
+		if due {
+			p.restoreAt = now.Add(time.Hour)
+		}
+		p.mu.Unlock()
+		if due && p.state.Empty() {
+			if _, _, err := p.S3(); err == nil {
+				restored, err := p.Restore(ctx, func(msg string) { log.Info("analytics: restore", "step", msg) })
+				if err != nil {
+					log.Error("analytics: restore", "err", err)
+				} else if restored {
+					log.Info("analytics: index restored from the archive")
+				}
+			}
+		}
+	}
 
 	p.mu.Lock()
 	full := now.Sub(p.lastFull) >= time.Hour

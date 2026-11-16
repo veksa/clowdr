@@ -194,6 +194,17 @@ func (d *DayRollup) Parts(includeTest bool) []*Part {
 	return []*Part{&d.Part}
 }
 
+// eventCount is the number of events the rollup counts, test persons included.
+func (d *DayRollup) eventCount() int {
+	n := 0
+	for _, p := range d.Parts(true) {
+		for _, e := range p.Events {
+			n += e.N
+		}
+	}
+	return n
+}
+
 // resolved is a record with its actor.
 type resolved struct {
 	r        *Record
