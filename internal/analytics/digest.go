@@ -365,7 +365,9 @@ func (p *Project) AccessDay(from time.Time) AccessSummary {
 		if json.Unmarshal([]byte(l.L), &e) != nil {
 			return
 		}
-		if e.Method != "GET" || e.Status < 200 || e.Status >= 400 || botUA.MatchString(e.UA) || e.UA == "" {
+		// A redirect is not a view: the page it leads to is logged on its own (a trailing slash, an
+		// alias domain). 304 is: the browser revalidated a page it shows.
+		if e.Method != "GET" || (e.Status < 200 || e.Status >= 300) && e.Status != 304 || botUA.MatchString(e.UA) || e.UA == "" {
 			return
 		}
 		pth, _, _ := strings.Cut(e.URI, "?")

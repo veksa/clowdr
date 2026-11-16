@@ -747,11 +747,13 @@ func TestAccessDigest(t *testing.T) {
 	add("1.1.1.1", "/_next/static/app.js", "", chrome, 200) // static
 	add("1.1.1.1", "/logo.png", "", chrome, 200)            // static
 	add("1.1.1.1", "/missing", "", chrome, 404)             // not a page view
+	add("2.2.2.2", "/posts/go/", "", chrome, 301)           // a redirect: its target is logged on its own
+	add("1.1.1.1", "/", "", chrome, 304)                    // a revalidated page is a view
 	text, err := e.project().Digest("2026-11-10")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"Просмотры: <code>3</code> · посетители ≈<code>2</code>", "Страницы: <code>/posts/go 2 · / 1</code>", "Откуда: <code>google.com 1 · news.ycombinator.com 1</code>"} {
+	for _, want := range []string{"Просмотры: <code>4</code> · посетители ≈<code>2</code>", "Страницы: <code>/ 2 · /posts/go 2</code>", "Откуда: <code>google.com 1 · news.ycombinator.com 1</code>"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in\n%s", want, text)
 		}
