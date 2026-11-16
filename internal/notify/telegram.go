@@ -56,11 +56,14 @@ func (t *Telegram) post(ctx context.Context, text string) error {
 	if t.ParseMode != "" {
 		form.Set("parse_mode", t.ParseMode)
 	}
-	req, err := http.NewRequestWithContext(ctx, "POST", api+"/bot"+t.Token+"/sendMessage", nil)
+	// The text goes in the body: a digest in Cyrillic is kilobytes once URL-encoded, more than a
+	// request line should carry.
+	req, err := http.NewRequestWithContext(ctx, "POST", api+"/bot"+t.Token+"/sendMessage", strings.NewReader(form.Encode()))
 	if err != nil {
-		return err
+		// A parse error quotes the URL, and the URL carries the bot token.
+		return fmt.Errorf("telegram: bad API URL or token")
 	}
-	req.URL.RawQuery = form.Encode()
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	resp, err := t.hc.Do(req)
 	if err != nil {
 		// The URL carries the bot token: keep it out of the error.

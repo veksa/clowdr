@@ -14,10 +14,10 @@ import (
 func TestTelegram(t *testing.T) {
 	got := make(chan string, 10)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/botT0KEN/sendMessage" || r.URL.Query().Get("chat_id") != "42" {
+		if r.URL.Path != "/botT0KEN/sendMessage" || r.FormValue("chat_id") != "42" {
 			w.WriteHeader(400)
 		}
-		got <- r.URL.Query().Get("text")
+		got <- r.FormValue("text")
 	}))
 	defer srv.Close()
 	tg := &Telegram{Token: "T0KEN", ChatID: "42", API: srv.URL, Log: slog.New(slog.NewTextHandler(io.Discard, nil))}
@@ -63,7 +63,10 @@ func TestTelegramDeliverHTML(t *testing.T) {
 	var mode, text string
 	status := 200
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mode, text = r.URL.Query().Get("parse_mode"), r.URL.Query().Get("text")
+		if r.URL.RawQuery != "" {
+			t.Errorf("the message travels in the URL: %q", r.URL.RawQuery)
+		}
+		mode, text = r.FormValue("parse_mode"), r.FormValue("text")
 		w.WriteHeader(status)
 		w.Write([]byte(`{"ok":false,"description":"chat not found"}`))
 	}))
@@ -85,5 +88,10 @@ func TestTelegramDeliverHTML(t *testing.T) {
 	tg.API = "http://127.0.0.1:1"
 	if err := tg.Deliver(context.Background(), "x"); err == nil || strings.Contains(err.Error(), "T0KEN") {
 		t.Fatalf("network error leaks the token or is missing: %v", err)
+	}
+	// A token that does not make a URL must not come back in the parse error either.
+	tg.Token = "T0KEN\x7f"
+	if err := tg.Deliver(context.Background(), "x"); err == nil || strings.Contains(err.Error(), "T0KEN") {
+		t.Fatalf("a bad token leaks or passes: %v", err)
 	}
 }
