@@ -33,6 +33,8 @@ decides installs and reinstalls, computes daily rollups, archives everything to 
 S3 bucket and sends a daily digest to Telegram. Test persons are left out unless --include-test.`,
 		Example: `  clowctl analytics trends episode_viewed --since 14d
   clowctl analytics trends any --math dau --by pf
+  clowctl analytics trends any --math dau --app site
+  clowctl analytics retention --period day --platform ios
   clowctl analytics funnel '$first_open' user_signed_up episode_viewed --window 7d
   clowctl analytics retention --period week --by first_source
   clowctl analytics installs --since 30d
@@ -56,6 +58,8 @@ type anFlags struct {
 	breakdown    []string
 	where        []string
 	includeTest  bool
+	app          string
+	platform     string
 }
 
 func (f *anFlags) add(cmd *cobra.Command, since string, breakdown bool) {
@@ -64,6 +68,8 @@ func (f *anFlags) add(cmd *cobra.Command, since string, breakdown bool) {
 	fl.StringVar(&f.until, "until", "", "e.g. 1d or 2026-11-10")
 	fl.StringArrayVar(&f.where, "where", nil, "filter on a dimension, p.<prop>, person.<prop> or first_*: k=v, k!=v, k>n, k>=n, k<n, k<=n; k=a|b (or k=a,b) is one of, k!=a|b none of; repeatable, all must hold, the same key with = twice is one of")
 	fl.BoolVar(&f.includeTest, "include-test", false, "count test persons too")
+	fl.StringVar(&f.app, "app", "", "product | site | internal (analytics.apps; people-counting queries default to product when it is set) | all | one app (mobile, landing, …)")
+	fl.StringVar(&f.platform, "platform", "", "one platform (pf): ios, android, web, tvos, …")
 	if breakdown {
 		fl.StringArrayVarP(&f.breakdown, "by", "b", nil, "split by a dimension, p.<prop>, person.<prop> or first_* (also --breakdown); twice for two keys")
 	}
@@ -82,7 +88,7 @@ func anFlagAliases(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 }
 
 func (f *anFlags) spec(kind string) (analytics.Spec, error) {
-	s := analytics.Spec{Kind: kind, Since: f.since, Until: f.until, IncludeTest: f.includeTest}
+	s := analytics.Spec{Kind: kind, Since: f.since, Until: f.until, IncludeTest: f.includeTest, App: f.app, Platform: f.platform}
 	if len(f.breakdown) > 2 {
 		return s, fmt.Errorf("--by: at most two keys")
 	}
@@ -669,6 +675,9 @@ func (a *app) printAnalytics(res *analytics.Result) error {
 		fmt.Fprintln(a.out, "(nothing)")
 	}
 	var notes []string
+	if res.Covers != "" {
+		notes = append(notes, "counts "+res.Covers)
+	}
 	if res.ExcludedTest > 0 {
 		notes = append(notes, fmt.Sprintf("%d test persons left out (--include-test)", res.ExcludedTest))
 	}

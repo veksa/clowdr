@@ -237,7 +237,7 @@ func TestComputeDayFixture(t *testing.T) {
 	}
 	Index(st, recs)
 	now := time.Date(2026, 11, 13, 0, 0, 0, 0, time.UTC)
-	d, err := ComputeDay(st, "2026-11-10", recs, map[string]any{"test": true}, now)
+	d, err := ComputeDay(st, "2026-11-10", recs, map[string]any{"test": true}, nil, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +267,7 @@ func TestComputeDayFixture(t *testing.T) {
 		t.Fatalf("active by %+v", d.ActiveBy)
 	}
 	// The subscription of the 12th has a group.
-	d12, _ := ComputeDay(st, "2026-11-12", recs, map[string]any{"test": true}, now)
+	d12, _ := ComputeDay(st, "2026-11-12", recs, map[string]any{"test": true}, nil, now)
 	if d12.Groups["library"].Card() != 1 {
 		t.Fatalf("groups %+v", d12.Groups)
 	}
@@ -281,7 +281,7 @@ func TestComputeDayFixture(t *testing.T) {
 	if ch, err := SaveRollup(dir, d); err != nil || !ch {
 		t.Fatal(ch, err)
 	}
-	again, _ := ComputeDay(st, "2026-11-10", recs, map[string]any{"test": true}, now.Add(time.Hour))
+	again, _ := ComputeDay(st, "2026-11-10", recs, map[string]any{"test": true}, nil, now.Add(time.Hour))
 	if ch, _ := SaveRollup(dir, again); ch {
 		t.Fatal("the same content counted as a change")
 	}
@@ -309,7 +309,7 @@ func TestDimensionCap(t *testing.T) {
 			recs = append(recs, mustParse(t, fmt.Sprintf(`{"$":"analytics","v":1,"id":"%d-%d","ts":"2026-11-10T09:00:00Z","e":"search_performed","d":"d%d","dm":{"query_kind":"k%03d"}}`, i, j, i, i)))
 		}
 	}
-	d, err := ComputeDay(st, "2026-11-10", recs, nil, time.Now())
+	d, err := ComputeDay(st, "2026-11-10", recs, nil, nil, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}

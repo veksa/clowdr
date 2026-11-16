@@ -143,6 +143,11 @@ func (r *Record) Dim(k string) string {
 		return r.Env
 	case "event":
 		return r.E
+	case PFAV:
+		if r.PF == "" || r.AV == "" {
+			return ""
+		}
+		return r.PF + " " + r.AV
 	}
 	return str(r.DM[k])
 }
@@ -154,7 +159,8 @@ func (r *Record) Prop(k string) (any, bool) {
 }
 
 // BuiltinDims are the dimensions every rollup keeps for every event.
-var BuiltinDims = []string{"app", "pf", "ff", "av", "cc"}
+// pf_av is the platform and the version together.
+var BuiltinDims = []string{"app", "pf", "ff", "av", "cc", PFAV}
 
 // str renders a JSON scalar the way dimensions and filters compare it.
 func str(v any) string {

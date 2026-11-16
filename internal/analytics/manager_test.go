@@ -592,7 +592,7 @@ func TestDigest(t *testing.T) {
 		"Активные: <code>DAU 5</code>",
 		"<code>WAU 5</code>",
 		"Новые: установки <code>2</code> · переуст. <code>1</code> · первый визит веб <code>1</code> · регистрации <code>1</code>",
-		"Установки: <code>ios 2 · android 1</code> | <code>ASA 1 · appstore 1 · organic 1</code> | <code>DE 1 · RU 1 · US 1</code>",
+		"Установки: <code>iOS 2 · Android 1</code> | <code>ASA 1 · appstore 1 · organic 1</code> | <code>DE 1 · RU 1 · US 1</code>",
 		"Деньги: покупки <code>1</code>",
 		"Ключевые: episode_viewed <code>2</code> (1 чел.) · user_signed_up <code>1</code> (1 чел.)",
 		"Сессии: <code>4</code>, медиана <code>10 мин</code>",
@@ -647,7 +647,7 @@ func TestDigestShares(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"DAU 30</code> (ср. 7 дн. 40, -25%)", "D1 когорты 10.11: <code>75%</code> (из 40)", "без падений <code>96.7%</code> польз.", "Версии: <code>2.3.1"} {
+	for _, want := range []string{"DAU 30</code> · <code>WAU 40</code> · <code>MAU 40</code> · ср. 7 дн. 40 (-25%)", "D1 когорты 10.11: <code>75%</code> (из 40)", "без падений <code>96.7%</code> польз.", "Версии: <code>Android 2.3.1 70% · 2.3.0 20% · старше 10%</code>"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in\n%s", want, text)
 		}

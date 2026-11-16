@@ -417,6 +417,7 @@ func (p *Project) Recompute(days []string) ([]string, error) {
 	if c := p.Config(); c != nil {
 		exclude = c.ExcludeRule()
 	}
+	cats := newCategories(p.Config())
 	var changed []string
 	now := p.m.now()
 	windowStart := p.streamFrom()
@@ -431,7 +432,7 @@ func (p *Project) Recompute(days []string) ([]string, error) {
 				continue // nothing then, nothing now
 			}
 		}
-		roll, err := ComputeDay(p.state, d, recs, exclude, now)
+		roll, err := ComputeDay(p.state, d, recs, exclude, cats, now)
 		if err != nil {
 			return changed, err
 		}

@@ -23,6 +23,10 @@ On top of the raw stream clowdr keeps, per project:
 Test persons (person property `test: true`, configurable) are left out of every number unless a
 query asks for them with `--include-test`.
 
+With `analytics.apps` set, the people of the **product** are counted apart from the visitors of
+its **site** and the staff in its **internal** tools (see "Apps: product, site, internal"): the
+digest and every query that counts people answer for the product unless asked otherwise.
+
 ## Records
 
 One JSON object per line, written by the product's server (the clients send their events to the
@@ -115,7 +119,65 @@ analytics:
     off: false
   installs: digest               # digest (default): only in the digest | hourly: a summary per hour | each: a message per install (≤ 20 an hour, the rest in the hourly summary)
   exclude: { test: true }        # person properties that leave a person out; default {test: true}
+  apps:                          # which app is the product, the site, an internal tool
+    product: [mobile, tv, dashboard]
+    site: [landing]
+    internal: [admin]
 ```
+
+### Apps: product, site, internal
+
+A product's records come from several apps (`app`): the app people use, the site that sells it,
+the panel its staff works in. Counted together, a day's actives are the users plus every
+anonymous visitor of the site, and a D1 cohort is mostly visitors who never open the app.
+`analytics.apps` names the apps of each category:
+
+| Category | What it is | Where it counts |
+|---|---|---|
+| `product` | the apps the product's users use | the digest's actives, new users, retention, sessions, versions, money and key events; queries by default |
+| `site` | sites of the product (landing, docs) | the digest's «Сайт» line; queries with `--app site` |
+| `internal` | tools of the team (admin panel) | nowhere unless asked: `--app internal` |
+
+A record of an app no list names (the server's own records, `app: server`) counts toward the
+product when its actor is a person (a user id, or a device signed in): an account acting through
+the server is a user of the product. Without a person it counts toward no category. An app is in
+at most one list, and app names are the values of `app` (`mobile`, `tv`, `watch`, `wear`, `xr`,
+`dashboard`, `admin`, `landing`, `web`, `bot`, `mcp`, `server`, `desktop`).
+
+The categories are computed into the rollups: each day keeps, besides the counts of all apps,
+the same counts per category (actives, new actors, events with their dimensions, sessions,
+installs). A new actor of a category is an actor first seen on that day and seen in that
+category on it. Every rollup also keeps `pf_av`, the platform and the app version together, so
+versions are read per platform.
+
+A rollup remembers the categorisation it was computed with. **After upgrading clowdrd, and after
+changing `analytics.apps`, rebuild the history once:**
+
+```sh
+clowctl analytics rebuild --since <the first day of the project> -e prod   # admin token
+```
+
+Until then a query by category recomputes the days of the hot window on the spot and notes the
+older days it could not (`count no categories: clowctl analytics rebuild --since …`); the digest
+warns about them too. Without `analytics.apps` everything counts together as before, and the
+digest suggests setting it when a day mixes apps.
+
+The digest with `analytics.apps` set (from the tests):
+
+```text
+ℹ️ Аналитика shop за 11.11 (UTC)
+Активные: DAU 27 (iOS 20 · Android 5 · web 1) · WAU 37 · MAU 37 · ср. 7 дн. 37 (-27%)
+Удержание D1 когорты 10.11: 73% (из 37; iOS 80% · Android 5/10 · web 1/1)
+Сессии: 28
+Версии: iOS 2.3.1 80% · 2.3.0 20%
+Сайт: посетители 11 (новые 0) · из них в продукте за 30 дн. 1
+```
+
+Everything above «Сайт» is the product. Platform splits leave out the server's own records (they
+name no device), so they can add up to less than the total; a share over fewer than 20 is printed
+as `n/base`, and a platform's versions only from 20 actives. «Из них в продукте» is the visitors
+of the day who were active in the product within 30 days: it sees only visitors who are the same
+actor in both (a device signed in on the site, or one device id across them).
 
 Secrets never go into deploy.yml; clowdrd keeps them per project:
 
@@ -164,6 +226,8 @@ clowctl analytics trends purchase_completed --math sum --prop price_micros --whe
 clowctl analytics funnel '$first_open' user_signed_up episode_viewed --window 7d
 clowctl analytics funnel '$first_open' 'episode_viewed:episode_number=2' --by first_source
 clowctl analytics retention --period week --by first_source
+clowctl analytics retention --period day --platform ios           # the product's iOS users
+clowctl analytics trends any --math dau --app site                # the site's visitors
 clowctl analytics stickiness
 clowctl analytics lifecycle --interval week
 clowctl analytics paths --from main --depth 4 --limit 50
@@ -177,9 +241,18 @@ clowctl analytics status                                         # records, wind
 clowctl analytics digest --dry-run                               # yesterday's digest, not sent
 ```
 
-Every query takes `--since`, `--until`, `--include-test` and `-o json`. Keys are dimensions (`pf`,
-`cc`, `dm` keys), `p.<prop>`, `person.<prop>` or `first_source` / `first_campaign` / `first_pf` /
-`first_app` / `first_cc`.
+Every query takes `--since`, `--until`, `--include-test`, `--app`, `--platform` and `-o json`. Keys
+are dimensions (`app`, `pf`, `ff`, `av`, `cc`, `pf_av`, `dm` keys), `p.<prop>`, `person.<prop>` or
+`first_source` / `first_campaign` / `first_pf` / `first_app` / `first_cc`.
+
+- `--app product|site|internal` counts one category of `analytics.apps`; `--app all` every app;
+  `--app <app>` one app. With `analytics.apps` set, trends, funnel, paths, retention, stickiness,
+  lifecycle and installs default to `product`; events and person read every app. Every answer
+  says what it counted (`note: counts product (dashboard, mobile, …)`, `covers` in JSON).
+- `--platform ios|android|web|…` counts one platform (`pf`). On trends, funnel, paths and events
+  `--platform` and an app name are filters (`--where pf=ios`); retention, stickiness, lifecycle
+  and installs read the rollups' actors of that platform each day (installs then break down by
+  `pf` only), together with a category but not with one app.
 
 - `--by k` splits trends, funnels and retention (retention by `first_*` only); `--by` twice splits by
   two keys, written `a / b`. `installs --by` takes one install dimension.
@@ -249,7 +322,7 @@ clowctl analytics import --include-live-days tail.ndjson.zst -e prod
 
 | Route | |
 |---|---|
-| `POST /v1/projects/{project}/analytics/query` | a query (`kind`: trends, funnel, retention, stickiness, lifecycle, paths, person, events, catalog, installs) |
+| `POST /v1/projects/{project}/analytics/query` | a query (`kind`: trends, funnel, retention, stickiness, lifecycle, paths, person, events, catalog, installs; `app`, `platform`); the answer's `covers` says what it counted |
 | `GET …/analytics/status` | what `clowctl analytics status` prints |
 | `GET …/analytics/archive?since=&until=` | presigned URLs of the archived raw days |
 | `POST …/analytics/digest?day=&dry_run=1` | the digest text; sent unless `dry_run` |

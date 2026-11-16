@@ -82,36 +82,109 @@ func share(n, base int) string {
 	return fmt.Sprintf("%.0f%%", 100*float64(n)/float64(base))
 }
 
+// digestView is what the digest counts: the product's part of each day when analytics.apps is
+// set, every app's otherwise.
+type digestView struct {
+	p   *Project
+	cat string
+	q   *qctx
+}
+
+func (v *digestView) part(dr *DayRollup) *Part {
+	if dr == nil {
+		return nil
+	}
+	if v.cat == "" {
+		return &dr.Part
+	}
+	if c := dr.Cat(v.cat); c != nil {
+		return &c.Part
+	}
+	return newPart()
+}
+
+func (v *digestView) day(day string) *Part { return v.part(v.p.day(day)) }
+
+// pfLabels name the platforms in the digest.
+var pfLabels = map[string]string{"ios": "iOS", "android": "Android", "ipados": "iPadOS", "tvos": "tvOS",
+	"watchos": "watchOS", "visionos": "visionOS", "macos": "macOS", "windows": "Windows", "linux": "Linux",
+	"wearos": "Wear OS", "androidtv": "Android TV"}
+
+func pfLabel(pf string) string {
+	if l, ok := pfLabels[pf]; ok {
+		return l
+	}
+	return pf
+}
+
+// platforms are the platforms of a cell map by their actors, largest first, without the server's
+// own records (they say nothing of a device).
+func platforms(m map[string]*Cell) []string {
+	vals := map[string]int{}
+	for pf, c := range m {
+		if pf == "" || pf == "server" || pf == OtherValue {
+			continue
+		}
+		if n := c.U.Card(); n > 0 {
+			vals[pf] = n
+		}
+	}
+	return topKeys(vals, len(vals))
+}
+
+// shareOrCount is n of base as a share, or "n/base" when the base is too small for one.
+func shareOrCount(n, base int) string {
+	if s := share(n, base); s != "" {
+		return s
+	}
+	return fmt.Sprintf("%d/%d", n, base)
+}
+
 func (p *Project) eventLines(day string, l map[string]string) []string {
-	r := p.day(day)
-	if r == nil {
+	rd := p.day(day)
+	if rd == nil {
 		return nil
 	}
 	d := dayTime(day)
-	q := &qctx{p: p, now: d.Add(48 * time.Hour)}
+	v := &digestView{p: p}
+	cats := newCategories(p.Config())
+	q := &qctx{p: p, now: d.Add(48 * time.Hour), cats: cats}
+	if cats != nil {
+		v.cat, q.cat = config.CategoryProduct, config.CategoryProduct
+		p.staleCats(days(d.AddDate(0, 0, -30), d))
+		rd = p.day(day)
+	}
+	v.q = q
+	r := v.part(rd)
 	var out []string
 
 	dau := r.Active.Card()
 	if dau > 0 {
 		avg, n := 0, 0
 		for i := 1; i <= 7; i++ {
-			if pr := p.day(d.AddDate(0, 0, -i).Format(DayLayout)); pr != nil {
+			if pr := v.day(d.AddDate(0, 0, -i).Format(DayLayout)); pr != nil {
 				avg += pr.Active.Card()
 				n++
 			}
 		}
 		line := fmt.Sprintf("%s: %s", l["active"], code("DAU "+thousands(dau)))
-		if n > 0 {
-			mean := float64(avg) / float64(n)
-			delta := ""
-			if mean >= minShareBase {
-				delta = fmt.Sprintf(", %+.0f%%", 100*(float64(dau)-mean)/mean)
+		if pfs := platforms(r.ActiveBy["pf"]); len(pfs) > 1 {
+			var parts []string
+			for _, pf := range pfs {
+				parts = append(parts, pfLabel(pf)+" "+thousands(r.ActiveBy["pf"][pf].U.Card()))
 			}
-			line += fmt.Sprintf(" (%s %s%s)", l["avg7"], thousands(int(mean+0.5)), delta)
+			line += " (" + html.EscapeString(strings.Join(parts, " · ")) + ")"
 		}
 		wau := q.periodSet("any", d.AddDate(0, 0, -6), d).Card()
 		mau := q.periodSet("any", d.AddDate(0, 0, -29), d).Card()
 		line += fmt.Sprintf(" · %s · %s", code("WAU "+thousands(wau)), code("MAU "+thousands(mau)))
+		if n > 0 {
+			mean := float64(avg) / float64(n)
+			line += fmt.Sprintf(" · %s %s", l["avg7"], thousands(int(mean+0.5)))
+			if mean >= minShareBase {
+				line += fmt.Sprintf(" (%+.0f%%)", 100*(float64(dau)-mean)/mean)
+			}
+		}
 		out = append(out, line)
 	}
 
@@ -138,7 +211,7 @@ func (p *Project) eventLines(day string, l map[string]string) []string {
 		for _, k := range []string{KindInstall, KindReinstall} {
 			agg := in.Get(k)
 			for v, c := range agg.By["pf"] {
-				pf.addN(v, c.N)
+				pf.addN(pfLabel(v), c.N)
 			}
 			for v, c := range agg.By["source"] {
 				src.addN(shortSource(v), c.N)
@@ -161,17 +234,27 @@ func (p *Project) eventLines(day string, l map[string]string) []string {
 	var ret []string
 	for _, off := range []int{1, 7} {
 		cd := d.AddDate(0, 0, -off)
-		cr := p.day(cd.Format(DayLayout))
+		cr := v.day(cd.Format(DayLayout))
 		if cr == nil || cr.First.Card() == 0 {
 			continue
 		}
 		base := cr.First.Card()
 		back := and(cr.First, r.Active).Card()
-		val := share(back, base)
-		if val == "" {
-			val = fmt.Sprintf("%d", back)
+		item := fmt.Sprintf("D%d %s %s: %s (%s %d", off, l["cohort"], cd.Format("02.01"), code(shareOrCount(back, base)), l["of"], base)
+		if pfs := platforms(cr.ActiveBy["pf"]); len(pfs) > 1 {
+			var parts []string
+			for _, pf := range pfs {
+				g := and(cr.First, cr.ActiveBy["pf"][pf].U)
+				if g.Card() == 0 {
+					continue
+				}
+				parts = append(parts, pfLabel(pf)+" "+shareOrCount(and(g, r.Active).Card(), g.Card()))
+			}
+			if len(parts) > 0 {
+				item += "; " + html.EscapeString(strings.Join(parts, " · "))
+			}
 		}
-		ret = append(ret, fmt.Sprintf("D%d %s %s: %s (%s %d)", off, l["cohort"], cd.Format("02.01"), code(val), l["of"], base))
+		ret = append(ret, item+")")
 	}
 	if len(ret) > 0 {
 		out = append(out, l["retention"]+" "+strings.Join(ret, " · "))
@@ -224,26 +307,91 @@ func (p *Project) eventLines(day string, l map[string]string) []string {
 		out = append(out, line)
 	}
 
-	if av := r.ActiveBy["av"]; len(av) > 0 && dau >= minShareBase {
-		vals := map[string]int{}
-		total := 0
-		for v, c := range av {
-			vals[v] = c.U.Card()
-			total += c.U.Card()
+	if line := versionsLine(r, l); line != "" {
+		out = append(out, line)
+	}
+
+	if cats != nil {
+		if line := siteLine(v, rd, d, l); line != "" {
+			out = append(out, line)
 		}
-		top := topKeys(vals, 2)
+	} else if apps := platforms(rd.ActiveBy["app"]); len(apps) > 1 {
+		out = append(out, "💡 "+fmt.Sprintf(l["no_apps"], html.EscapeString(strings.Join(apps, ", "))))
+	}
+	return out
+}
+
+// versionsLine is the versions of the day's actors per platform (iOS and Android ship
+// different ones): the two largest and the rest as older. Rollups from before pf_av have the
+// versions of all platforms together.
+func versionsLine(r *Part, l map[string]string) string {
+	byPF := map[string]map[string]int{}
+	for pv, c := range r.ActiveBy[PFAV] {
+		pf, av, ok := strings.Cut(pv, " ")
+		if !ok || pf == "server" {
+			continue
+		}
+		if byPF[pf] == nil {
+			byPF[pf] = map[string]int{}
+		}
+		byPF[pf][av] = c.U.Card()
+	}
+	if len(byPF) == 0 {
+		if av := r.ActiveBy["av"]; len(av) > 0 {
+			byPF[""] = map[string]int{}
+			for v, c := range av {
+				byPF[""][v] = c.U.Card()
+			}
+		}
+	}
+	tot := map[string]int{}
+	for pf, vals := range byPF {
+		for _, n := range vals {
+			tot[pf] += n
+		}
+	}
+	var groups []string
+	for _, pf := range topKeys(tot, len(tot)) {
+		vals, total := byPF[pf], tot[pf]
+		if total < minShareBase {
+			continue // too few for shares
+		}
 		var parts []string
 		rest := total
-		for _, v := range top {
-			parts = append(parts, fmt.Sprintf("%s %s", html.EscapeString(v), share(vals[v], total)))
+		for _, v := range topKeys(vals, 2) {
+			parts = append(parts, fmt.Sprintf("%s %s", v, share(vals[v], total)))
 			rest -= vals[v]
 		}
 		if rest > 0 {
 			parts = append(parts, fmt.Sprintf("%s %s", l["older"], share(rest, total)))
 		}
-		out = append(out, l["versions"]+": "+code(strings.Join(parts, " · ")))
+		g := strings.Join(parts, " · ")
+		if pf != "" {
+			g = pfLabel(pf) + " " + g
+		}
+		groups = append(groups, html.EscapeString(g))
 	}
-	return out
+	if len(groups) == 0 {
+		return ""
+	}
+	return l["versions"] + ": " + code(strings.Join(groups, " | "))
+}
+
+// siteLine is the site's visitors of the day, how many were new, and how many of them were
+// active in the product within 30 days (counted only when a visitor and a product user are the
+// same actor: a device signed in on both, or one device id across them).
+func siteLine(v *digestView, rd *DayRollup, d time.Time, l map[string]string) string {
+	site := rd.Cat(config.CategorySite)
+	if site == nil || site.Active.Card() == 0 {
+		return ""
+	}
+	line := fmt.Sprintf("%s: %s %s (%s %s)", l["site"], l["visitors"], code(thousands(site.Active.Card())), l["new_l"], thousands(site.First.Card()))
+	if a := site.Installs.Get(KindFirstVisit).N; a > 0 && a != site.First.Card() {
+		line += fmt.Sprintf(" · %s %s", l["first_visit"], thousands(a))
+	}
+	inProduct := and(site.Active, v.q.periodSet("any", d.AddDate(0, 0, -29), d)).Card()
+	line += fmt.Sprintf(" · %s %s", l["site_in_product"], code(thousands(inProduct)))
+	return line
 }
 
 // warnings is the ⚠️ line: archive days not uploaded for two days, and what the server dropped.
@@ -269,6 +417,18 @@ func (p *Project) warnings(day string, l map[string]string) string {
 			parts = append(parts, fmt.Sprintf(l["archive_missing"], missing[0]))
 		default:
 			parts = append(parts, fmt.Sprintf(l["archive_missing_n"], len(missing), missing[0]))
+		}
+	}
+	if cats := newCategories(p.Config()); cats != nil {
+		d := dayTime(day)
+		var stale []string
+		for _, sd := range days(d.AddDate(0, 0, -30), d) {
+			if r := p.day(sd); r != nil && r.CatsKey != cats.Key() {
+				stale = append(stale, sd)
+			}
+		}
+		if len(stale) > 0 {
+			parts = append(parts, fmt.Sprintf(l["stale_cats"], len(stale), stale[0]))
 		}
 	}
 	if dropped := p.Dropped(dayTime(day), dayTime(day).AddDate(0, 0, 1)); len(dropped) > 0 {

@@ -20,12 +20,14 @@ analytics:
   digest: { hour: 6, lang: en, name: Shop, key_events: [episode_viewed], access: true }
   installs: each
   exclude: { test: true, role: staff }
+  apps: { product: [mobile, dashboard], site: [landing], internal: [admin] }
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
 	a := d.Analytics
-	if !a.ArchiveOn() || a.DigestHour() != 6 || a.InstallsMode() != InstallsEach || a.ExcludeRule()["role"] != "staff" || !a.Digest.Access {
+	if !a.ArchiveOn() || a.DigestHour() != 6 || a.InstallsMode() != InstallsEach || a.ExcludeRule()["role"] != "staff" || !a.Digest.Access ||
+		len(a.Apps.List(CategoryProduct)) != 2 || a.Apps.List(CategorySite)[0] != "landing" || a.Apps.List(CategoryInternal)[0] != "admin" {
 		t.Fatalf("%+v", a)
 	}
 	d, err = ParseDeploy([]byte(analyticsBase + "analytics:\n  archive: off\n"))
@@ -47,6 +49,9 @@ analytics:
 		"digest: { key_events: [Bad] }":                           "not an event name",
 		"installs: often":                                         "not digest, hourly or each",
 		"exclude: { test: [1] }":                                  "a string, number or boolean",
+		"apps: { product: [mobile], site: [mobile] }":             "in both product and site",
+		"apps: { product: [Mobile] }":                             "not an app name",
+		"apps: { other: [x] }":                                    "other",
 		"unknown: 1":                                              "unknown",
 	} {
 		if _, err := ParseDeploy([]byte(analyticsBase + "analytics:\n  " + body + "\n")); err == nil || !strings.Contains(err.Error(), want) {

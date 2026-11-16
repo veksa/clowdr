@@ -119,7 +119,7 @@ func Check(readers []io.Reader, names []string) (*CheckReport, error) {
 	evActors := map[string]*Bitmap{}
 	exclude := map[string]any{"test": true}
 	for _, d := range rep.Days {
-		roll, err := ComputeDay(st, d, byDay[d], exclude, time.Now())
+		roll, err := ComputeDay(st, d, byDay[d], exclude, nil, time.Now())
 		if err != nil {
 			return nil, err
 		}

@@ -21,7 +21,46 @@ type AnalyticsConf struct {
 	// Exclude drops persons whose properties match every pair from every query, unless the query
 	// asks to include them. Default: {test: true}.
 	Exclude map[string]any `yaml:"exclude" json:"exclude,omitempty"`
+	// Apps sorts the values of the records' `app` into the product, the site and internal tools,
+	// so that actives, retention and the digest count the people of the product only.
+	Apps *AppsConf `yaml:"apps" json:"apps,omitempty"`
 }
+
+// Categories of apps.
+const (
+	CategoryProduct  = "product"
+	CategorySite     = "site"
+	CategoryInternal = "internal"
+)
+
+// Categories lists the categories in the order they are shown.
+var Categories = []string{CategoryProduct, CategorySite, CategoryInternal}
+
+// AppsConf lists the apps of each category. An app in no list (the server's own records, app
+// `server`) counts toward the product when its record has a person, and toward nothing otherwise.
+type AppsConf struct {
+	Product  []string `yaml:"product" json:"product,omitempty"`
+	Site     []string `yaml:"site" json:"site,omitempty"`
+	Internal []string `yaml:"internal" json:"internal,omitempty"`
+}
+
+// List returns the apps of a category.
+func (a *AppsConf) List(category string) []string {
+	if a == nil {
+		return nil
+	}
+	switch category {
+	case CategoryProduct:
+		return a.Product
+	case CategorySite:
+		return a.Site
+	case CategoryInternal:
+		return a.Internal
+	}
+	return nil
+}
+
+var appNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{0,31}$`)
 
 // ArchiveConf names the S3-compatible bucket of the daily archive. `archive: off` disables it.
 type ArchiveConf struct {
@@ -147,6 +186,20 @@ func (c *AnalyticsConf) Validate() error {
 	case "", InstallsDigest, InstallsHourly, InstallsEach:
 	default:
 		return fmt.Errorf("analytics.installs: %q is not digest, hourly or each", c.Installs)
+	}
+	if c.Apps != nil {
+		seen := map[string]string{}
+		for _, cat := range Categories {
+			for _, app := range c.Apps.List(cat) {
+				if !appNameRe.MatchString(app) {
+					return fmt.Errorf("analytics.apps.%s: %q is not an app name", cat, app)
+				}
+				if prev, ok := seen[app]; ok {
+					return fmt.Errorf("analytics.apps: %q is in both %s and %s", app, prev, cat)
+				}
+				seen[app] = cat
+			}
+		}
 	}
 	for k, v := range c.Exclude {
 		switch v.(type) {

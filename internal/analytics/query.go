@@ -38,6 +38,13 @@ type Spec struct {
 
 	IncludeTest bool `json:"include_test,omitempty"`
 
+	// App is a category of analytics.apps (product, site, internal), one app, or "all". With
+	// analytics.apps set, the kinds that count people (trends, funnel, paths, retention,
+	// stickiness, lifecycle, installs) default to product.
+	App string `json:"app,omitempty"`
+	// Platform is one value of pf (ios, android, web, …).
+	Platform string `json:"platform,omitempty"`
+
 	Window string `json:"window,omitempty"` // funnel: conversion window, e.g. 7d
 	Order  string `json:"order,omitempty"`  // funnel: ordered (default) | strict | any
 
@@ -120,8 +127,11 @@ type PersonResult struct {
 // Result is the answer to a query. Source says what it was computed from: rollup (daily
 // rollups), raw (the hot window of raw records) or mixed.
 type Result struct {
-	Kind         string   `json:"kind"`
-	Source       string   `json:"source"`
+	Kind   string `json:"kind"`
+	Source string `json:"source"`
+	// Covers says which records the numbers count: a category and its apps, one app, all apps,
+	// and the platform.
+	Covers       string   `json:"covers,omitempty"`
 	Window       Window   `json:"window"`
 	ExcludedTest int      `json:"excluded_test"`
 	Partial      bool     `json:"partial,omitempty"`
@@ -190,6 +200,12 @@ type qctx struct {
 	since, until time.Time
 	exclude      map[string]bool // excluded user ids
 	excludedSeen map[string]bool
+
+	cats             *Categories
+	cat              string // the category counted, "" for every app
+	projDim, projVal string // rollups projected on one app or platform
+	projected        map[*DayRollup][]*Part
+	covers           string
 }
 
 // Query answers a spec.
@@ -217,16 +233,24 @@ func (p *Project) Query(ctx context.Context, s Spec) (*Result, error) {
 	if !q.since.Before(q.until) {
 		return nil, errors.New("since must be before until")
 	}
-	q.spec = s
 	switch s.Kind {
 	case "retention", "stickiness", "lifecycle", "installs", "catalog", "person":
 		if len(s.Where) > 0 || len(s.Filters) > 0 {
-			return nil, fmt.Errorf("%s does not filter (where): it reads rollups, which keep no properties", s.Kind)
+			return nil, fmt.Errorf("%s does not filter (where): it reads rollups, which keep no properties (--app and --platform do)", s.Kind)
 		}
 	}
+	if err := q.setSlice(&s); err != nil {
+		return nil, err
+	}
+	q.spec = s
 	q.loadExclude()
 	p.ensureRollups(days(q.since, q.until))
-	res := &Result{Kind: s.Kind, Window: Window{Since: q.since.Format(time.RFC3339), Until: q.until.Format(time.RFC3339)}}
+	res := &Result{Kind: s.Kind, Covers: q.covers, Window: Window{Since: q.since.Format(time.RFC3339), Until: q.until.Format(time.RFC3339)}}
+	var stale string
+	if q.cat != "" {
+		// Retention and lifecycle read up to now, wau and mau a month back.
+		stale = staleNote(p.staleCats(days(q.since.AddDate(0, 0, -30), q.now)))
+	}
 	switch s.Kind {
 	case "trends":
 		err = q.trends(ctx, res)
@@ -253,6 +277,12 @@ func (p *Project) Query(ctx context.Context, s Spec) (*Result, error) {
 	}
 	if err != nil {
 		return nil, err
+	}
+	if stale != "" {
+		if res.Note != "" {
+			res.Note += "; "
+		}
+		res.Note += stale
 	}
 	if res.Source == "raw" || res.Source == "mixed" {
 		// The same meaning as from rollups (test persons active in the window); the raw count
@@ -367,21 +397,26 @@ func (c *rollupCache) stats() (n int, used int64) {
 	return c.ll.Len(), c.used
 }
 
-// day returns the rollup of a day (cached by file time), or nil.
+// firstComputable is the first day whose rollup the raw records on disk compute whole. A stream
+// younger than the retention holds everything ever received, so a day up to a late week before
+// it is computed from late events. A window trimmed by age has lost the first hours of its first
+// day and every day before it: a rollup computed from what is left would count a fraction of the
+// day and soon be frozen as final, so only whole days are.
+func (p *Project) firstComputable() string {
+	now := p.m.now()
+	ws := p.WindowStart()
+	if !ws.After(now.Add(-p.m.retention()).Add(time.Hour)) {
+		return ws.Truncate(24*time.Hour).AddDate(0, 0, 1).Format(DayLayout)
+	}
+	return ws.AddDate(0, 0, -lateDays).Format(DayLayout)
+}
+
 // ensureRollups computes the missing rollups of days in the hot window, so a query does not
 // read zeros for a day the schedule has not reached yet (today, right after a start). A day
 // with nothing to roll up is asked again only after 15 minutes.
 func (p *Project) ensureRollups(ds []string) {
 	now := p.m.now()
-	// A stream younger than the retention holds everything ever received, so a day up to a
-	// late week before it is computed from late events. A window trimmed by age has lost the
-	// first hours of its first day and every day before it: a rollup computed from what is left
-	// would count a fraction of the day and soon be frozen as final, so only whole days are.
-	ws := p.WindowStart()
-	first := ws.AddDate(0, 0, -lateDays).Format(DayLayout)
-	if !ws.After(now.Add(-p.m.retention()).Add(time.Hour)) {
-		first = ws.Truncate(24*time.Hour).AddDate(0, 0, 1).Format(DayLayout)
-	}
+	first := p.firstComputable()
 	today := now.Format(DayLayout)
 	var missing []string
 	p.mu.Lock()
@@ -411,6 +446,7 @@ func (p *Project) ensureRollups(ds []string) {
 	}
 }
 
+// day returns the rollup of a day (cached by file time), or nil.
 func (p *Project) day(day string) *DayRollup {
 	path := rollupPath(p.dir, day)
 	fi, err := os.Stat(path)
@@ -454,7 +490,7 @@ func (q *qctx) cell(d *DayRollup, event, dim, val string) (int, *Bitmap) {
 		return 0, nil
 	}
 	n, u := 0, newBitmap()
-	for _, p := range d.Parts(q.spec.IncludeTest) {
+	for _, p := range q.parts(d) {
 		if isAny(event) {
 			if dim == "" {
 				// The count is the events that made an actor active, as raw records count it,
@@ -495,8 +531,8 @@ func (q *qctx) excludedInRollups(ds []string) int {
 	}
 	u := newBitmap()
 	for _, d := range ds {
-		if r := q.p.day(d); r != nil && r.Test != nil {
-			u.Or(r.Test.Active)
+		if t := q.testPart(q.p.day(d)); t != nil {
+			u.Or(t.Active)
 		}
 	}
 	return u.Card()
@@ -793,6 +829,15 @@ func (q *qctx) raw(ctx context.Context, res *Result, since, until time.Time, kee
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].t.Before(out[j].t) })
 	return q.p.state.View(func(t *Tx) error {
+		if q.cat != "" {
+			kept := out[:0]
+			for _, r := range out {
+				if q.inCategory(t, &r) {
+					kept = append(kept, r)
+				}
+			}
+			out = kept
+		}
 		return fn(&rawCtx{q: q, t: t, actors: map[string]Actor{}, people: map[string]Person{}}, out)
 	})
 }
@@ -905,7 +950,7 @@ func (q *qctx) trendsRollup(res *Result, since, until time.Time, fs []filter) ([
 		if s.Breakdown != "" && whereDim == "" {
 			tot := map[string]int{}
 			for _, d := range days(since, until) {
-				for _, p := range partsOf(rolls[d], s.IncludeTest) {
+				for _, p := range q.parts(rolls[d]) {
 					var m map[string]*Cell
 					if isAny(ev) {
 						m = p.ActiveBy[s.Breakdown]
@@ -1034,13 +1079,6 @@ func rollupTotal(m string, ds []string, cellOf func(string) (int, *Bitmap), roll
 		return round2(float64(sum) / float64(len(ds)))
 	}
 	return 0
-}
-
-func partsOf(d *DayRollup, includeTest bool) []*Part {
-	if d == nil {
-		return nil
-	}
-	return d.Parts(includeTest)
 }
 
 func topKeys(m map[string]int, n int) []string {
@@ -1485,7 +1523,7 @@ func (q *qctx) periodSet(event string, from, to time.Time) *Bitmap {
 			continue
 		}
 		if event == "first" {
-			for _, p := range r.Parts(q.spec.IncludeTest) {
+			for _, p := range q.parts(r) {
 				u.Or(p.First)
 			}
 			continue
@@ -1883,6 +1921,13 @@ func (q *qctx) installs(res *Result) error {
 	if by == "" {
 		by = "source"
 	}
+	if q.projDim != "" {
+		// A projection keeps only its own dimension of the installs.
+		if q.spec.Breakdown != "" && q.spec.Breakdown != q.projDim {
+			return fmt.Errorf("installs of one %s break down by %s only", q.projDim, q.projDim)
+		}
+		by = q.projDim
+	}
 	ok := false
 	for _, d := range InstallDims {
 		ok = ok || d == by
@@ -1911,7 +1956,7 @@ func (q *qctx) installs(res *Result) error {
 		if r == nil {
 			continue
 		}
-		for _, p := range r.Parts(q.spec.IncludeTest) {
+		for _, p := range q.parts(r) {
 			if p.Installs == nil {
 				continue
 			}

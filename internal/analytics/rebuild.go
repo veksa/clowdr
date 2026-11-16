@@ -71,6 +71,7 @@ func (p *Project) rebuild(ctx context.Context, since time.Time, progress func(st
 	if cfg := p.Config(); cfg != nil {
 		exclude = cfg.ExcludeRule()
 	}
+	cats := newCategories(p.Config())
 	byDay := map[string][]Record{}
 	done := map[string]bool{}
 	var changed []string
@@ -83,7 +84,7 @@ func (p *Project) rebuild(ctx context.Context, since time.Time, progress func(st
 				return nil
 			}
 		}
-		roll, err := ComputeDay(p.state, day, recs, exclude, p.m.now())
+		roll, err := ComputeDay(p.state, day, recs, exclude, cats, p.m.now())
 		if err != nil {
 			return err
 		}

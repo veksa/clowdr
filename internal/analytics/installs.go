@@ -358,6 +358,9 @@ var labelsRU = map[string]string{
 	"crash_free": "без падений", "users": "польз.", "versions": "Версии", "older": "старше",
 	"archive_missing": "архив за %s не выгружен", "archive_missing_n": "архив не выгружен за %d дн. (с %s)", "dropped": "выброшено сервером",
 	"views": "Просмотры", "visitors": "посетители", "pages": "Страницы", "referrers": "Откуда", "no_data": "событий нет",
+	"site": "Сайт", "new_l": "новые", "site_in_product": "из них в продукте за 30 дн.",
+	"no_apps":    "в днях смешаны приложения (%s): задайте analytics.apps в deploy.yml, чтобы считать продукт отдельно от сайта",
+	"stale_cats": "%d дн. посчитаны без нынешних analytics.apps (с %s): clowctl analytics rebuild",
 }
 
 var labelsEN = map[string]string{
@@ -373,4 +376,7 @@ var labelsEN = map[string]string{
 	"crash_free": "crash-free", "users": "users", "versions": "Versions", "older": "older",
 	"archive_missing": "archive of %s not uploaded", "archive_missing_n": "archive not uploaded for %d days (since %s)", "dropped": "dropped by the server",
 	"views": "Views", "visitors": "visitors", "pages": "Pages", "referrers": "From", "no_data": "no events",
+	"site": "Site", "new_l": "new", "site_in_product": "of them in the product within 30 days",
+	"no_apps":    "apps are mixed (%s): set analytics.apps in deploy.yml to count the product apart from the site",
+	"stale_cats": "%d days rolled up without the current analytics.apps (since %s): clowctl analytics rebuild",
 }

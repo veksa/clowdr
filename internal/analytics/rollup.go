@@ -184,6 +184,54 @@ type DayRollup struct {
 	Test     *Part          `json:"test,omitempty"`
 	Dropped  map[string]int `json:"dropped,omitempty"`
 	Computed string         `json:"computed,omitempty"`
+	// Cats is the day counted again per category of apps (analytics.apps), CatsKey the
+	// categorisation it was computed with: a rollup whose key differs from the config is stale.
+	Cats    map[string]*CatRollup `json:"cats,omitempty"`
+	CatsKey string                `json:"cats_key,omitempty"`
+}
+
+// CatRollup is one category of a day: its main part and its excluded persons.
+type CatRollup struct {
+	Part
+	Test *Part `json:"test,omitempty"`
+}
+
+// Parts returns the main part, and the test part too when includeTest is set.
+func (c *CatRollup) Parts(includeTest bool) []*Part {
+	if c == nil {
+		return nil
+	}
+	if includeTest && c.Test != nil {
+		return []*Part{&c.Part, c.Test}
+	}
+	return []*Part{&c.Part}
+}
+
+// Cat returns a category of the day; nil when it has none.
+func (d *DayRollup) Cat(cat string) *CatRollup {
+	if d == nil {
+		return nil
+	}
+	return d.Cats[cat]
+}
+
+// catPart returns the part of a category (created on demand), its test part when excluded.
+func (d *DayRollup) catPart(cat string, excluded bool) *Part {
+	if d.Cats == nil {
+		d.Cats = map[string]*CatRollup{}
+	}
+	c := d.Cats[cat]
+	if c == nil {
+		c = &CatRollup{Part: *newPart()}
+		d.Cats[cat] = c
+	}
+	if !excluded {
+		return &c.Part
+	}
+	if c.Test == nil {
+		c.Test = newPart()
+	}
+	return c.Test
 }
 
 // Parts returns the main part, and the test part too when includeTest is set.
@@ -212,12 +260,14 @@ type resolved struct {
 	person   bool
 	excluded bool
 	install  string
+	cat      string
 }
 
 // ComputeDay builds the rollup of one day from its records (any order, duplicates allowed). It
-// numbers new actors in the state; exclude is the rule for persons counted apart.
-func ComputeDay(st *State, day string, recs []Record, exclude map[string]any, now time.Time) (*DayRollup, error) {
-	out := &DayRollup{V: RollupVersion, Day: day, Part: *newPart(), Dropped: map[string]int{}, Computed: now.UTC().Format(time.RFC3339)}
+// numbers new actors in the state; exclude is the rule for persons counted apart, cats the
+// categories of apps (nil: none).
+func ComputeDay(st *State, day string, recs []Record, exclude map[string]any, cats *Categories, now time.Time) (*DayRollup, error) {
+	out := &DayRollup{V: RollupVersion, Day: day, Part: *newPart(), Dropped: map[string]int{}, Computed: now.UTC().Format(time.RFC3339), CatsKey: cats.Key()}
 	seen := make(map[string]bool, len(recs))
 	uniq := make([]*Record, 0, len(recs))
 	for i := range recs {
@@ -239,6 +289,7 @@ func ComputeDay(st *State, day string, recs []Record, exclude map[string]any, no
 	err := st.Update(func(t *Tx) error {
 		actors := map[string]Actor{}
 		excluded := map[string]bool{}
+		actorCats := map[string]map[string]bool{}
 		for _, r := range uniq {
 			key := t.ActorKey(r)
 			if key == "" {
@@ -259,6 +310,12 @@ func ComputeDay(st *State, day string, recs []Record, exclude map[string]any, no
 				excluded[key] = ex
 			}
 			x := resolved{r: r, aid: a.ID, person: key[:2] == "u:", excluded: ex}
+			if x.cat = cats.Of(r.App, x.person); x.cat != "" {
+				if actorCats[key] == nil {
+					actorCats[key] = map[string]bool{}
+				}
+				actorCats[key][x.cat] = true
+			}
 			if r.E == EventFirstOpen {
 				x.install, _ = t.installKind(r)
 			}
@@ -284,6 +341,10 @@ func ComputeDay(st *State, day string, recs []Record, exclude map[string]any, no
 					p = out.Test
 				}
 				p.First.Add(a.ID)
+				// New in a category: first seen on this day, and seen in that category on it.
+				for cat := range actorCats[key] {
+					out.catPart(cat, excluded[key]).First.Add(a.ID)
+				}
 			}
 		}
 		return nil
@@ -301,10 +362,19 @@ func ComputeDay(st *State, day string, recs []Record, exclude map[string]any, no
 			p = out.Test
 		}
 		p.add(x, groupIDs)
+		if x.cat != "" {
+			out.catPart(x.cat, x.excluded).add(x, groupIDs)
+		}
 	}
 	out.finish()
 	if out.Test != nil {
 		out.Test.finishPart()
+	}
+	for _, c := range out.Cats {
+		c.finishPart()
+		if c.Test != nil {
+			c.Test.finishPart()
+		}
 	}
 	if len(out.Dropped) == 0 {
 		out.Dropped = nil
