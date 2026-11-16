@@ -47,19 +47,20 @@ S3 bucket and sends a daily digest to Telegram. Test persons are left out unless
 
 // anFlags are the flags every query takes.
 type anFlags struct {
-	since, until, breakdown string
-	where                   []string
-	includeTest             bool
+	since, until string
+	breakdown    []string
+	where        []string
+	includeTest  bool
 }
 
 func (f *anFlags) add(cmd *cobra.Command, since string, breakdown bool) {
 	fl := cmd.Flags()
 	fl.StringVar(&f.since, "since", since, "e.g. 7d, 2026-11-01 or an RFC 3339 time")
 	fl.StringVar(&f.until, "until", "", "e.g. 1d or 2026-11-10")
-	fl.StringArrayVar(&f.where, "where", nil, "filter k=v or k!=v (dimension, p.<prop>, person.<prop>, first_*); repeatable")
+	fl.StringArrayVar(&f.where, "where", nil, "filter on a dimension, p.<prop>, person.<prop> or first_*: k=v, k!=v, k>n, k>=n, k<n, k<=n; k=a|b (or k=a,b) is one of, k!=a|b none of; repeatable, all must hold, the same key with = twice is one of")
 	fl.BoolVar(&f.includeTest, "include-test", false, "count test persons too")
 	if breakdown {
-		fl.StringVarP(&f.breakdown, "by", "b", "", "split by a dimension, p.<prop>, person.<prop> or first_* (also --breakdown)")
+		fl.StringArrayVarP(&f.breakdown, "by", "b", nil, "split by a dimension, p.<prop>, person.<prop> or first_* (also --breakdown); twice for two keys")
 	}
 	fl.SetNormalizeFunc(anFlagAliases)
 }
@@ -76,16 +77,34 @@ func anFlagAliases(_ *pflag.FlagSet, name string) pflag.NormalizedName {
 }
 
 func (f *anFlags) spec(kind string) (analytics.Spec, error) {
-	s := analytics.Spec{Kind: kind, Since: f.since, Until: f.until, Breakdown: f.breakdown, IncludeTest: f.includeTest}
+	s := analytics.Spec{Kind: kind, Since: f.since, Until: f.until, IncludeTest: f.includeTest}
+	if len(f.breakdown) > 2 {
+		return s, fmt.Errorf("--by: at most two keys")
+	}
+	s.Breakdown = strings.Join(f.breakdown, ",")
+	// Plain k=v and k!=v with distinct keys travel as the where map, which every server with
+	// analytics reads; anything else (comparisons, lists, a repeated key) as filters.
+	simple := map[string]string{}
+	plain := true
 	for _, w := range f.where {
-		k, v, ok := strings.Cut(w, "=")
-		if !ok || k == "" {
-			return s, fmt.Errorf("--where %q: expected k=v or k!=v", w)
+		if !strings.ContainsAny(w, "=<>") || strings.IndexAny(w, "=<>") == 0 || strings.HasPrefix(w, "!") {
+			return s, fmt.Errorf("--where %q: expected k=v, k!=v, k>n, k>=n, k<n or k<=n", w)
 		}
-		if s.Where == nil {
-			s.Where = map[string]string{}
+		k, v, _ := strings.Cut(w, "=")
+		if strings.ContainsAny(k, "<>") || strings.ContainsAny(v, "|,") || strings.HasPrefix(v, "=") {
+			plain = false
 		}
-		s.Where[k] = v // "k!" (from k!=v) is the server's "not equal"
+		if _, dup := simple[k]; dup {
+			plain = false
+		}
+		simple[k] = v // "k!" (from k!=v) is the server's "not equal"
+	}
+	if len(f.where) > 0 {
+		if plain {
+			s.Where = simple
+		} else {
+			s.Filters = append([]string(nil), f.where...)
+		}
 	}
 	return s, nil
 }
@@ -136,7 +155,7 @@ func (a *app) anTrendsCmd() *cobra.Command {
 			s.Events, s.Math, s.Prop, s.Interval, s.Compare = args, math, prop, interval, compare
 		}, func(cmd *cobra.Command) {
 			f := cmd.Flags()
-			f.StringVar(&math, "math", "", "total|uniques|dau|wau|mau|per_user_avg|sum|avg|p50|p90 (default total)")
+			f.StringVar(&math, "math", "", "total|uniques|dau|wau|mau|per_user_avg|sum|avg|p50|p75|p90|p95|p99 (default total)")
 			f.StringVar(&prop, "prop", "", "the numeric property of sum/avg/p50/p90")
 			f.StringVar(&interval, "interval", "", "hour|day|week|month (default day)")
 			f.BoolVar(&compare, "compare", false, "the previous period too")
@@ -197,15 +216,16 @@ func (a *app) anLifecycleCmd() *cobra.Command {
 
 func (a *app) anPathsCmd() *cobra.Command {
 	var from, to string
-	var depth int
+	var depth, limit int
 	return a.anQueryCmd("paths", "Screen paths ($pageview screen_name): from or to a screen, or the commonest steps",
 		cobra.NoArgs, "7d", false, func(s *analytics.Spec, _ []string) {
-			s.From, s.To, s.Depth = from, to, depth
+			s.From, s.To, s.Depth, s.Limit = from, to, depth, limit
 		}, func(cmd *cobra.Command) {
 			f := cmd.Flags()
 			f.StringVar(&from, "from", "", "paths starting at this screen")
 			f.StringVar(&to, "to", "", "paths ending at this screen")
 			f.IntVar(&depth, "depth", 0, "screens per path, 3 to 5 (default 3)")
+			f.IntVar(&limit, "limit", 0, "paths and screens to show, at most 1000 (default 20)")
 		})
 }
 
@@ -547,8 +567,16 @@ func (a *app) printAnalytics(res *analytics.Result) error {
 		for _, e := range res.Events {
 			fmt.Fprintln(a.out, string(e))
 		}
-	case len(res.Rows) > 0:
-		a.printRows(res.Columns, res.Rows)
+	case len(res.Rows) > 0 || len(res.Screens) > 0:
+		if len(res.Rows) > 0 {
+			a.printRows(res.Columns, res.Rows)
+		}
+		if len(res.Screens) > 0 {
+			if len(res.Rows) > 0 {
+				fmt.Fprintln(a.out)
+			}
+			a.printRows(res.ScreenColumns, res.Screens)
+		}
 	default:
 		fmt.Fprintln(a.out, "(nothing)")
 	}

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,15 +21,19 @@ type Spec struct {
 
 	Events   []string `json:"events,omitempty"`   // trends: events; funnel: steps ("name" or "name:k=v,k=v")
 	Event    string   `json:"event,omitempty"`    // stickiness, lifecycle, events: one event ("any" = any activity)
-	Math     string   `json:"math,omitempty"`     // total|uniques|dau|wau|mau|per_user_avg|sum|avg|p50|p90
+	Math     string   `json:"math,omitempty"`     // total|uniques|dau|wau|mau|per_user_avg|sum|avg|p50|p75|p90|p95|p99
 	Prop     string   `json:"prop,omitempty"`     // the numeric property of sum/avg/p50/p90
 	Interval string   `json:"interval,omitempty"` // hour|day|week|month
 	Since    string   `json:"since,omitempty"`    // 30d, 2026-01-01 or RFC 3339
 	Until    string   `json:"until,omitempty"`
 
-	Breakdown string            `json:"breakdown,omitempty"` // a dimension, p.<prop>, person.<prop> or first_*
+	Breakdown string            `json:"breakdown,omitempty"` // a dimension, p.<prop>, person.<prop> or first_*; two keys as "a,b"
 	Where     map[string]string `json:"where,omitempty"`     // the same keys; a key ending in "!" means "not equal"
-	Compare   bool              `json:"compare,omitempty"`   // trends: the previous period too
+	// Filters are filter expressions, all of which must hold: k=v, k!=v, k>v, k>=v, k<v, k<=v;
+	// k=a|b (or k=a,b) is "one of", k!=a|b "none of", and the same key with = twice is "one of"
+	// both values. They add to Where.
+	Filters []string `json:"filters,omitempty"`
+	Compare bool     `json:"compare,omitempty"` // trends: the previous period too
 
 	IncludeTest bool `json:"include_test,omitempty"`
 
@@ -109,21 +114,24 @@ type PersonResult struct {
 // Result is the answer to a query. Source says what it was computed from: rollup (daily
 // rollups), raw (the hot window of raw records) or mixed.
 type Result struct {
-	Kind         string            `json:"kind"`
-	Source       string            `json:"source"`
-	Window       Window            `json:"window"`
-	ExcludedTest int               `json:"excluded_test"`
-	Partial      bool              `json:"partial,omitempty"`
-	NeedsArchive bool              `json:"needs_archive,omitempty"`
-	Archive      []string          `json:"archive,omitempty"`
-	Note         string            `json:"note,omitempty"`
-	Series       []Series          `json:"series,omitempty"`
-	Funnels      []Funnel          `json:"funnels,omitempty"`
-	Cohorts      []Cohort          `json:"cohorts,omitempty"`
-	Columns      []string          `json:"columns,omitempty"`
-	Rows         []Row             `json:"rows,omitempty"`
-	Person       *PersonResult     `json:"person,omitempty"`
-	Events       []json.RawMessage `json:"events,omitempty"`
+	Kind         string   `json:"kind"`
+	Source       string   `json:"source"`
+	Window       Window   `json:"window"`
+	ExcludedTest int      `json:"excluded_test"`
+	Partial      bool     `json:"partial,omitempty"`
+	NeedsArchive bool     `json:"needs_archive,omitempty"`
+	Archive      []string `json:"archive,omitempty"`
+	Note         string   `json:"note,omitempty"`
+	Series       []Series `json:"series,omitempty"`
+	Funnels      []Funnel `json:"funnels,omitempty"`
+	Cohorts      []Cohort `json:"cohorts,omitempty"`
+	Columns      []string `json:"columns,omitempty"`
+	Rows         []Row    `json:"rows,omitempty"`
+	// Screens are the top screens of a paths query (rows of screen, views, actors).
+	ScreenColumns []string          `json:"screen_columns,omitempty"`
+	Screens       []Row             `json:"screens,omitempty"`
+	Person        *PersonResult     `json:"person,omitempty"`
+	Events        []json.RawMessage `json:"events,omitempty"`
 }
 
 // ParseTime reads 30d, 12h, 2026-01-01 or an RFC 3339 time, relative to now.
@@ -180,6 +188,8 @@ type qctx struct {
 
 // Query answers a spec.
 func (p *Project) Query(ctx context.Context, s Spec) (*Result, error) {
+	ctx, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
 	q := &qctx{p: p, spec: s, now: p.m.now(), excludedSeen: map[string]bool{}}
 	defSince := map[string]string{"events": "7d", "person": "35d", "catalog": "30d", "paths": "7d"}[s.Kind]
 	if defSince == "" {
@@ -202,6 +212,12 @@ func (p *Project) Query(ctx context.Context, s Spec) (*Result, error) {
 		return nil, errors.New("since must be before until")
 	}
 	q.spec = s
+	switch s.Kind {
+	case "retention", "stickiness", "lifecycle", "installs", "catalog", "person":
+		if len(s.Where) > 0 || len(s.Filters) > 0 {
+			return nil, fmt.Errorf("%s does not filter (where): it reads rollups, which keep no properties", s.Kind)
+		}
+	}
 	q.loadExclude()
 	p.ensureRollups(days(q.since, q.until))
 	res := &Result{Kind: s.Kind, Window: Window{Since: q.since.Format(time.RFC3339), Until: q.until.Format(time.RFC3339)}}
@@ -277,8 +293,16 @@ var (
 // with nothing to roll up is asked again only after 15 minutes.
 func (p *Project) ensureRollups(ds []string) {
 	now := p.m.now()
-	// Records received at the window's start may be a late week older.
-	first, today := p.WindowStart().AddDate(0, 0, -lateDays).Format(DayLayout), now.Format(DayLayout)
+	// A stream younger than the retention holds everything ever received, so a day up to a
+	// late week before it is computed from late events. A window trimmed by age has lost the
+	// first hours of its first day and every day before it: a rollup computed from what is left
+	// would count a fraction of the day and soon be frozen as final, so only whole days are.
+	ws := p.WindowStart()
+	first := ws.AddDate(0, 0, -lateDays).Format(DayLayout)
+	if !ws.After(now.Add(-p.m.retention()).Add(time.Hour)) {
+		first = ws.Truncate(24*time.Hour).AddDate(0, 0, 1).Format(DayLayout)
+	}
+	today := now.Format(DayLayout)
 	var missing []string
 	p.mu.Lock()
 	for _, d := range ds {
@@ -454,22 +478,124 @@ func validInterval(i string) bool {
 // ─── Filters ─────────────────────────────────────────────────────────────────
 
 type filter struct {
-	key, val string
-	not      bool
+	key  string
+	op   string   // = != > >= < <=
+	vals []string // = and != : any of them
 }
 
-func parseWhere(w map[string]string) []filter {
+// eqOne is a plain "k=v", the only filter rollups answer.
+func (f filter) eqOne() bool { return f.op == "=" && len(f.vals) == 1 }
+
+var filterOps = []string{"!=", ">=", "<=", "=", ">", "<"}
+
+// parseFilter reads k=v, k!=v, k>v, k>=v, k<v or k<=v; = and != take a|b (or a,b) as a list.
+func parseFilter(expr string, lists bool) (filter, error) {
+	at, op := -1, ""
+	for i := 0; i < len(expr) && at < 0; i++ {
+		for _, o := range filterOps {
+			if strings.HasPrefix(expr[i:], o) {
+				at, op = i, o
+				break
+			}
+		}
+	}
+	if at <= 0 {
+		return filter{}, fmt.Errorf("filter %q: expected k=v, k!=v, k>v, k>=v, k<v or k<=v", expr)
+	}
+	f := filter{key: strings.TrimSpace(expr[:at]), op: op}
+	v := expr[at+len(op):]
+	switch op {
+	case "=", "!=":
+		sep := func(r rune) bool { return r == '|' || lists && r == ',' }
+		if strings.IndexFunc(v, sep) >= 0 {
+			f.vals = strings.FieldsFunc(v, sep)
+		} else {
+			f.vals = []string{v}
+		}
+	default:
+		if _, err := strconv.ParseFloat(v, 64); err != nil {
+			return filter{}, fmt.Errorf("filter %q: %s compares numbers", expr, op)
+		}
+		f.vals = []string{v}
+	}
+	return f, nil
+}
+
+// parseFilters joins the Where map and the filter expressions: one filter per key and
+// operator, so the same key with = twice means "one of".
+func parseFilters(w map[string]string, exprs []string, lists bool) ([]filter, error) {
 	var out []filter
-	for k, v := range w {
-		f := filter{key: k, val: v}
-		if strings.HasSuffix(k, "!") {
-			f.key, f.not = strings.TrimSuffix(k, "!"), true
+	add := func(f filter) {
+		if f.op == "=" || f.op == "!=" {
+			for i := range out {
+				if out[i].key == f.key && out[i].op == f.op {
+					out[i].vals = append(out[i].vals, f.vals...)
+					return
+				}
+			}
 		}
 		out = append(out, f)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].key < out[j].key })
-	return out
+	for k, v := range w {
+		f := filter{key: k, op: "=", vals: []string{v}}
+		if strings.HasSuffix(k, "!") {
+			f.key, f.op = strings.TrimSuffix(k, "!"), "!="
+		}
+		add(f)
+	}
+	for _, e := range exprs {
+		f, err := parseFilter(e, lists)
+		if err != nil {
+			return nil, err
+		}
+		add(f)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].key < out[j].key })
+	return out, nil
 }
+
+func (f filter) holds(v string) bool {
+	switch f.op {
+	case "=":
+		return slices.Contains(f.vals, v)
+	case "!=":
+		return !slices.Contains(f.vals, v)
+	}
+	x, ok := num(v)
+	if v == "" || !ok {
+		return false
+	}
+	y, _ := strconv.ParseFloat(f.vals[0], 64)
+	switch f.op {
+	case ">":
+		return x > y
+	case ">=":
+		return x >= y
+	case "<":
+		return x < y
+	}
+	return x <= y
+}
+
+// breakdownKeys splits a breakdown into its keys: at most two.
+func breakdownKeys(b string) ([]string, error) {
+	if b == "" {
+		return nil, nil
+	}
+	keys := strings.Split(b, ",")
+	if len(keys) > 2 {
+		return nil, fmt.Errorf("breakdown %q: at most two keys", b)
+	}
+	for _, k := range keys {
+		if strings.TrimSpace(k) == "" {
+			return nil, fmt.Errorf("breakdown %q: an empty key", b)
+		}
+	}
+	return keys, nil
+}
+
+// BreakdownSep joins the values of a two-key breakdown.
+const BreakdownSep = " / "
 
 // plainDim reports whether k is a dimension a rollup keeps (built-in or dm).
 func plainDim(k string) bool {
@@ -517,11 +643,22 @@ func (rc *rawCtx) value(r *Record, key string) string {
 
 func (rc *rawCtx) match(r *Record, fs []filter) bool {
 	for _, f := range fs {
-		if (rc.value(r, f.key) == f.val) == f.not {
+		if !f.holds(rc.value(r, f.key)) {
 			return false
 		}
 	}
 	return true
+}
+
+// breakdown is a record's breakdown value: one key, or two joined by BreakdownSep.
+func (rc *rawCtx) breakdown(r *Record, keys []string) string {
+	switch len(keys) {
+	case 0:
+		return ""
+	case 1:
+		return rc.value(r, keys[0])
+	}
+	return rc.value(r, keys[0]) + BreakdownSep + rc.value(r, keys[1])
 }
 
 // excluded reports (and remembers) whether the record's actor is an excluded person.
@@ -533,6 +670,12 @@ func (rc *rawCtx) excluded(r *Record) bool {
 	}
 	return false
 }
+
+// maxRaw bounds the raw records one query holds in memory (about 1 KB each parsed).
+var maxRaw = 1_000_000
+
+// queryTimeout bounds one query.
+const queryTimeout = 2 * time.Minute
 
 // raw reads the records with event time in [since, until] from the hot window, sets the
 // result's source and partial marks, and runs fn inside one state transaction.
@@ -547,9 +690,9 @@ func (q *qctx) raw(ctx context.Context, res *Result, since, until time.Time, kee
 		}
 		since = ws
 	}
-	recs, err := q.p.readRecords(since.Add(-time.Hour), time.Time{}, func(r *Record) bool {
+	recs, err := q.p.readRecordsCtx(ctx, since.Add(-time.Hour), time.Time{}, func(r *Record) bool {
 		return !r.t.Before(since) && !r.t.After(until) && (keep == nil || keep(r))
-	})
+	}, maxRaw)
 	if err != nil {
 		return err
 	}
@@ -588,18 +731,25 @@ func (q *qctx) trends(ctx context.Context, res *Result) error {
 	}
 	switch s.Math {
 	case "total", "uniques", "dau", "wau", "mau", "per_user_avg":
-	case "sum", "avg", "p50", "p90":
+	case "sum", "avg", "p50", "p75", "p90", "p95", "p99":
 		if s.Prop == "" {
 			return fmt.Errorf("math %s needs --prop", s.Math)
 		}
 	default:
-		return fmt.Errorf("math %q: total, uniques, dau, wau, mau, per_user_avg, sum, avg, p50, p90", s.Math)
+		return fmt.Errorf("math %q: total, uniques, dau, wau, mau, per_user_avg, sum, avg, p50, p75, p90, p95, p99", s.Math)
 	}
 	q.spec = s
-	fs := parseWhere(s.Where)
-	useRollup := rollupMath[s.Math] && s.Interval != "hour" && len(fs) <= 1
+	fs, err := parseFilters(s.Where, s.Filters, true)
+	if err != nil {
+		return err
+	}
+	brKeys, err := breakdownKeys(s.Breakdown)
+	if err != nil {
+		return err
+	}
+	useRollup := rollupMath[s.Math] && s.Interval != "hour" && len(fs) <= 1 && len(brKeys) <= 1
 	for _, f := range fs {
-		useRollup = useRollup && plainDim(f.key) && !f.not && (s.Breakdown == "" || s.Breakdown == f.key)
+		useRollup = useRollup && plainDim(f.key) && f.eqOne() && (s.Breakdown == "" || s.Breakdown == f.key)
 	}
 	if s.Breakdown != "" && !plainDim(s.Breakdown) {
 		useRollup = false
@@ -609,7 +759,7 @@ func (q *qctx) trends(ctx context.Context, res *Result) error {
 			return q.trendsRollup(res, since, until, fs)
 		}
 		var out []Series
-		err := q.trendsRaw(ctx, res, since, until, fs, &out)
+		err := q.trendsRaw(ctx, res, since, until, fs, brKeys, &out)
 		return out, err
 	}
 	series, err := run(q.since, q.until)
@@ -660,7 +810,7 @@ func (q *qctx) trendsRollup(res *Result, since, until time.Time, fs []filter) ([
 	today := q.now.Format(DayLayout)
 	var whereDim, whereVal string
 	if len(fs) == 1 {
-		whereDim, whereVal = fs[0].key, fs[0].val
+		whereDim, whereVal = fs[0].key, fs[0].vals[0]
 	}
 	var out []Series
 	for _, ev := range s.Events {
@@ -786,7 +936,7 @@ func topKeys(m map[string]int, n int) []string {
 
 func round2(v float64) float64 { return math.Round(v*100) / 100 }
 
-func (q *qctx) trendsRaw(ctx context.Context, res *Result, since, until time.Time, fs []filter, out *[]Series) error {
+func (q *qctx) trendsRaw(ctx context.Context, res *Result, since, until time.Time, fs []filter, brKeys []string, out *[]Series) error {
 	s := q.spec
 	want := map[string]bool{}
 	anyEv := false
@@ -820,10 +970,7 @@ func (q *qctx) trendsRaw(ctx context.Context, res *Result, since, until time.Tim
 				if !(ev == r.E || isAny(ev) && !passive[r.E]) {
 					continue
 				}
-				br := ""
-				if s.Breakdown != "" {
-					br = rc.value(r, s.Breakdown)
-				}
+				br := rc.breakdown(r, brKeys)
 				if brTotals[ev] == nil {
 					brTotals[ev] = map[string]int{}
 				}
@@ -902,7 +1049,7 @@ func (q *qctx) trendsRaw(ctx context.Context, res *Result, since, until time.Tim
 							}
 						}
 						v = float64(len(u))
-					case "sum", "avg", "p50", "p90":
+					case "sum", "avg", "p50", "p75", "p90", "p95", "p99":
 						all = append(all, a.vals...)
 						v = aggregate(s.Math, a.vals)
 					}
@@ -913,7 +1060,7 @@ func (q *qctx) trendsRaw(ctx context.Context, res *Result, since, until time.Tim
 					for _, p := range ser.Points {
 						ser.Total += p.V
 					}
-				case "sum", "avg", "p50", "p90":
+				case "sum", "avg", "p50", "p75", "p90", "p95", "p99":
 					ser.Total = aggregate(s.Math, all)
 				default:
 					if len(ser.Points) > 0 {
@@ -944,9 +1091,9 @@ func aggregate(m string, vals []float64) float64 {
 	}
 	s := append([]float64(nil), vals...)
 	sort.Float64s(s)
-	p := 0.5
-	if m == "p90" {
-		p = 0.9
+	p := 0.5 // nearest rank
+	if n, err := strconv.Atoi(strings.TrimPrefix(m, "p")); err == nil && n > 0 && n < 100 {
+		p = float64(n) / 100
 	}
 	i := int(math.Ceil(p*float64(len(s)))) - 1
 	return s[max(i, 0)]
@@ -960,23 +1107,19 @@ type step struct {
 	fs    []filter
 }
 
-func parseStep(s string) step {
+// parseStep reads a funnel step: "name" or "name:k=v,k>v,..." (conditions joined by commas,
+// so a list of values is written a|b).
+func parseStep(s string) (step, error) {
 	st := step{label: s, event: s}
 	if ev, cond, ok := strings.Cut(s, ":"); ok {
 		st.event = ev
-		w := map[string]string{}
-		for _, kv := range strings.Split(cond, ",") {
-			if k, v, ok := strings.Cut(kv, "="); ok {
-				if strings.HasSuffix(k, "!") {
-					w[k] = v
-				} else {
-					w[k] = v
-				}
-			}
+		fs, err := parseFilters(nil, strings.Split(cond, ","), false)
+		if err != nil {
+			return st, fmt.Errorf("step %q: %v", s, err)
 		}
-		st.fs = parseWhere(w)
+		st.fs = fs
 	}
-	return st
+	return st, nil
 }
 
 func (q *qctx) funnel(ctx context.Context, res *Result) error {
@@ -998,8 +1141,18 @@ func (q *qctx) funnel(ctx context.Context, res *Result) error {
 	steps := make([]step, len(s.Events))
 	want := map[string]bool{}
 	for i, e := range s.Events {
-		steps[i] = parseStep(e)
+		if steps[i], err = parseStep(e); err != nil {
+			return err
+		}
 		want[steps[i].event] = true
+	}
+	global, err := parseFilters(s.Where, s.Filters, true)
+	if err != nil {
+		return err
+	}
+	brKeys, err := breakdownKeys(s.Breakdown)
+	if err != nil {
+		return err
 	}
 	until := q.until.Add(window)
 	if until.After(q.now) {
@@ -1028,7 +1181,7 @@ func (q *qctx) funnel(ctx context.Context, res *Result) error {
 			times   []time.Time
 			br      string
 		}
-		matches := func(r *Record, st step) bool { return r.E == st.event && rc.match(r, st.fs) }
+		matches := func(r *Record, st step) bool { return r.E == st.event && rc.match(r, st.fs) && rc.match(r, global) }
 		var outs []outcome
 		for _, ak := range order0 {
 			evs := byActor[ak]
@@ -1038,9 +1191,7 @@ func (q *qctx) funnel(ctx context.Context, res *Result) error {
 					continue
 				}
 				o := outcome{reached: 1, times: []time.Time{r.t}}
-				if s.Breakdown != "" {
-					o.br = rc.value(r, s.Breakdown)
-				}
+				o.br = rc.breakdown(r, brKeys)
 				deadline := r.t.Add(window)
 				switch order {
 				case "ordered":
@@ -1207,8 +1358,14 @@ func (q *qctx) retention(res *Result) error {
 	if ret == "" {
 		ret = "any"
 	}
-	if s.Breakdown != "" && !strings.HasPrefix(s.Breakdown, "first_") {
-		return errors.New("retention breaks down by an actor attribute: first_source, first_campaign, first_pf, first_app or first_cc")
+	brKeys, err := breakdownKeys(s.Breakdown)
+	if err != nil {
+		return err
+	}
+	for _, k := range brKeys {
+		if !strings.HasPrefix(k, "first_") {
+			return errors.New("retention breaks down by actor attributes: first_source, first_campaign, first_pf, first_app or first_cc")
+		}
 	}
 	bs := buckets(q.since, q.until, period)
 	res.ExcludedTest = q.excludedInRollups(days(q.since, q.until))
@@ -1220,7 +1377,10 @@ func (q *qctx) retention(res *Result) error {
 			if s.Breakdown != "" {
 				groups = map[string]*Bitmap{}
 				cohort.Each(func(id uint32) {
-					v := q.actorAttr(t, cache, id, s.Breakdown)
+					v := q.actorAttr(t, cache, id, brKeys[0])
+					if len(brKeys) == 2 {
+						v += BreakdownSep + q.actorAttr(t, cache, id, brKeys[1])
+					}
 					if groups[v] == nil {
 						groups[v] = newBitmap()
 					}
@@ -1324,14 +1484,23 @@ func (q *qctx) lifecycle(res *Result) error {
 func (q *qctx) paths(ctx context.Context, res *Result) error {
 	s := q.spec
 	depth := s.Depth
-	if depth <= 0 || depth > 5 {
-		depth = min(max(depth, 3), 5)
+	if depth == 0 {
+		depth = 3
+	}
+	if depth < 3 || depth > 5 {
+		return fmt.Errorf("depth %d: 3 to 5 screens", s.Depth)
 	}
 	limit := s.Limit
 	if limit <= 0 {
 		limit = 20
 	}
-	fs := parseWhere(s.Where)
+	if limit > 1000 {
+		return fmt.Errorf("limit %d: at most 1000", limit)
+	}
+	fs, err := parseFilters(s.Where, s.Filters, true)
+	if err != nil {
+		return err
+	}
 	return q.raw(ctx, res, q.since, q.until, func(r *Record) bool { return r.E == EventPageview }, func(rc *rawCtx, recs []Record) error {
 		seqs := map[string][]string{}
 		var order []string
@@ -1388,9 +1557,10 @@ func (q *qctx) paths(ctx context.Context, res *Result) error {
 		for _, k := range topKeys(counts, limit) {
 			res.Rows = append(res.Rows, Row{"path": k, "count": counts[k]})
 		}
-		// The top screens follow as rows of their own kind.
+		// The top screens are a table of their own.
+		res.ScreenColumns = []string{"screen", "views", "actors"}
 		for _, k := range topKeys(views, limit) {
-			res.Rows = append(res.Rows, Row{"screen": k, "views": views[k], "actors": len(actors[k])})
+			res.Screens = append(res.Screens, Row{"screen": k, "views": views[k], "actors": len(actors[k])})
 		}
 		return nil
 	})
@@ -1419,7 +1589,7 @@ func (q *qctx) person(ctx context.Context, res *Result) error {
 		limit = 100
 	}
 	q.spec.IncludeTest = true // a person asked for by id is shown even when excluded
-	return q.raw(ctx, res, q.since, q.until, nil, func(rc *rawCtx, recs []Record) error {
+	return q.raw(ctx, res, q.since, q.until, q.userRecords(u), func(rc *rawCtx, recs []Record) error {
 		var lines []json.RawMessage
 		for i := range recs {
 			r := &recs[i]
@@ -1436,14 +1606,46 @@ func (q *qctx) person(ctx context.Context, res *Result) error {
 	})
 }
 
+// userRecords keeps the records that may belong to a user before they are parsed into memory:
+// the user's own, and those of the devices linked to the user (anonymous events count for the
+// person). The exact check (the actor) runs after.
+func (q *qctx) userRecords(u string) func(*Record) bool {
+	devices := map[string]bool{}
+	q.p.state.View(func(t *Tx) error {
+		if p, ok := t.Person(u); ok {
+			for _, d := range p.Devices {
+				devices[d] = true
+			}
+		}
+		t.tx.Bucket(bLinks).ForEach(func(k, v []byte) error {
+			if string(v) == u {
+				devices[string(k)] = true
+			}
+			return nil
+		})
+		return nil
+	})
+	return func(r *Record) bool { return r.User() == u || r.D != "" && devices[r.D] }
+}
+
 func (q *qctx) events(ctx context.Context, res *Result) error {
 	s := q.spec
 	limit := s.Limit
 	if limit <= 0 {
 		limit = 50
 	}
-	fs := parseWhere(s.Where)
-	return q.raw(ctx, res, q.since, q.until, func(r *Record) bool { return s.Event == "" || r.E == s.Event }, func(rc *rawCtx, recs []Record) error {
+	fs, err := parseFilters(s.Where, s.Filters, true)
+	if err != nil {
+		return err
+	}
+	byUser := func(*Record) bool { return true }
+	if s.User != "" {
+		byUser = q.userRecords(s.User)
+	}
+	keep := func(r *Record) bool {
+		return (s.Event == "" || r.E == s.Event) && (s.Device == "" || r.D == s.Device) && byUser(r)
+	}
+	return q.raw(ctx, res, q.since, q.until, keep, func(rc *rawCtx, recs []Record) error {
 		var out []json.RawMessage
 		for i := range recs {
 			r := &recs[i]

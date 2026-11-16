@@ -72,7 +72,7 @@ indexer and rollups as the server, on a temporary state.
 | `$pageview` | screens (`dm.screen_name`) for `paths` |
 | `$client_error` | `dm.fatal` `"true"` counts toward the crash-free share of the digest |
 | `user_signed_up`, `purchase_completed`, `subscription_*`, `purchase_refunded` | the digest's sign-ups and money lines |
-| `account_deleted` | **erases the person**: properties, device links and devices are dropped; only the properties the exclusion rule reads stay, so a deleted test account remains excluded from rollups that are recomputed later |
+| `account_deleted` | **erases the person**: properties, device links and devices are dropped; only the properties the exclusion rule reads stay, so a deleted test account remains excluded from rollups that are recomputed later. Later records of the user (an offline queue) still count but do not bring the person or its links back. Raw records in the window and the archive are not rewritten: they carry ids, never personal data |
 
 Passive events do not make an actor active (property updates, or sent by the server or the store without the
 person doing anything): `$set`, `$push_received`, `subscription_renewed`, `subscription_expired`,
@@ -146,7 +146,9 @@ clowctl analytics funnel '$first_open' 'episode_viewed:episode_number=2' --by fi
 clowctl analytics retention --period week --by first_source
 clowctl analytics stickiness
 clowctl analytics lifecycle --interval week
-clowctl analytics paths --from main
+clowctl analytics paths --from main --depth 4 --limit 50
+clowctl analytics trends purchase_completed --math p95 --prop price_micros --where 'store=apple|play' --where 'p.price_micros>=1000000'
+clowctl analytics trends episode_viewed --by pf --by episode_number      # two keys: "ios / 3"
 clowctl analytics installs --since 30d --by campaign            # with D1/D7/D30
 clowctl analytics person 870
 clowctl analytics events --user 870 --since 7d
@@ -155,14 +157,29 @@ clowctl analytics status                                         # records, wind
 clowctl analytics digest --dry-run                               # yesterday's digest, not sent
 ```
 
-Every query takes `--since`, `--until`, `--by` (most kinds), `--where k=v` / `--where k!=v` (repeatable),
-`--include-test` and `-o json`. Keys are dimensions (`pf`, `cc`, `dm` keys), `p.<prop>`,
-`person.<prop>` or `first_source` / `first_campaign` / `first_pf` / `first_app` / `first_cc`.
-Counts by dimensions come from the rollups; property filters, sums and percentiles read the raw
-records, so they cover the hot window only. Older raw data is in the archive:
+Every query takes `--since`, `--until`, `--include-test` and `-o json`. Keys are dimensions (`pf`,
+`cc`, `dm` keys), `p.<prop>`, `person.<prop>` or `first_source` / `first_campaign` / `first_pf` /
+`first_app` / `first_cc`.
+
+- `--by k` splits trends, funnels and retention (retention by `first_*` only); `--by` twice splits by
+  two keys, written `a / b`. `installs --by` takes one install dimension.
+- `--where` (trends, funnel, paths, events; repeatable, all must hold): `k=v`, `k!=v`, `k>n`, `k>=n`,
+  `k<n`, `k<=n`; `k=a|b` (or `k=a,b`) is one of, `k!=a|b` none of, and the same key with `=` twice is
+  one of both. A funnel applies it to every step; a step's own conditions follow the event name,
+  joined by commas, with lists written `a|b`. Rollup kinds (retention, stickiness, lifecycle,
+  installs) refuse it rather than ignore it.
+- `--math`: `total`, `uniques`, `dau`, `wau`, `mau`, `per_user_avg`, and over `--prop`: `sum`,
+  `avg`, `p50`, `p75`, `p90`, `p95`, `p99` (nearest rank).
+- `paths`: `--from` / `--to` a screen, `--depth` 3 to 5 (default 3), `--limit` (default 20, at most
+  1000); the top screens come as a table of their own (`screens` in JSON).
+
+Counts by one dimension come from the rollups; anything else (property filters, comparisons,
+lists, two keys, sums and percentiles) reads the raw records, so it covers the hot window only. A
+raw query holds at most a million records and runs at most two minutes: narrow it when it says so.
+Older raw data is in the archive:
 
 ```sh
-clowctl analytics archive --since 2026-09-01 --until 2026-09-30 > urls.txt   # presigned, 6 hours
+clowctl analytics archive --since 2026-09-01 --until 2026-09-30 > urls.txt   # presigned, 1 hour
 duckdb -c "select e, count(*) from read_ndjson([$(sed "s/.*/'&'/" urls.txt | paste -sd,)]) group by 1"
 ```
 
@@ -176,6 +193,6 @@ duckdb -c "select e, count(*) from read_ndjson([$(sed "s/.*/'&'/" urls.txt | pas
 | `POST …/analytics/digest?day=&dry_run=1` | the digest text; sent unless `dry_run` |
 | `GET`, `PUT`, `DELETE …/analytics/config` | the `analytics:` block |
 | `PUT …/analytics/secrets/{name}` | `{"value": …}`; empty removes it |
-| `POST …/analytics/rebuild?since=` | admin token; re-indexes from the stream and the archive, streams progress |
+| `POST …/analytics/rebuild?since=` | admin token; re-indexes from the stream and the archive, streams progress. From the first day the project has, the index is built from scratch; from a later day it is kept (actor numbers in older rollups, persons, links and install keys before that day) and the records are applied on top |
 
 A server with analytics lists `analytics` in `GET /v1/version` features.

@@ -65,7 +65,17 @@ func TestAnalyticsCommands(t *testing.T) {
 	contains(t, h.ok("analytics", "retention", "--period", "day", "--since", day0), "COHORT", "SIZE", "+1")
 	contains(t, h.ok("analytics", "stickiness", "--since", day0), "DAYS", "ACTORS")
 	contains(t, h.ok("analytics", "lifecycle", "--event", "any", "--interval", "day", "--since", day0), "NEW", "DORMANT")
-	contains(t, h.ok("analytics", "paths", "--since", day0), "PATH", "main → drama")
+	out = h.ok("analytics", "paths", "--since", day0)
+	contains(t, out, "PATH", "main → drama", "SCREEN", "VIEWS")
+	if strings.Contains(out, "-  -") || strings.Contains(out, "-\t-") {
+		t.Fatalf("screen rows printed under the path columns:\n%s", out)
+	}
+	contains(t, h.fails("analytics", "paths", "--since", day0, "--depth", "2"), "3 to 5")
+	contains(t, h.ok("analytics", "paths", "--since", day0, "--limit", "1", "--depth", "4"), "PATH")
+	contains(t, h.ok("analytics", "trends", "episode_viewed", "--since", day0, "--where", "pf=android", "--where", "pf=ios"), "TOTAL")
+	contains(t, h.ok("analytics", "trends", "episode_viewed", "--since", day0, "--where", "p.drama_id>=1", "--by", "pf", "--by", "episode_number"), "TOTAL")
+	contains(t, h.fails("analytics", "trends", "x_y", "--by", "a", "--by", "b", "--by", "c"), "at most two")
+	contains(t, h.fails("analytics", "trends", "x_y", "--where", "p.n>abc"), "compares numbers")
 	contains(t, h.ok("analytics", "person", "870", "--events", "5"), "user 870", "role = viewer", "source organic")
 	contains(t, h.ok("analytics", "events", "--event", "episode_viewed", "--tail", "5", "--since", day0), `"e":"episode_viewed"`)
 	contains(t, h.ok("analytics", "installs", "--since", day0), "SOURCE", "organic", "apple_search_ads")
