@@ -45,6 +45,7 @@ func newFixture(t *testing.T) *fixture {
 	sick := map[string]bool{}
 	e.Prober = fake.Prober{D: d, Sick: sick}
 	e.CertExists = func(string) bool { return false }
+	e.ResolveSettle = 0
 	if err := st.PutProject(store.Project{Name: "shop", Domains: []string{"example.com", "*.example.com"}}); err != nil {
 		t.Fatal(err)
 	}

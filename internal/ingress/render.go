@@ -4,6 +4,7 @@ package ingress
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -74,20 +75,7 @@ func RenderProject(project string, services []ServiceView, o Options) (string, e
 		byName[services[i].Spec.Name] = &services[i]
 	}
 
-	for _, s := range services {
-		if s.Spec.Port == 0 {
-			continue
-		}
-		up := UpstreamName(project, s.Spec.Name)
-		fmt.Fprintf(&b, "\nupstream %s {\n    zone %s 64k;\n", up, up)
-		if len(s.Targets) == 0 {
-			b.WriteString("    server 127.0.0.1:1 down;\n")
-		}
-		for _, t := range s.Targets {
-			fmt.Fprintf(&b, "    server %s resolve max_fails=1 fail_timeout=5s;\n", t)
-		}
-		b.WriteString("    keepalive 16;\n}\n")
-	}
+	writeUpstreams(&b, project, services)
 
 	for _, s := range services {
 		if err := checkExtra(project, s.Spec.NginxExtra); err != nil {
@@ -105,6 +93,42 @@ func RenderProject(project string, services []ServiceView, o Options) (string, e
 		}
 	}
 	return b.String(), nil
+}
+
+// RenderUpstreams renders only the upstream blocks of a project, with no server that uses them.
+// Live next to the config that serves the project, it gets nginx to resolve container names
+// that a following config will route to (see RenderProject).
+func RenderUpstreams(project string, services []ServiceView) string {
+	var b strings.Builder
+	b.WriteString(generatedHeader)
+	services = slices.Clone(services)
+	sort.Slice(services, func(i, j int) bool { return services[i].Spec.Name < services[j].Spec.Name })
+	writeUpstreams(&b, project, services)
+	return b.String()
+}
+
+// writeUpstreams writes an upstream per service with a port. Servers are container names that
+// nginx resolves at run time, so a missing container never stops it from starting. A worker
+// resolves a name only after it started, though: a name the previous config of the same
+// upstream did not have has no address in the first moments after a reload, and a request
+// that comes then gets a 502. Names the previous config had keep their addresses. So a name
+// goes live in two reloads: first next to names that already resolve (or in an upstream no
+// server uses yet), then on its own once nginx has resolved it.
+func writeUpstreams(b *strings.Builder, project string, services []ServiceView) {
+	for _, s := range services {
+		if s.Spec.Port == 0 {
+			continue
+		}
+		up := UpstreamName(project, s.Spec.Name)
+		fmt.Fprintf(b, "\nupstream %s {\n    zone %s 64k;\n", up, up)
+		if len(s.Targets) == 0 {
+			b.WriteString("    server 127.0.0.1:1 down;\n")
+		}
+		for _, t := range s.Targets {
+			fmt.Fprintf(b, "    server %s resolve max_fails=1 fail_timeout=5s;\n", t)
+		}
+		b.WriteString("    keepalive 16;\n}\n")
+	}
 }
 
 func renderServer(b *strings.Builder, project string, s ServiceView, domain string, byName map[string]*ServiceView, o Options) {

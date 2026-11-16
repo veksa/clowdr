@@ -202,6 +202,31 @@ func (e *Engine) RenameProject(ctx context.Context, old, name, author string, pr
 		}
 	}
 
+	// The new name is a new upstream for nginx: it gets the new containers in a config no site
+	// uses yet, so their names resolve before the switch; see ingress.RenderUpstreams.
+	var views []ingress.ServiceView
+	for _, v := range svcs {
+		if r, ok := current[v.Name]; ok && v.Spec.Port != 0 && len(containers[r.ID]) > 0 {
+			views = append(views, ingress.ServiceView{Spec: v.Spec, Targets: targets(containers[r.ID], v.Spec.Port)})
+		}
+	}
+	warmed := false
+	if len(views) > 0 {
+		e.renderM.Lock()
+		err := e.Ingress.Apply(ctx, ingress.File{Path: ingress.ProjectFile(name), Content: ingress.RenderUpstreams(name, views)})
+		e.renderM.Unlock()
+		if err != nil {
+			cleanup()
+			return fmt.Errorf("nginx: %w", err)
+		}
+		warmed = true
+		if err := e.settle(ctx); err != nil {
+			e.dropFile(name)
+			cleanup()
+			return err
+		}
+	}
+
 	// The switch: state first (the renderer reads it), then nginx; on nginx failure back to both.
 	err = e.Store.RenameProject(old, name, func(r *store.Release) {
 		if ref, ok := refs[r.Image]; ok {
@@ -211,6 +236,9 @@ func (e *Engine) RenameProject(ctx context.Context, old, name, author string, pr
 		r.Containers = containers[r.ID]
 	})
 	if err != nil {
+		if warmed {
+			e.dropFile(name)
+		}
 		cleanup()
 		return err
 	}
@@ -498,6 +526,15 @@ func (e *Engine) switchProjectFile(ctx context.Context, from, to string) error {
 		e.RoutesChanged()
 	}
 	return nil
+}
+
+// dropFile removes conf.d/<project>.conf (the upstreams of a rename that did not happen).
+func (e *Engine) dropFile(project string) {
+	e.renderM.Lock()
+	defer e.renderM.Unlock()
+	if err := e.Ingress.Apply(context.Background(), ingress.File{Path: ingress.ProjectFile(project)}); err != nil {
+		e.Log.Warn("rename: remove nginx upstreams", "project", project, "err", err)
+	}
 }
 
 // finishRename removes what still carries the old name once traffic moved. It works from labels

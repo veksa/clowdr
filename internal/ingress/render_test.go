@@ -179,3 +179,21 @@ func TestCheckExtra(t *testing.T) {
 		t.Error("render accepted bad extra")
 	}
 }
+
+func TestRenderUpstreamsHasNoSites(t *testing.T) {
+	s := spec.Service{Name: "web", Port: 8080, Domains: []string{"shop.example.com"}}
+	got := RenderUpstreams("shop", []ServiceView{{Spec: s, Targets: []string{"shop-web-r2-1:8080"}}})
+	if strings.Contains(got, "server {") || strings.Contains(got, "server_name") {
+		t.Fatalf("upstreams render a site:\n%s", got)
+	}
+	if !strings.Contains(got, "upstream shop__web {") || !strings.Contains(got, "server shop-web-r2-1:8080 resolve") {
+		t.Fatalf("upstream missing:\n%s", got)
+	}
+	full, err := RenderProject("shop", []ServiceView{{Spec: s, Targets: []string{"shop-web-r2-1:8080"}}}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(full, got) {
+		t.Fatalf("the project config does not start with the same upstreams:\n%s\n---\n%s", got, full)
+	}
+}

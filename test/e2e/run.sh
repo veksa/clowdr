@@ -17,6 +17,7 @@ fi
 
 step "first deploy"
 release v1
+slow_nginx_dns
 [ "$(get release.txt)" = v1 ] || fail "v1 is not served"
 cc ps
 cc routes
@@ -40,8 +41,10 @@ load_stop "failed deploy v3"
 echo ok >web/public/health
 has v3-broken cc releases web || fail "the failed release is not in the history"
 
-step "rollback"
+step "rollback under load"
+load_start
 cc rollback web
+load_stop "rollback"
 [ "$(get release.txt)" = v1 ] || fail "rollback did not bring back v1"
 
 step "exec"
@@ -53,7 +56,9 @@ cc scale web=2
 load_stop "scale to 2"
 [ "$(cc status web -o json | jq '.containers | length')" -eq 2 ] || fail "expected 2 containers"
 for _ in $(seq 10); do get release.txt >/dev/null; done
+load_start
 cc scale web=1
+load_stop "scale to 1"
 
 step "restart under load"
 load_start

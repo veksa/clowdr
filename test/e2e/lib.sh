@@ -91,6 +91,19 @@ load_stop() { # load_stop WHAT: fails if any request failed
 	[ "$LOAD_FAILED" -eq 0 ] || fail "$1: $LOAD_FAILED of $LOAD_TOTAL requests failed"
 }
 
+# slow_nginx_dns: delays the loopback of the nginx container, which its queries to Docker's DNS
+# (127.0.0.11) take, by 150ms each way. nginx resolves a container name it did not have only
+# after a reload; this stretches that moment from about a millisecond to 0.3s, so a switch that
+# routes to a name nginx has not resolved yet fails requests every time instead of now and then.
+slow_nginx_dns() {
+	local pid
+	pid="$(docker inspect -f '{{.State.Pid}}' clowdr-nginx)"
+	modprobe sch_netem 2>/dev/null || true
+	nsenter -t "$pid" -n tc qdisc replace dev lo root netem delay 150ms ||
+		fail "cannot delay the loopback of the nginx container"
+	nsenter -t "$pid" -n tc qdisc show dev lo
+}
+
 cc() { clowctl --context e2e -e prod "$@"; }
 release() { # release TAG: deploy web with release.txt = TAG
 	echo "$1" >web/public/release.txt

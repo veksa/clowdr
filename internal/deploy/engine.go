@@ -98,6 +98,10 @@ type Engine struct {
 	Syslog bool
 	// MoveLogs moves a renamed project's logs, traces and metrics to its new name. Optional.
 	MoveLogs func(old, name string)
+	// ResolveSettle is how long new container names stay in nginx next to names that already
+	// resolve before they take the traffic alone: the time nginx's freshly started workers need
+	// to resolve them (see ingress.RenderUpstreams). Zero only in tests.
+	ResolveSettle time.Duration
 
 	locks   sync.Map // project/service -> *sync.Mutex
 	gates   sync.Map // project -> *sync.RWMutex: operations hold it shared, a rename exclusively
@@ -105,7 +109,10 @@ type Engine struct {
 	renameM sync.Mutex
 	pushed  sync.Map // image -> time.Time of the last push
 	renderM sync.Mutex
-	netM    sync.Mutex // expose_to connects vs pruneForeign
+	// overlaps are targets rendered next to a service's current ones while a start-first
+	// switch lets nginx resolve them, project/service -> host:port. Guarded by renderM.
+	overlaps map[string][]string
+	netM     sync.Mutex // expose_to connects vs pruneForeign
 	// quotaM guards quota checks and reserved: memory of deploys in flight, project/service -> bytes,
 	// so two deploys of a project cannot both fit a quota that holds only one.
 	quotaM   sync.Mutex
@@ -116,7 +123,8 @@ type Engine struct {
 func New(d Docker, st *store.Store, platform func() *config.Platform, ing *ingress.Controller, log *slog.Logger) *Engine {
 	return &Engine{
 		Docker: d, Store: st, Platform: platform, Ingress: ing, Log: log,
-		Prober: httpProber{c: &http.Client{Timeout: 5 * time.Second}},
+		Prober:        httpProber{c: &http.Client{Timeout: 5 * time.Second}},
+		ResolveSettle: time.Second,
 		CertExists: func(domain string) bool {
 			_, err := os.Stat(filepath.Join(ingress.CertDir, domain, "fullchain.pem"))
 			return err == nil
@@ -451,6 +459,19 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 		}
 	}
 
+	// Start-first: nginx first serves the new containers next to the old ones, so it has resolved
+	// their names when they take the traffic alone; see ingress.RenderUpstreams.
+	overlap := old != nil && !stopFirst && !svc.Stopped && svc.Spec.Port != 0 && s.Port != 0 && len(old.Containers) > 0
+	if overlap {
+		progress("r%d takes traffic next to r%d", rel.ID, old.ID)
+		if err := e.overlap(ctx, req.Project, s.Name, targets(started, s.Port)); err != nil {
+			e.endOverlap(req.Project, s.Name)
+			e.RenderProject(context.WithoutCancel(ctx), req.Project)
+			cleanup()
+			return fail(fmt.Errorf("nginx: %w", err))
+		}
+	}
+
 	// Switch: state first (the renderer reads it), then nginx; on nginx failure revert both.
 	prevSvc := svc
 	_, err = e.Store.UpdateService(req.Project, s.Name, func(v *store.Service) error {
@@ -462,7 +483,13 @@ func (e *Engine) Deploy(ctx context.Context, req Request, progress Progress) (st
 		v.Stopped = false
 		return nil
 	})
+	if overlap {
+		e.endOverlap(req.Project, s.Name)
+	}
 	if err != nil {
+		if overlap {
+			e.RenderProject(context.WithoutCancel(ctx), req.Project)
+		}
 		cleanup()
 		return fail(err)
 	}
@@ -1044,6 +1071,55 @@ func (e *Engine) Remove(ctx context.Context, project, service string) error {
 	return nil
 }
 
+// overlap renders the project with targets added to the service's current ones and waits
+// until nginx has resolved them.
+func (e *Engine) overlap(ctx context.Context, project, service string, targets []string) error {
+	e.renderM.Lock()
+	if e.overlaps == nil {
+		e.overlaps = map[string][]string{}
+	}
+	e.overlaps[project+"/"+service] = targets
+	content, err := e.renderProject(project)
+	if err == nil {
+		err = e.Ingress.Apply(ctx, ingress.File{Path: ingress.ProjectFile(project), Content: content})
+	}
+	e.renderM.Unlock()
+	if err != nil {
+		return err
+	}
+	return e.settle(ctx)
+}
+
+// endOverlap stops rendering the targets overlap added; the next render drops them.
+func (e *Engine) endOverlap(project, service string) {
+	e.renderM.Lock()
+	defer e.renderM.Unlock()
+	delete(e.overlaps, project+"/"+service)
+}
+
+// settle waits ResolveSettle after a reload that added container names.
+func (e *Engine) settle(ctx context.Context) error {
+	if e.ResolveSettle <= 0 {
+		return nil
+	}
+	t := time.NewTimer(e.ResolveSettle)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-t.C:
+		return nil
+	}
+}
+
+func targets(containers []string, port int) []string {
+	var ts []string
+	for _, c := range containers {
+		ts = append(ts, fmt.Sprintf("%s:%d", c, port))
+	}
+	return ts
+}
+
 // RenderProject regenerates conf.d/<project>.conf from state and applies it.
 func (e *Engine) RenderProject(ctx context.Context, project string) error {
 	e.renderM.Lock()
@@ -1089,9 +1165,10 @@ func (e *Engine) renderProject(project string) (string, error) {
 		view := ingress.ServiceView{Spec: s}
 		if !v.Stopped && v.Current != 0 && v.Spec.Port != 0 {
 			if r, err := e.Store.Release(project, v.Name, v.Current); err == nil {
-				for _, c := range r.Containers {
-					view.Targets = append(view.Targets, fmt.Sprintf("%s:%d", c, v.Spec.Port))
-				}
+				view.Targets = targets(r.Containers, v.Spec.Port)
+			}
+			if len(view.Targets) > 0 {
+				view.Targets = append(view.Targets, e.overlaps[project+"/"+v.Name]...)
 			}
 		}
 		views = append(views, view)

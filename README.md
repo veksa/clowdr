@@ -226,8 +226,10 @@ the marketplace name, the zip format and access: [docs/plugins.md](docs/plugins.
 2. `docker push` sends only the layers the server does not have yet.
 3. clowdrd starts the new containers next to the old ones and waits until `health` answers.
    If health fails, the new containers are removed and the old ones keep serving.
-4. The nginx upstream switches (`nginx -t`, then a graceful reload). The old containers are
-   drained and removed.
+4. The nginx upstream switches (`nginx -t`, then a graceful reload). nginx resolves container
+   names only after a reload, so the new containers first serve next to the old ones for a
+   second, until nginx has their addresses, and then take the traffic alone. The old containers
+   are drained and removed.
 5. The current and previous images are kept for an instant rollback; older ones are removed.
 
 When there is not enough memory for two copies (or with `switch: stop-first`), the old copy is
