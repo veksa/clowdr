@@ -175,11 +175,18 @@ func (m *Manager) OnLine(k logs.Key, l logs.Line) {
 	if err != nil {
 		return
 	}
+	// Never block the collector: it serves every stream of the container, and docker's
+	// non-blocking fluentd buffer drops the container's lines while it waits. The line is stored
+	// already, so a full queue (a rebuild holds the index) only defers it: the indexer reads
+	// the stream back from the first line it missed.
 	select {
 	case p.idx.in <- r:
-	case <-time.After(time.Second):
+	default:
 		p.mu.Lock()
 		p.idx.dropped++
+		if t := l.Time(); p.idx.catchUp.IsZero() || t.Before(p.idx.catchUp) {
+			p.idx.catchUp = t
+		}
 		p.mu.Unlock()
 	}
 }
@@ -302,13 +309,41 @@ func (p *Project) ReadRaw(since, until time.Time, fn func(received time.Time, li
 
 // readRecords parses the raw records received in [since, until).
 func (p *Project) readRecords(since, until time.Time, keep func(*Record) bool) ([]Record, error) {
+	return p.readRecordsCtx(context.Background(), since, until, keep, 0)
+}
+
+// ErrTooManyRecords is a raw query that would hold more records than maxRaw in memory.
+var ErrTooManyRecords = errors.New("the query matches too many raw records: narrow --since, name the events or filter by user")
+
+// readRecordsCtx is readRecords that stops when ctx ends and, with limit > 0, refuses to keep
+// more than limit records (the window of a busy project does not fit in memory).
+func (p *Project) readRecordsCtx(ctx context.Context, since, until time.Time, keep func(*Record) bool, limit int) ([]Record, error) {
 	var out []Record
+	var stop error
+	n := 0
 	err := p.ReadRaw(since, until, func(_ time.Time, line string) {
+		if stop != nil {
+			return
+		}
+		if n++; n%4096 == 0 && ctx.Err() != nil {
+			stop = ctx.Err()
+			return
+		}
 		r, err := Parse(line)
 		if err == nil && (keep == nil || keep(&r)) {
+			if limit > 0 && len(out) >= limit {
+				stop = ErrTooManyRecords
+				return
+			}
 			out = append(out, r)
 		}
 	})
+	if err == nil {
+		err = stop
+	}
+	if err == nil {
+		err = ctx.Err()
+	}
 	return out, err
 }
 

@@ -208,3 +208,12 @@ func TestS3AgainstFake(t *testing.T) {
 		t.Fatalf("server error: %v", err)
 	}
 }
+
+func TestS3ErrorEchoesOnlyS3Errors(t *testing.T) {
+	if got := s3Error([]byte(`<Error><Code>AccessDenied</Code><Message>no</Message></Error>`)); got != "AccessDenied no" {
+		t.Fatal(got)
+	}
+	if got := s3Error([]byte(`{"internal":"secret config"}`)); strings.Contains(got, "secret") {
+		t.Fatalf("a foreign body echoed: %q", got)
+	}
+}

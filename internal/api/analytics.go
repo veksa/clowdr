@@ -96,7 +96,9 @@ func (s *Server) analyticsArchive(w http.ResponseWriter, r *http.Request) {
 	if until.IsZero() {
 		until = time.Now()
 	}
-	const ttl = 6 * time.Hour
+	// The archive is the product's full raw history: a leaked link should not outlive the
+	// query it was made for.
+	const ttl = time.Hour
 	urls, err := p.ArchiveURLs(r.Context(), since, until, ttl, true)
 	if err != nil {
 		writeErr(w, 400, err.Error())

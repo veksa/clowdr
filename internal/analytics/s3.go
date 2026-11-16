@@ -221,7 +221,9 @@ func s3Error(b []byte) string {
 	if code := get("Code"); code != "" {
 		return strings.TrimSpace(code + " " + get("Message"))
 	}
-	return strings.TrimSpace(s)
+	// Not an S3 error: the endpoint is set by a project token, so whatever else answered there
+	// (an internal service) does not get its body echoed into the archive status.
+	return "(not an S3 error response)"
 }
 
 // Put uploads an object (private: no ACL is set).

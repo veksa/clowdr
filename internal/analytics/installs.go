@@ -84,6 +84,26 @@ func (p *Project) onInstalls(ds []InstallDecision) {
 	}
 }
 
+// missInstalls counts installs that were indexed too late for a message of their own into the
+// hourly summary of the "each" mode.
+func (p *Project) missInstalls(ds []InstallDecision) {
+	if cfg := p.Config(); cfg == nil || cfg.InstallsMode() != config.InstallsEach {
+		return
+	}
+	hour := p.m.now().Format("2006-01-02T15")
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, d := range ds {
+		if d.Kind == KindFirstVisit || d.Record.suspect() {
+			continue
+		}
+		if p.eachMissed == nil {
+			p.eachMissed = map[string]int{}
+		}
+		p.eachMissed[hour]++
+	}
+}
+
 // installMessage is the per-install text.
 func installMessage(lang, name string, d InstallDecision) string {
 	l := labels(lang)

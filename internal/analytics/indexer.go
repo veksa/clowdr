@@ -116,14 +116,15 @@ func Index(st *State, recs []Record) ([]InstallDecision, error) {
 						kept[k] = v
 					}
 				}
-				if len(kept) > 0 {
-					if err := t.PutPerson(u, Person{Props: kept}); err != nil {
-						return err
-					}
+				if len(kept) == 0 {
+					kept = nil
+				}
+				if err := t.PutPerson(u, Person{Props: kept, Deleted: true}); err != nil {
+					return err
 				}
 				continue
 			}
-			if u != "" {
+			if u != "" && !t.deleted(u) {
 				dev := r.D
 				if r.E == EventIdentify {
 					dev = r.anon()
@@ -169,13 +170,23 @@ func Index(st *State, recs []Record) ([]InstallDecision, error) {
 	return out, err
 }
 
+// deleted reports whether a user's account was erased.
+func (t *Tx) deleted(u string) bool {
+	p, ok := t.Person(u)
+	return ok && p.Deleted
+}
+
 // indexer feeds records from the collector to Index in batches, off the collector's goroutine.
 type indexer struct {
 	in      chan Record
 	sync    chan chan struct{}
-	dropped int64
+	dropped int64     // records the queue had no room for (indexed later from the stream)
+	catchUp time.Time // receive time of the first record not queued; zero when none
 	done    chan struct{}
 }
+
+// catchUpEvery is how often the indexer looks for records it had no room for.
+const catchUpEvery = 5 * time.Second
 
 const (
 	indexBatch = 500
@@ -200,8 +211,13 @@ func (p *Project) runIndexer() {
 		batch = batch[:0]
 		p.onInstalls(decisions)
 	}
+	tick := time.NewTicker(catchUpEvery)
+	defer tick.Stop()
 	for {
 		select {
+		case <-tick.C:
+			flush()
+			p.catchUp()
 		case r, ok := <-p.idx.in:
 			if !ok {
 				flush()
@@ -230,8 +246,40 @@ func (p *Project) runIndexer() {
 				}
 			}
 			flush()
+			p.catchUp()
 			close(ack)
 		}
+	}
+}
+
+// catchUp indexes the records the collector could not queue: they are in the stream already,
+// so it reads the stream back from the first of them. Index is idempotent, so the records
+// around them that were indexed already change nothing. Their installs are not announced one
+// by one (the moment has passed); in "each" mode the hourly summary counts them.
+func (p *Project) catchUp() {
+	p.mu.Lock()
+	since := p.idx.catchUp
+	if since.IsZero() || len(p.idx.in) > cap(p.idx.in)/2 {
+		p.mu.Unlock()
+		return
+	}
+	p.idx.catchUp = time.Time{}
+	p.mu.Unlock()
+	recs, err := p.readRecords(since.Add(-time.Second), time.Time{}, nil)
+	if err == nil {
+		p.indexMu.Lock()
+		var ds []InstallDecision
+		ds, err = Index(p.state, recs)
+		p.indexMu.Unlock()
+		p.missInstalls(ds)
+	}
+	if err != nil {
+		p.m.log().Error("analytics: index catch-up", "project", p.name, "err", err)
+		p.mu.Lock()
+		if p.idx.catchUp.IsZero() || since.Before(p.idx.catchUp) {
+			p.idx.catchUp = since // try again on the next tick
+		}
+		p.mu.Unlock()
 	}
 }
 

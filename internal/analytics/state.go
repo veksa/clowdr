@@ -293,6 +293,9 @@ type Person struct {
 	FirstTS string         `json:"first_ts,omitempty"`
 	LastTS  string         `json:"last_ts,omitempty"`
 	Devices []string       `json:"devices,omitempty"`
+	// Deleted marks an erased account (account_deleted): later records of the user (an offline
+	// queue, a retry) count but no longer build a person or link devices.
+	Deleted bool `json:"deleted,omitempty"`
 }
 
 const (
