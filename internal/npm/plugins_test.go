@@ -1137,7 +1137,9 @@ func TestPluginZipRebuiltAndRetained(t *testing.T) {
 	orphan := strings.Repeat("ab", 64)
 	op, _ := e.h.zipPath(orphan)
 	os.WriteFile(op, []byte("zip"), 0o600)
-	old2 := time.Now().Add(-2 * time.Hour)
+	e.mu.Lock()
+	old2 := e.now.Add(-2 * time.Hour) // by the handler's clock, not the wall clock
+	e.mu.Unlock()
 	os.Chtimes(op, old2, old2)
 	e.h.Sweep(t.Context())
 	if _, err := os.Stat(op); !os.IsNotExist(err) {
