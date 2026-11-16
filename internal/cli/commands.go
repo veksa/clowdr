@@ -181,8 +181,10 @@ func (a *app) applyCmd() *cobra.Command {
 				}
 				req.Services = append(req.Services, sp)
 			}
-			_, err = t.client.Stream(cmd.Context(), "POST", api.Path("projects", t.project, "apply"), req, a.progress)
-			return err
+			if _, err = t.client.Stream(cmd.Context(), "POST", api.Path("projects", t.project, "apply"), req, a.progress); err != nil {
+				return err
+			}
+			return a.applyAnalytics(cmd.Context(), t, d)
 		},
 	}
 }

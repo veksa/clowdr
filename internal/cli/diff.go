@@ -24,7 +24,7 @@ type fieldChange struct {
 // serviceDiff is what `clowctl apply` would do with one service.
 type serviceDiff struct {
 	Service string        `json:"service"`
-	Action  string        `json:"action"` // unchanged | reload | redeploy | not-deployed | not-in-deploy.yml
+	Action  string        `json:"action"` // unchanged | reload | redeploy | not-deployed | not-in-deploy.yml | analytics | analytics-unsupported
 	Changes []fieldChange `json:"changes,omitempty"`
 }
 
@@ -87,6 +87,16 @@ func (a *app) diffCmd() *cobra.Command {
 				}
 			}
 
+			if remote, same, supported, err := analyticsSync(cmd.Context(), t.client, t.project, d.Analytics); err != nil {
+				return err
+			} else if !same {
+				act := "analytics"
+				if !supported {
+					act = "analytics-unsupported"
+				}
+				out = append(out, serviceDiff{Service: "analytics", Action: act, Changes: []fieldChange{{Field: "analytics", Old: confJSON(remote), New: confJSON(d.Analytics)}}})
+			}
+
 			changed := false
 			for _, s := range out {
 				if s.Action != "unchanged" {
@@ -119,6 +129,10 @@ func (a *app) printDiff(out []serviceDiff) {
 			fmt.Fprintf(a.out, "- %s: on the server but not in deploy.yml (clowctl rm %s to remove)\n", s.Service, s.Service)
 		case "reload":
 			fmt.Fprintf(a.out, "~ %s: routes change, apply reloads nginx\n", s.Service)
+		case "analytics":
+			fmt.Fprintln(a.out, "~ analytics: the config changes, apply sends it")
+		case "analytics-unsupported":
+			fmt.Fprintln(a.out, "! analytics: deploy.yml has it, but the server does not support it (update clowdrd)")
 		default:
 			fmt.Fprintf(a.out, "~ %s: apply redeploys the current release with the new spec\n", s.Service)
 		}

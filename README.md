@@ -141,6 +141,7 @@ also trims the docker build cache to `--keep-cache` (20GB). `--no-gc` skips the 
 | `env` | names whose values are set with `clowctl env set` |
 | `uses`, `expose_to` | addons the service sees; projects whose network the service joins, so their services reach it as `<project>-<service>` |
 | `accept_from` (top level) | projects allowed to join this project's network with `expose_to`; without it their deploy is refused, and dropping a project from the list disconnects its running containers |
+| `analytics` (top level) | product analytics: the S3 archive, the Telegram digest and install notifications, who counts as a test person ([docs/analytics.md](docs/analytics.md)); `clowctl apply` sends it |
 
 All commands: `clowctl --help`.
 
@@ -162,6 +163,12 @@ Metrics go the same way: one JSON point per series per minute on stdout, plus CP
 every container sampled by clowdr. `clowctl metrics ls`, `clowctl metrics show <name> --by <label>`;
 format and the Node API: [docs/metrics.md](docs/metrics.md). CPU profiles of a Node service:
 `clowctl profile <service> --seconds 30`, no endpoint needed.
+
+Product analytics is the third stream: lines starting with `{"$":"analytics"` are product events
+(installs, screens, purchases). clowdr links devices to persons, decides installs and reinstalls,
+keeps daily rollups, archives to the project's S3 bucket and sends a daily Telegram digest.
+`clowctl analytics trends|funnel|retention|installs|person …`; format, config and secrets:
+[docs/analytics.md](docs/analytics.md).
 
 ## npm packages
 
