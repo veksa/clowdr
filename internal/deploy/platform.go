@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -104,7 +106,11 @@ func (e *Engine) StartNginx(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("inspect nginx: %w", err)
 	}
+	var before []ingress.File
 	if !running {
+		if before, err = e.mainOnDisk(); err != nil {
+			return err
+		}
 		if err := e.Ingress.Write(e.mainConf()...); err != nil {
 			return err
 		}
@@ -113,8 +119,17 @@ func (e *Engine) StartNginx(ctx context.Context) error {
 		// nginx serves, so the daemon starts; a container that ran before takes the config
 		// with a checked reload like any running one.
 		e.Log.Error("nginx", "err", err)
-		if !running {
-			running = e.nginxUp(ctx)
+		if up, current := e.nginxState(ctx); up && !running {
+			running = true
+			// The old container serves on (its image could not be replaced): it loaded the
+			// main files from before the write above, which nothing has checked against its
+			// image. They go back first, so a failed nginx -t below restores them and not the
+			// untested ones, which its next restart would load.
+			if !current {
+				if err := e.Ingress.Write(before...); err != nil {
+					return err
+				}
+			}
 		}
 	} else if err != nil {
 		return err
@@ -144,10 +159,25 @@ func (e *Engine) nginxCurrent(ctx context.Context) (bool, error) {
 	return ci.State.Running && !ci.State.Restarting && ci.Config.Image == e.Platform().Nginx.Image, nil
 }
 
-// nginxUp tells whether the nginx container runs, whatever its image.
-func (e *Engine) nginxUp(ctx context.Context) bool {
+// nginxState tells whether the nginx container is up, and whether it runs the configured image.
+func (e *Engine) nginxState(ctx context.Context) (up, current bool) {
 	ci, err := e.Docker.ContainerInspect(ctx, NginxContainer)
-	return err == nil && ci.State.Running && !ci.State.Restarting
+	up = err == nil && ci.State.Running && !ci.State.Restarting
+	return up, up && ci.Config.Image == e.Platform().Nginx.Image
+}
+
+// mainOnDisk reads nginx's main files as they are now; a missing one comes back empty, which
+// Write takes as "remove".
+func (e *Engine) mainOnDisk() ([]ingress.File, error) {
+	var files []ingress.File
+	for _, f := range e.mainConf() {
+		b, err := os.ReadFile(filepath.Join(e.Ingress.Dir, filepath.FromSlash(f.Path)))
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		files = append(files, ingress.File{Path: f.Path, Content: string(b)})
+	}
+	return files, nil
 }
 
 // ErrNginxDegraded marks an EnsureNginx error that left nginx serving, only not as configured

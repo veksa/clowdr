@@ -390,6 +390,25 @@ func TestStartNginx(t *testing.T) {
 		}
 	})
 
+	t.Run("new image that cannot be pulled and a config the old one rejects", func(t *testing.T) {
+		f, ng := setup(t)
+		started(t, f, ng, "# loaded by the old image\n")
+		f.e.Platform().Nginx.Image = "nginx:9.9.9-missing"
+		f.d.NoPull["nginx:9.9.9-missing"] = true
+		ng.testErr = errors.New(`unknown directive "new_directive"`)
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatal(err)
+		}
+		// The old nginx serves on what it loaded, and its next restart must find the same
+		// file, not the new one it rejected.
+		if got := read(f, "nginx.conf"); got != "# loaded by the old image\n" {
+			t.Fatalf("nginx.conf on disk is not the old one: %q", got)
+		}
+		if ng.tests != 1 || ng.reloads != 0 {
+			t.Fatalf("tests=%d reloads=%d", ng.tests, ng.reloads)
+		}
+	})
+
 	t.Run("upgrade with nginx running", func(t *testing.T) {
 		f, ng := setup(t)
 		started(t, f, ng, "# written by the previous version\n")
