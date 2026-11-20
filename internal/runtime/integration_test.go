@@ -251,7 +251,8 @@ func TestDockerEngine(t *testing.T) {
 	}
 }
 
-// A container over its memory limit is OOM-killed and inspect says so; clowdrd alerts on it.
+// A container over its memory limit is OOM-killed, docker reports it with an "oom" event and
+// inspect says so; clowdrd alerts on it.
 func TestDockerOOM(t *testing.T) {
 	d := realDocker(t)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
@@ -260,10 +261,16 @@ func TestDockerOOM(t *testing.T) {
 		t.Fatal(err)
 	}
 	id := randomName("clowdr-oom")
+	evs, errc := d.Events(ctx, []string{"oom", "die"}, "clowdr.test="+id)
 	cid, err := d.ContainerCreate(ctx, ContainerConfig{
 		Name: id, Image: testImage, Memory: 8 << 20, Labels: map[string]string{"clowdr.test": id},
-		// Holds ~64 MB in memory: far over the 8 MB limit.
-		Cmd: []string{"sh", "-c", "head -c 67108864 /dev/zero | tail > /dev/null"},
+		// tail holds ~64 MB in memory, far over the 8 MB limit; the raised oom_score_adj makes
+		// the kernel kill it (or head), not sh. sh, the init, outlives the kill: containerd
+		// reports the kill from memory.events, and with the systemd cgroup driver the cgroup is
+		// gone soon after its last process exits, so an OOM-killed init often gets no "oom"
+		// event at all (clowdrd takes those from the kernel log, see monitor.watchKernel).
+		Cmd: []string{"sh", "-c", "(echo 1000 > /proc/self/oom_score_adj; exec head -c 67108864 /dev/zero) |" +
+			" (echo 1000 > /proc/self/oom_score_adj; exec tail) > /dev/null; s=$?; sleep 1; exit $s"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -272,21 +279,34 @@ func TestDockerOOM(t *testing.T) {
 	if err := d.ContainerStart(ctx, cid); err != nil {
 		t.Fatal(err)
 	}
-	for {
-		ci, err := d.ContainerInspect(ctx, cid)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if !ci.State.Running {
-			if !ci.State.OOMKilled {
-				t.Fatalf("exited %d without OOM", ci.State.ExitCode)
-			}
-			return
-		}
+	// containerd publishes the OOM kill apart from the exit, so the "oom" event may come after
+	// the "die"; wait for both.
+	var oom, died bool
+	for !oom || !died {
 		select {
+		case ev, ok := <-evs:
+			if !ok {
+				t.Fatalf("events: %v", <-errc)
+			}
+			switch ev.Action {
+			case "oom":
+				oom = true
+			case "die":
+				died = true
+				if code := ev.Actor.Attributes["exitCode"]; code != "137" {
+					t.Fatalf("exited with code %s, want 137", code)
+				}
+			}
 		case <-ctx.Done():
-			t.Fatal("still running")
-		case <-time.After(100 * time.Millisecond):
+			t.Fatalf("no event: oom %v, die %v", oom, died)
 		}
+	}
+	// Docker sets OOMKilled before it sends the "oom" event.
+	ci, err := d.ContainerInspect(ctx, cid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ci.State.Running || !ci.State.OOMKilled || ci.State.ExitCode != 137 {
+		t.Fatalf("running %v, OOMKilled %v, exit code %d", ci.State.Running, ci.State.OOMKilled, ci.State.ExitCode)
 	}
 }
