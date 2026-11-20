@@ -221,6 +221,41 @@ func TestEnsureNginx(t *testing.T) {
 	startedIn("blog", "shop")
 }
 
+func TestEnsureNginxStartsWhenANetworkFails(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	if err := f.st.PutProject(store.Project{Name: "blog"}); err != nil {
+		t.Fatal(err)
+	}
+	// One project's network cannot be joined: nginx still starts, in every other network.
+	f.d.ConnectErr[NetworkName("shop")] = errors.New("could not find an available, non-overlapping IPv4 address pool")
+	err := f.e.EnsureNginx(ctx)
+	if !errors.Is(err, ErrNginxDegraded) || !strings.Contains(err.Error(), NetworkName("shop")) {
+		t.Fatalf("want a degraded error naming the network, got %v", err)
+	}
+	if c := f.d.ByName[NginxContainer]; c == nil || !c.Running {
+		t.Fatal("nginx did not start")
+	}
+	if got := f.d.StartedIn[NginxContainer]; !slices.Equal(got, []string{NetworkName("blog")}) {
+		t.Fatalf("nginx started in %v", got)
+	}
+
+	// The daemon start goes on with a degraded nginx, instead of exiting into a restart loop.
+	f.d.ContainerRemove(ctx, NginxContainer)
+	if err := f.e.StartNginx(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if c := f.d.ByName[NginxContainer]; c == nil || !c.Running {
+		t.Fatal("nginx did not start")
+	}
+
+	// Once the network can be joined, the next pass brings nginx into it.
+	delete(f.d.ConnectErr, NetworkName("shop"))
+	if err := f.e.EnsureNginx(ctx); err != nil || !slices.Contains(f.d.Networks[NetworkName("shop")], NginxContainer) {
+		t.Fatalf("nginx not in the shop network: %v", err)
+	}
+}
+
 func TestEnsureNginxKeepsTheOldOneWhenThePullFails(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

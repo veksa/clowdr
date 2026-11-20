@@ -34,6 +34,9 @@ type Docker struct {
 	// StartedIn records, per container, the networks it was connected to when it last started:
 	// the names a process that resolves at startup (nginx) can see.
 	StartedIn map[string][]string
+	// ConnectErr makes NetworkConnect to these networks fail, as when Docker runs out of
+	// address pools.
+	ConnectErr map[string]error
 	// ExecFn answers Exec; nil = empty output, exit 0. Execs records every call.
 	ExecFn func(container string, cmd []string) (string, int, error)
 	Execs  []string
@@ -47,7 +50,8 @@ type Docker struct {
 
 func NewDocker() *Docker {
 	return &Docker{ByName: map[string]*Container{}, Local: map[string]bool{}, Crash: map[string]bool{}, NoPull: map[string]bool{},
-		Vols: map[string]map[string]string{}, Networks: map[string][]string{}, StartedIn: map[string][]string{}}
+		Vols: map[string]map[string]string{}, Networks: map[string][]string{}, StartedIn: map[string][]string{},
+		ConnectErr: map[string]error{}}
 }
 
 func (f *Docker) Info(context.Context) (runtime.Info, error) {
@@ -256,6 +260,9 @@ func (f *Docker) NetworkEnsure(context.Context, string, map[string]string) error
 func (f *Docker) NetworkConnect(_ context.Context, network, container string, _ []string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.ConnectErr[network]; err != nil {
+		return err
+	}
 	if !slices.Contains(f.Networks[network], container) {
 		f.Networks[network] = append(f.Networks[network], container)
 	}

@@ -151,7 +151,7 @@ func (e *Engine) nginxUp(ctx context.Context) bool {
 }
 
 // ErrNginxDegraded marks an EnsureNginx error that left nginx serving, only not as configured
-// (an older image). Callers report it and go on: stopping clowdrd would not bring nginx closer.
+// (an older image, a project network it could not join). Callers report it and go on: stopping clowdrd would not bring nginx closer.
 var ErrNginxDegraded = errors.New("nginx is serving, but not as configured")
 
 // EnsureNginx makes sure the nginx container runs the configured image with clowdr's config,
@@ -200,16 +200,21 @@ func (e *Engine) EnsureNginx(ctx context.Context) error {
 			start = id
 		}
 	}
+	// A network that cannot be joined breaks the sites of its project only: nginx starts
+	// anyway, rather than leaving every project without ingress.
 	projects, err := e.Store.Projects()
 	if err != nil {
-		return err
+		e.Log.Error("nginx: cannot list the projects to join their networks", "err", err)
+		errs = append(errs, fmt.Errorf("%w: list projects: %w", ErrNginxDegraded, err))
 	}
 	for _, p := range projects {
 		if err := e.connectNginx(ctx, p.Name); err != nil {
-			return err
+			e.Log.Error("nginx is not in a project network: the project's sites fail until it is", "project", p.Name, "err", err)
+			errs = append(errs, fmt.Errorf("%w: %w", ErrNginxDegraded, err))
 		}
 	}
 	if start != "" {
+		// The errors above are logged; they do not make a nginx that is down degraded.
 		if err := e.Docker.ContainerStart(ctx, start); err != nil {
 			return fmt.Errorf("start nginx: %w", err)
 		}
