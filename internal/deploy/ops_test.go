@@ -167,8 +167,20 @@ func TestEnsureNginx(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
 	image := f.e.Platform().Nginx.Image
+	// nginx resolves upstream names when it starts: each start must already see every project network.
+	startedIn := func(want ...string) {
+		t.Helper()
+		var nets []string
+		for _, p := range want {
+			nets = append(nets, NetworkName(p))
+		}
+		slices.Sort(nets)
+		if got := f.d.StartedIn[NginxContainer]; !slices.Equal(got, nets) {
+			t.Fatalf("nginx started in networks %v, want %v", got, nets)
+		}
+	}
 
-	// First start: pull, create, start, connect to every project network.
+	// First start: pull, create, connect to every project network, start.
 	if err := f.e.EnsureNginx(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -179,14 +191,26 @@ func TestEnsureNginx(t *testing.T) {
 	if !slices.Contains(f.d.Networks[NetworkName("shop")], NginxContainer) {
 		t.Fatal("nginx is not in the project network")
 	}
+	startedIn("shop")
 
-	// Stopped: started again, not recreated.
+	// Stopped, and a project was added meanwhile: connected to it, then started, not recreated.
 	c.Running = false
+	if err := f.st.PutProject(store.Project{Name: "blog"}); err != nil {
+		t.Fatal(err)
+	}
 	if err := f.e.EnsureNginx(ctx); err != nil || !f.d.ByName[NginxContainer].Running || f.d.ByName[NginxContainer] != c {
 		t.Fatal("nginx not restarted", err)
 	}
+	startedIn("blog", "shop")
 
-	// The image changed in platform.yml: recreated.
+	// Running: left as it is, still in every network.
+	delete(f.d.StartedIn, NginxContainer)
+	if err := f.e.EnsureNginx(ctx); err != nil || f.d.ByName[NginxContainer] != c || f.d.StartedIn[NginxContainer] != nil {
+		t.Fatal("a running nginx was restarted", err)
+	}
+
+	// The image changed in platform.yml: recreated; the new container loses the old one's
+	// endpoints and has to be in every network before it starts.
 	f.e.Platform().Nginx.Image = "nginx:1.29-alpine"
 	if err := f.e.EnsureNginx(ctx); err != nil {
 		t.Fatal(err)
@@ -194,6 +218,7 @@ func TestEnsureNginx(t *testing.T) {
 	if c := f.d.ByName[NginxContainer]; c.Config.Image != "nginx:1.29-alpine" || !c.Running {
 		t.Fatalf("not recreated: %+v", c.Config)
 	}
+	startedIn("blog", "shop")
 }
 
 // liveNginx stands for `docker exec clowdr-nginx nginx ...`: it fails when the container

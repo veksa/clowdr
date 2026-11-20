@@ -31,6 +31,9 @@ type Docker struct {
 	MemTotal int64
 	Vols     map[string]map[string]string // volume name → labels
 	Networks map[string][]string          // network → connected containers
+	// StartedIn records, per container, the networks it was connected to when it last started:
+	// the names a process that resolves at startup (nginx) can see.
+	StartedIn map[string][]string
 	// ExecFn answers Exec; nil = empty output, exit 0. Execs records every call.
 	ExecFn func(container string, cmd []string) (string, int, error)
 	Execs  []string
@@ -44,7 +47,7 @@ type Docker struct {
 
 func NewDocker() *Docker {
 	return &Docker{ByName: map[string]*Container{}, Local: map[string]bool{}, Crash: map[string]bool{}, NoPull: map[string]bool{},
-		Vols: map[string]map[string]string{}, Networks: map[string][]string{}}
+		Vols: map[string]map[string]string{}, Networks: map[string][]string{}, StartedIn: map[string][]string{}}
 }
 
 func (f *Docker) Info(context.Context) (runtime.Info, error) {
@@ -109,6 +112,14 @@ func (f *Docker) ContainerStart(_ context.Context, id string) error {
 	if !c.Running {
 		c.Exit = 1
 	}
+	var nets []string
+	for n, members := range f.Networks {
+		if slices.Contains(members, id) {
+			nets = append(nets, n)
+		}
+	}
+	sort.Strings(nets)
+	f.StartedIn[id] = nets
 	return nil
 }
 
@@ -121,10 +132,14 @@ func (f *Docker) ContainerStop(_ context.Context, id string, _ time.Duration) er
 	return nil
 }
 
+// ContainerRemove also drops the container's network endpoints, as Docker does.
 func (f *Docker) ContainerRemove(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.ByName, id)
+	for n, members := range f.Networks {
+		f.Networks[n] = slices.DeleteFunc(members, func(c string) bool { return c == id })
+	}
 	return nil
 }
 

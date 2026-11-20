@@ -139,9 +139,17 @@ func (e *Engine) nginxCurrent(ctx context.Context) (bool, error) {
 
 // EnsureNginx makes sure the nginx container runs the configured image with clowdr's config,
 // and is connected to every project network.
+//
+// nginx resolves the upstream container names when it starts, through Docker's DNS, which
+// answers only for the networks the container is in at that moment. A name that does not
+// resolve then leaves its upstream without servers until the next reload, so a container
+// that is about to start (new, recreated or stopped) is connected to every project network
+// first and started after. Docker connects a created or stopped container to a network as
+// well as a running one; the endpoints are kept until the container is removed.
 func (e *Engine) EnsureNginx(ctx context.Context) error {
 	image := e.Platform().Nginx.Image
 	ci, err := e.Docker.ContainerInspect(ctx, NginxContainer)
+	start := ""
 	switch {
 	case err == nil && ci.Config.Image != image:
 		e.Log.Info("nginx image changed, recreating", "from", ci.Config.Image, "to", image)
@@ -150,9 +158,7 @@ func (e *Engine) EnsureNginx(ctx context.Context) error {
 		}
 		err = runtime.ErrNotFound
 	case err == nil && !ci.State.Running:
-		if err := e.Docker.ContainerStart(ctx, NginxContainer); err != nil {
-			return fmt.Errorf("start nginx: %w", err)
-		}
+		start = NginxContainer
 	}
 	if errors.Is(err, runtime.ErrNotFound) {
 		if _, ierr := e.Docker.ImageInspect(ctx, image); ierr != nil {
@@ -178,9 +184,7 @@ func (e *Engine) EnsureNginx(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("create nginx: %w", err)
 		}
-		if err := e.Docker.ContainerStart(ctx, id); err != nil {
-			return fmt.Errorf("start nginx: %w", err)
-		}
+		start = id
 	} else if err != nil {
 		return err
 	}
@@ -191,6 +195,11 @@ func (e *Engine) EnsureNginx(ctx context.Context) error {
 	for _, p := range projects {
 		if err := e.connectNginx(ctx, p.Name); err != nil {
 			return err
+		}
+	}
+	if start != "" {
+		if err := e.Docker.ContainerStart(ctx, start); err != nil {
+			return fmt.Errorf("start nginx: %w", err)
 		}
 	}
 	return nil
