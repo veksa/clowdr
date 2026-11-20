@@ -131,6 +131,19 @@ func (e *Engine) StartNginx(ctx context.Context) error {
 				}
 			}
 		}
+	} else if errors.Is(err, ErrNginxDown) {
+		// Nothing serves, so there is no config to check it with: report, keep the daemon up
+		// (API, alerts, renewals) and let the watchdog and housekeeping retry. An old
+		// container in its restart backoff gets back the main files it last ran on: the new
+		// ones are checked against no image yet. With no container, the new files stay for
+		// the configured image they were written for.
+		e.Log.Error("nginx is down and cannot be brought up now; clowdrd keeps running and retries", "err", err)
+		if _, ierr := e.Docker.ContainerInspect(ctx, NginxContainer); ierr == nil && before != nil {
+			if err := e.Ingress.Write(before...); err != nil {
+				return err
+			}
+		}
+		return nil
 	} else if err != nil {
 		return err
 	}
@@ -185,12 +198,19 @@ func (e *Engine) mainOnDisk() ([]ingress.File, error) {
 // stopping clowdrd would not bring nginx closer.
 var ErrNginxDegraded = errors.New("nginx is serving, but not as configured")
 
+// ErrNginxDown marks an EnsureNginx error after Docker answered, with no nginx serving: the
+// image cannot be pulled and there is no old container that runs, or Docker refused to
+// create or start one. Callers report it and keep running: the watchdog and housekeeping
+// retry, while an exiting clowdrd would only take the API, alerts and renewals down too.
+var ErrNginxDown = errors.New("nginx is not serving")
+
 // EnsureNginx makes sure the nginx container runs the configured image with clowdr's config,
 // and is connected to every project network.
 //
 // A new image is pulled before the old container is removed: a tag that does not exist, or a
 // registry that does not answer, leaves the old nginx serving (ErrNginxDegraded) rather than
-// no ingress at all.
+// no ingress at all. When nothing serves and nginx cannot be brought up, the error is
+// ErrNginxDown.
 //
 // nginx resolves the upstream container names when it starts, through Docker's DNS, which
 // answers only for the networks the container is in at that moment. A name that does not
@@ -211,28 +231,28 @@ func (e *Engine) EnsureNginx(ctx context.Context) error {
 		start = NginxContainer
 	}
 	if !exists || ci.Config.Image != image {
-		if err := e.pullNginx(ctx, image); err != nil {
-			if !exists {
-				return err
+		err := e.pullNginx(ctx, image)
+		if err == nil && exists {
+			e.Log.Info("nginx image changed, recreating", "from", ci.Config.Image, "to", image)
+			if err = e.Docker.ContainerRemove(ctx, NginxContainer); err != nil {
+				err = fmt.Errorf("remove the old nginx: %w", err)
 			}
-			// One in Docker's restart backoff serves nothing: there is no nginx to fall back on.
-			if ci.State.Restarting {
-				return fmt.Errorf("%w, and the old nginx (%s) keeps restarting", err, ci.Config.Image)
-			}
-			e.Log.Error("nginx keeps its old image: the new one cannot be pulled", "image", image, "running", ci.Config.Image, "err", err)
-			errs = append(errs, fmt.Errorf("%w: it stays on %s: %w", ErrNginxDegraded, ci.Config.Image, err))
-		} else {
-			if exists {
-				e.Log.Info("nginx image changed, recreating", "from", ci.Config.Image, "to", image)
-				if err := e.Docker.ContainerRemove(ctx, NginxContainer); err != nil {
-					return err
-				}
-			}
+		}
+		switch {
+		case err == nil:
 			id, err := e.createNginx(ctx, image)
 			if err != nil {
-				return err
+				return fmt.Errorf("%w: %w", ErrNginxDown, err)
 			}
 			start = id
+		case !exists:
+			return fmt.Errorf("%w: %w", ErrNginxDown, err)
+		case ci.State.Restarting:
+			// One in Docker's restart backoff serves nothing: there is no nginx to fall back on.
+			return fmt.Errorf("%w: %w, and the old nginx (%s) keeps restarting", ErrNginxDown, err, ci.Config.Image)
+		default:
+			e.Log.Error("nginx keeps its old image: the new one cannot replace it", "image", image, "running", ci.Config.Image, "err", err)
+			errs = append(errs, fmt.Errorf("%w: it stays on %s: %w", ErrNginxDegraded, ci.Config.Image, err))
 		}
 	}
 	// A network that cannot be joined breaks the sites of its project only: nginx starts
@@ -266,7 +286,7 @@ func (e *Engine) EnsureNginx(ctx context.Context) error {
 	if start != "" {
 		// The errors above are logged; they do not make a nginx that is down degraded.
 		if err := e.Docker.ContainerStart(ctx, start); err != nil {
-			return fmt.Errorf("start nginx: %w", err)
+			return fmt.Errorf("%w: start nginx: %w", ErrNginxDown, err)
 		}
 	}
 	return errors.Join(errs...)

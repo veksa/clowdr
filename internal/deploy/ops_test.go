@@ -319,15 +319,15 @@ func TestEnsureNginxKeepsTheOldOneWhenThePullFails(t *testing.T) {
 
 	// Crash-looping: it serves nothing, so the error is not a degraded one.
 	c.Restarting = true
-	if err := f.e.EnsureNginx(ctx); err == nil || errors.Is(err, ErrNginxDegraded) || !strings.Contains(err.Error(), "keeps restarting") {
+	if err := f.e.EnsureNginx(ctx); !errors.Is(err, ErrNginxDown) || errors.Is(err, ErrNginxDegraded) || !strings.Contains(err.Error(), "keeps restarting") {
 		t.Fatalf("a restarting nginx reported as serving: %v", err)
 	}
 	c.Restarting = false
 
 	// No container at all: nothing to fall back to, a plain error.
 	f.d.ContainerRemove(ctx, NginxContainer)
-	if err := f.e.EnsureNginx(ctx); err == nil || errors.Is(err, ErrNginxDegraded) {
-		t.Fatalf("want a hard error with no nginx to keep, got %v", err)
+	if err := f.e.EnsureNginx(ctx); !errors.Is(err, ErrNginxDown) || errors.Is(err, ErrNginxDegraded) {
+		t.Fatalf("want ErrNginxDown with no nginx to keep, got %v", err)
 	}
 }
 
@@ -448,6 +448,42 @@ func TestStartNginx(t *testing.T) {
 		}
 		if ng.tests != 1 || ng.reloads != 0 {
 			t.Fatalf("tests=%d reloads=%d", ng.tests, ng.reloads)
+		}
+	})
+
+	t.Run("restarting old nginx and a new image that cannot be pulled", func(t *testing.T) {
+		f, ng := setup(t)
+		started(t, f, ng, "# the old image last ran on this\n")
+		f.d.ByName[NginxContainer].Restarting = true
+		f.e.Platform().Nginx.Image = "nginx:9.9.9-missing"
+		f.d.NoPull["nginx:9.9.9-missing"] = true
+		// Nothing serves and nothing can be started: the daemon keeps running (API, alerts,
+		// renewals) instead of exiting into a restart loop.
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatalf("clowdrd would exit: %v", err)
+		}
+		if got := read(f, "nginx.conf"); got != "# the old image last ran on this\n" {
+			t.Fatalf("nginx.conf on disk is not the one the old image ran on: %q", got)
+		}
+		if f.d.ByName[NginxContainer] == nil {
+			t.Fatal("the old container was removed")
+		}
+	})
+
+	t.Run("no nginx and an image that cannot be pulled", func(t *testing.T) {
+		f, _ := setup(t)
+		f.e.Platform().Nginx.Image = "nginx:9.9.9-missing"
+		f.d.NoPull["nginx:9.9.9-missing"] = true
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatalf("clowdrd would exit: %v", err)
+		}
+		// The files are there for the configured image, whenever a retry gets it.
+		if read(f, "nginx.conf") != ingress.RenderMain(f.e.IngressOptions()) {
+			t.Fatal("main config not written")
+		}
+		f.d.NoPull["nginx:9.9.9-missing"] = false
+		if err := f.e.EnsureNginx(ctx); err != nil || f.d.ByName[NginxContainer] == nil || !f.d.ByName[NginxContainer].Running {
+			t.Fatalf("a retry did not bring nginx up: %v", err)
 		}
 	})
 
