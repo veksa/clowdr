@@ -23,6 +23,9 @@ import (
 type fakeDocker struct {
 	events  chan runtime.Event
 	running map[string]bool
+
+	mu        sync.Mutex
+	oomKilled map[string]bool
 }
 
 func (f *fakeDocker) Events(ctx context.Context, _ []string, _ ...string) (<-chan runtime.Event, <-chan error) {
@@ -46,6 +49,9 @@ func (f *fakeDocker) Events(ctx context.Context, _ []string, _ ...string) (<-cha
 func (f *fakeDocker) ContainerInspect(_ context.Context, id string) (runtime.ContainerInspect, error) {
 	var ci runtime.ContainerInspect
 	ci.State.Running = f.running[id]
+	f.mu.Lock()
+	ci.State.OOMKilled = f.oomKilled[id]
+	f.mu.Unlock()
 	ci.NetworkSettings.Networks = map[string]struct {
 		IPAddress string
 		Aliases   []string
@@ -171,6 +177,131 @@ func TestCrashAlerts(t *testing.T) {
 	if strings.Join(kinds, ",") != "crash,oom,restart-loop" {
 		t.Fatal(kinds)
 	}
+}
+
+// The "oom" event of an exit can come before or after its "die" (containerd publishes the
+// OOM kill from a cgroup watcher, apart from the exit), and inspect right after the exit can
+// still show OOMKilled=false.
+func TestOOMOrdering(t *testing.T) {
+	ctx := context.Background()
+	const name = "shop-api-r1-1"
+	kinds := func(f *fixture) string {
+		var out []string
+		f.m.Events.Read("shop", logs.Query{}, func(e Event) { out = append(out, e.Kind) })
+		return strings.Join(out, ",")
+	}
+	// settle waits past the grace so that a late alert would have been sent.
+	settle := func(f *fixture) { time.Sleep(f.m.OOMGrace + 50*time.Millisecond) }
+
+	t.Run("oom before die", func(t *testing.T) {
+		f := newFixture(t)
+		f.m.OOMGrace = 20 * time.Millisecond
+		f.m.handle(ctx, ev("oom", name, 1))
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "137"))
+		if got := f.sent(); len(got) != 1 || !strings.Contains(got[0], "out of memory") {
+			t.Fatalf("oom alert: %q", got)
+		}
+		settle(f)
+		if got := kinds(f); got != "oom" {
+			t.Fatal(got)
+		}
+	})
+
+	t.Run("die before oom", func(t *testing.T) {
+		f := newFixture(t)
+		f.m.OOMGrace = time.Minute
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "137"))
+		if got := f.sent(); len(got) != 0 {
+			t.Fatalf("reported before the oom event could come: %q", got)
+		}
+		f.m.handle(ctx, ev("oom", name, 1))
+		if got := f.sent(); len(got) != 1 || !strings.Contains(got[0], "out of memory") {
+			t.Fatalf("oom alert: %q", got)
+		}
+		// The event was used up: the next exit of the restarted container is a crash.
+		f.m.handle(ctx, ev("start", name, 1))
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "1"))
+		if got := kinds(f); got != "oom,crash" {
+			t.Fatal(got)
+		}
+		f.m.mu.Lock()
+		left := len(f.m.oom) + len(f.m.pending)
+		f.m.mu.Unlock()
+		if left != 0 {
+			t.Fatalf("%d entries left", left)
+		}
+	})
+
+	t.Run("inspect already shows the oom kill", func(t *testing.T) {
+		f := newFixture(t)
+		f.m.OOMGrace = time.Minute
+		f.d.oomKilled = map[string]bool{name: true}
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "137"))
+		if got := f.sent(); len(got) != 1 || !strings.Contains(got[0], "out of memory") {
+			t.Fatalf("oom alert: %q", got)
+		}
+	})
+
+	t.Run("inspect shows the oom kill by the end of the grace", func(t *testing.T) {
+		f := newFixture(t)
+		f.m.OOMGrace = 20 * time.Millisecond
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "137"))
+		f.d.mu.Lock()
+		f.d.oomKilled = map[string]bool{name: true}
+		f.d.mu.Unlock()
+		f.waitAlert(t, "out of memory")
+	})
+
+	t.Run("a kill is a crash", func(t *testing.T) {
+		f := newFixture(t)
+		f.m.OOMGrace = 20 * time.Millisecond
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "137"))
+		f.waitAlert(t, "exited with code 137")
+		settle(f)
+		if got := kinds(f); got != "crash" {
+			t.Fatal(got)
+		}
+	})
+
+	t.Run("an oom later than the grace does not label the next exit", func(t *testing.T) {
+		f := newFixture(t)
+		f.m.OOMGrace = 20 * time.Millisecond
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "137"))
+		f.waitAlert(t, "exited with code 137")
+		f.m.handle(ctx, ev("oom", name, 1))
+		f.m.handle(ctx, ev("start", name, 1))
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "1"))
+		settle(f)
+		if got := kinds(f); got != "crash,crash" {
+			t.Fatal(got)
+		}
+	})
+
+	t.Run("an oom later than the grace is dropped with the container", func(t *testing.T) {
+		f := newFixture(t)
+		f.m.OOMGrace = 20 * time.Millisecond
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "137"))
+		f.waitAlert(t, "exited with code 137")
+		f.m.handle(ctx, ev("oom", name, 1))
+		f.m.handle(ctx, ev("destroy", name, 1))
+		f.m.mu.Lock()
+		left := len(f.m.oom)
+		f.m.mu.Unlock()
+		if left != 0 {
+			t.Fatalf("%d oom entries left", left)
+		}
+	})
+
+	t.Run("dies again before the oom event", func(t *testing.T) {
+		f := newFixture(t)
+		f.m.OOMGrace = time.Minute
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "137"))
+		f.m.handle(ctx, ev("start", name, 1))
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "2"))
+		if got := kinds(f); got != "crash,crash" {
+			t.Fatal(got)
+		}
+	})
 }
 
 func TestHealthAndRecovery(t *testing.T) {
@@ -307,6 +438,12 @@ func TestRunWatchers(t *testing.T) {
 	f.p.mu.Unlock()
 	f.waitAlert(t, "does not answer /health")
 
+	// Still waiting for its "oom" event when the monitor stops: reported as a crash then.
+	f.m.mu.Lock()
+	f.m.OOMGrace = time.Hour
+	f.m.mu.Unlock()
+	f.d.events <- ev("die", "shop-api-r1-1", 1, "exitCode", "137")
+
 	for i := 0; i < 25; i++ {
 		f.m.OnLine(logs.Key{Project: "shop", Kind: logs.KindAccess, Name: "_"}, logs.Line{L: `{"host":"api.example.com","status":503}`})
 	}
@@ -318,6 +455,7 @@ func TestRunWatchers(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("Run did not stop")
 	}
+	f.waitAlert(t, "exited with code 137")
 }
 
 func TestDiskAndMemory(t *testing.T) {

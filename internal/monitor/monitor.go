@@ -48,14 +48,25 @@ type Monitor struct {
 	Min5xxRequests  int
 	Max5xxRatio     float64
 	MaxErrorsPerMin int // app log lines that look like errors (see errorLine)
+	// OOMGrace is how long a "die" with exit code 137 waits for its "oom" event (default 3s).
+	// containerd publishes the OOM kill from a cgroup watcher, apart from the exit, so docker
+	// can report "oom" after "die" and inspect can show OOMKilled=false right after the exit.
+	OOMGrace time.Duration
 
 	mu       sync.Mutex
 	starts   map[string][]time.Time // container -> start times
-	oom      map[string]bool
-	looping  map[string]time.Time // container -> when its restart loop was reported
-	failures map[string]int       // container -> consecutive failed probes
+	oom      map[string]bool        // container -> an "oom" event came before its "die"
+	pending  map[string]*pendingDie // container -> a 137 exit waiting for its "oom" event
+	looping  map[string]time.Time   // container -> when its restart loop was reported
+	failures map[string]int         // container -> consecutive failed probes
 	rates    map[rateKey]*rate
 	once     sync.Once
+}
+
+// pendingDie is a reported "die" with exit code 137 whose alert waits for the "oom" event.
+type pendingDie struct {
+	timer *time.Timer
+	emit  func(oom bool)
 }
 
 type rateKey struct{ project, service, host string }
@@ -90,8 +101,12 @@ func (m *Monitor) defaults() {
 	if m.MaxErrorsPerMin == 0 {
 		m.MaxErrorsPerMin = 100
 	}
+	if m.OOMGrace == 0 {
+		m.OOMGrace = 3 * time.Second
+	}
 	m.starts = map[string][]time.Time{}
 	m.oom = map[string]bool{}
+	m.pending = map[string]*pendingDie{}
 	m.looping = map[string]time.Time{}
 	m.failures = map[string]int{}
 	m.rates = map[rateKey]*rate{}
@@ -106,6 +121,20 @@ func (m *Monitor) Run(ctx context.Context) {
 		go func() { defer wg.Done(); f(ctx) }()
 	}
 	wg.Wait()
+	m.flushPending()
+}
+
+// flushPending reports the exits still waiting for an "oom" event as crashes, so that
+// stopping the monitor does not lose them.
+func (m *Monitor) flushPending() {
+	m.mu.Lock()
+	pending := m.pending
+	m.pending = map[string]*pendingDie{}
+	m.mu.Unlock()
+	for _, p := range pending {
+		p.timer.Stop()
+		p.emit(false)
+	}
 }
 
 // OnLine counts 5xx responses and error lines (hook for logs.Collector).
@@ -256,12 +285,29 @@ func (m *Monitor) handle(ctx context.Context, ev runtime.Event) {
 	}
 	switch ev.Action {
 	case "oom":
+		// Docker may report it before or after the "die" of the same exit.
 		m.mu.Lock()
-		m.oom[name] = true
+		p := m.pending[name]
+		if p != nil {
+			delete(m.pending, name)
+			p.timer.Stop()
+		} else {
+			m.oom[name] = true
+		}
+		m.mu.Unlock()
+		if p != nil {
+			p.emit(true)
+		}
+	case "destroy":
+		m.mu.Lock()
+		delete(m.oom, name) // an "oom" that came after the last exit was reported
 		m.mu.Unlock()
 	case "start":
 		now := time.Now()
 		m.mu.Lock()
+		// An "oom" that came after the previous exit was reported belongs to that run, not
+		// to this one.
+		delete(m.oom, name)
 		var recent []time.Time
 		for _, t := range m.starts[name] {
 			if now.Sub(t) < m.RestartWindow {
@@ -293,18 +339,57 @@ func (m *Monitor) handle(ctx context.Context, ev runtime.Event) {
 		m.mu.Lock()
 		oom := m.oom[name]
 		delete(m.oom, name)
+		prev := m.pending[name]
+		delete(m.pending, name)
 		m.mu.Unlock()
-		msg := fmt.Sprintf("%s exited with code %s", name, a["exitCode"])
-		kind := "crash"
-		if oom || a["exitCode"] == "137" && m.oomKilled(ctx, name) {
-			kind = "oom"
-			msg = fmt.Sprintf("%s was killed: out of memory", name)
+		if prev != nil {
+			// It died again before the "oom" of the previous exit came.
+			prev.timer.Stop()
+			prev.emit(false)
 		}
 		if role == "service" && m.Logs != nil {
 			m.Logs.Flush(logs.Key{Project: project, Kind: logs.KindApp, Name: service})
 		}
-		m.Events.Emit(ctx, Event{Project: project, Service: service, Kind: kind, Severity: Error, Message: msg}, m.tail(project, service, a))
+		emit := func(oom bool) {
+			msg := fmt.Sprintf("%s exited with code %s", name, a["exitCode"])
+			kind := "crash"
+			if oom {
+				kind = "oom"
+				msg = fmt.Sprintf("%s was killed: out of memory", name)
+			}
+			m.Events.Emit(ctx, Event{Project: project, Service: service, Kind: kind, Severity: Error, Message: msg}, m.tail(project, service, a))
+		}
+		switch {
+		case oom || a["exitCode"] != "137":
+			emit(oom)
+		case m.oomKilled(ctx, name):
+			emit(true)
+		default:
+			// A SIGKILL: an OOM kill whose "oom" event has not come yet, or a plain kill. Wait
+			// for the event without holding up the events of other containers.
+			m.waitOOM(ctx, name, emit)
+		}
 	}
+}
+
+// waitOOM reports a 137 exit as an OOM kill if its "oom" event comes (or inspect shows
+// OOMKilled) within OOMGrace, and as a crash otherwise.
+func (m *Monitor) waitOOM(ctx context.Context, name string, emit func(oom bool)) {
+	p := &pendingDie{emit: emit}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p.timer = time.AfterFunc(m.OOMGrace, func() {
+		m.mu.Lock()
+		mine := m.pending[name] == p
+		if mine {
+			delete(m.pending, name)
+		}
+		m.mu.Unlock()
+		if mine {
+			emit(m.oomKilled(ctx, name))
+		}
+	})
+	m.pending[name] = p
 }
 
 func (m *Monitor) oomKilled(ctx context.Context, name string) bool {
