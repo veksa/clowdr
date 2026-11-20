@@ -215,6 +215,10 @@ func (e *Engine) EnsureNginx(ctx context.Context) error {
 			if !exists {
 				return err
 			}
+			// One in Docker's restart backoff serves nothing: there is no nginx to fall back on.
+			if ci.State.Restarting {
+				return fmt.Errorf("%w, and the old nginx (%s) keeps restarting", err, ci.Config.Image)
+			}
 			e.Log.Error("nginx keeps its old image: the new one cannot be pulled", "image", image, "running", ci.Config.Image, "err", err)
 			errs = append(errs, fmt.Errorf("%w: it stays on %s: %w", ErrNginxDegraded, ci.Config.Image, err))
 		} else {

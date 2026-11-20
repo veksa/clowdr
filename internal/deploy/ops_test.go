@@ -282,6 +282,13 @@ func TestEnsureNginxKeepsTheOldOneWhenThePullFails(t *testing.T) {
 		t.Fatalf("the stopped old nginx was not started: %v", err)
 	}
 
+	// Crash-looping: it serves nothing, so the error is not a degraded one.
+	c.Restarting = true
+	if err := f.e.EnsureNginx(ctx); err == nil || errors.Is(err, ErrNginxDegraded) || !strings.Contains(err.Error(), "keeps restarting") {
+		t.Fatalf("a restarting nginx reported as serving: %v", err)
+	}
+	c.Restarting = false
+
 	// No container at all: nothing to fall back to, a plain error.
 	f.d.ContainerRemove(ctx, NginxContainer)
 	if err := f.e.EnsureNginx(ctx); err == nil || errors.Is(err, ErrNginxDegraded) {
