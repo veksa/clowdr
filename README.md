@@ -57,7 +57,8 @@ The ingress image is `nginx.image` in `platform.yml`. Keep it pinned to a versio
 (`nginx:1.31.9-alpine`, not `nginx:alpine` or `latest`): clowdrd pulls the image only when it is
 missing and recreates nginx only when the name changes, so a moving tag stays on whatever was
 pulled first and never gets security fixes. `platform.yml` is written once, so updating clowdrd
-does not change the image of an existing server. To move nginx to a new release, edit
+does not change the image of an existing server; clowdrd logs a warning at start when the tag
+carries no version. To move nginx to a new release, edit
 `nginx.image` and run `systemctl restart clowdrd`: it pulls the image and recreates the
 container, joined to every project network before it starts.
 

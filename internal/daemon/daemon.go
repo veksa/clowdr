@@ -51,6 +51,10 @@ func Run(ctx context.Context, o Options, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if !config.VersionedImage(plat.Nginx.Image) {
+		log.Warn("nginx.image in platform.yml has no version: clowdrd pulls it only when it is missing, so it never gets security fixes; pin a version and bump it by hand",
+			"image", plat.Nginx.Image, "example", config.DefaultNginxImage)
+	}
 	for _, dir := range []string{ingress.ProjectsDir, ingress.CertDir, ingress.RunDir, api.ACMEDir, o.StateDir} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err

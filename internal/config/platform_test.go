@@ -52,6 +52,24 @@ addons:
 	}
 }
 
+func TestVersionedImage(t *testing.T) {
+	for ref, want := range map[string]bool{
+		DefaultNginxImage:                         true,
+		"nginx:1.31-alpine":                       true,
+		"registry.example.test:5000/nginx:1.31.9": true,
+		"nginx@sha256:0123abcd":                   true,
+		"nginx":                                   false,
+		"nginx:alpine":                            false,
+		"nginx:latest":                            false,
+		"nginx:stable-alpine":                     false,
+		"registry.example.test:5000/nginx":        false, // the port is not a tag
+	} {
+		if got := VersionedImage(ref); got != want {
+			t.Errorf("VersionedImage(%q) = %v, want %v", ref, got, want)
+		}
+	}
+}
+
 func FuzzParsePlatform(f *testing.F) {
 	f.Add([]byte(DefaultPlatform))
 	f.Add([]byte("domain: example.com\nprojects:\n  shop: { domains: [example.com], memory: 300m }\n"))
