@@ -37,6 +37,10 @@ type Monitor struct {
 	// NginxDown is called when the nginx container exits or is removed (clowdrd brings it
 	// back if docker does not). Optional.
 	NginxDown func()
+	// OOMKills follows the kernel log and calls found with the ids of the containers whose
+	// processes the OOM killer kills, until ctx ends (default: /dev/kmsg on Linux). Docker misses
+	// some OOM kills, see watchKernel.
+	OOMKills func(ctx context.Context, found func(id string)) error
 
 	// Every is how often rates, disk and memory are checked (default a minute).
 	Every time.Duration
@@ -48,22 +52,22 @@ type Monitor struct {
 	Min5xxRequests  int
 	Max5xxRatio     float64
 	MaxErrorsPerMin int // app log lines that look like errors (see errorLine)
-	// OOMGrace is how long a "die" with exit code 137 waits for its "oom" event (default 3s).
-	// containerd publishes the OOM kill from a cgroup watcher, apart from the exit, so docker
-	// can report "oom" after "die" and inspect can show OOMKilled=false right after the exit.
+	// OOMGrace is how long a "die" with exit code 137 waits for its OOM kill to be reported
+	// (default 3s): containerd publishes it from a cgroup watcher, apart from the exit, and the
+	// kernel log is read by another goroutine, so either can come after the "die".
 	OOMGrace time.Duration
 
 	mu       sync.Mutex
 	starts   map[string][]time.Time // container -> start times
-	oom      map[string]bool        // container -> an "oom" event came before its "die"
-	pending  map[string]*pendingDie // container -> a 137 exit waiting for its "oom" event
+	oom      map[string]time.Time   // container id -> an OOM kill reported before its "die"
+	pending  map[string]*pendingDie // container id -> a 137 exit waiting for its OOM kill
 	looping  map[string]time.Time   // container -> when its restart loop was reported
 	failures map[string]int         // container -> consecutive failed probes
 	rates    map[rateKey]*rate
 	once     sync.Once
 }
 
-// pendingDie is a reported "die" with exit code 137 whose alert waits for the "oom" event.
+// pendingDie is a "die" with exit code 137 whose alert waits for the OOM kill to be reported.
 type pendingDie struct {
 	timer *time.Timer
 	emit  func(oom bool)
@@ -104,8 +108,11 @@ func (m *Monitor) defaults() {
 	if m.OOMGrace == 0 {
 		m.OOMGrace = 3 * time.Second
 	}
+	if m.OOMKills == nil {
+		m.OOMKills = followKernelOOM
+	}
 	m.starts = map[string][]time.Time{}
-	m.oom = map[string]bool{}
+	m.oom = map[string]time.Time{}
 	m.pending = map[string]*pendingDie{}
 	m.looping = map[string]time.Time{}
 	m.failures = map[string]int{}
@@ -115,6 +122,8 @@ func (m *Monitor) defaults() {
 // Run starts all watchers and blocks until ctx ends.
 func (m *Monitor) Run(ctx context.Context) {
 	m.Init()
+	// Not waited for: a read of the kernel log may not return when ctx ends.
+	go m.watchKernel(ctx)
 	var wg sync.WaitGroup
 	for _, f := range []func(context.Context){m.watchDocker, m.watchHealth, m.watchRates, m.watchResources, m.containerMetrics} {
 		wg.Add(1)
@@ -124,8 +133,8 @@ func (m *Monitor) Run(ctx context.Context) {
 	m.flushPending()
 }
 
-// flushPending reports the exits still waiting for an "oom" event as crashes, so that
-// stopping the monitor does not lose them.
+// flushPending reports the exits still waiting for an OOM kill as crashes, so that stopping
+// the monitor does not lose them.
 func (m *Monitor) flushPending() {
 	m.mu.Lock()
 	pending := m.pending
@@ -134,6 +143,42 @@ func (m *Monitor) flushPending() {
 	for _, p := range pending {
 		p.timer.Stop()
 		p.emit(false)
+	}
+}
+
+// watchKernel takes OOM kills from the kernel log. Docker learns of them from containerd's
+// watcher of the container cgroup's memory.events, which drops the kill when the cgroup is
+// gone by the time it reads the file: with the systemd cgroup driver systemd removes the scope
+// as soon as its last process exits, so an OOM-killed init (a service that is a single
+// process) often comes with a "die" and no "oom" event, and OOMKilled stays false.
+func (m *Monitor) watchKernel(ctx context.Context) {
+	err := m.OOMKills(ctx, func(id string) { m.sawOOM(id) })
+	if err != nil && ctx.Err() == nil {
+		m.Log.Warn("the kernel log is not readable: OOM kills come from docker alone, which misses some", "err", err)
+	}
+}
+
+// sawOOM records an OOM kill in a container (from docker or the kernel log; both may report
+// the same one) and resolves its exit if that is waiting for it.
+func (m *Monitor) sawOOM(id string) {
+	now := time.Now()
+	m.mu.Lock()
+	p := m.pending[id]
+	if p != nil {
+		delete(m.pending, id)
+		p.timer.Stop()
+	} else {
+		m.oom[id] = now
+		// The kernel log has every container's kills, not only clowdr's: forget old ones.
+		for k, t := range m.oom {
+			if now.Sub(t) > time.Hour {
+				delete(m.oom, k)
+			}
+		}
+	}
+	m.mu.Unlock()
+	if p != nil {
+		p.emit(true)
 	}
 }
 
@@ -261,7 +306,7 @@ func (m *Monitor) watchDocker(ctx context.Context) {
 
 func (m *Monitor) handle(ctx context.Context, ev runtime.Event) {
 	a := ev.Actor.Attributes
-	name := a["name"]
+	name, id := a["name"], ev.Actor.ID
 	project, service, role := a[runtime.LabelProject], a[runtime.LabelService], a[runtime.LabelRole]
 	if role == "addon" {
 		service = a[runtime.LabelAddon]
@@ -286,28 +331,16 @@ func (m *Monitor) handle(ctx context.Context, ev runtime.Event) {
 	switch ev.Action {
 	case "oom":
 		// Docker may report it before or after the "die" of the same exit.
-		m.mu.Lock()
-		p := m.pending[name]
-		if p != nil {
-			delete(m.pending, name)
-			p.timer.Stop()
-		} else {
-			m.oom[name] = true
-		}
-		m.mu.Unlock()
-		if p != nil {
-			p.emit(true)
-		}
+		m.sawOOM(id)
 	case "destroy":
 		m.mu.Lock()
-		delete(m.oom, name) // an "oom" that came after the last exit was reported
+		delete(m.oom, id) // an OOM kill reported after the last exit was
 		m.mu.Unlock()
 	case "start":
 		now := time.Now()
 		m.mu.Lock()
-		// An "oom" that came after the previous exit was reported belongs to that run, not
-		// to this one.
-		delete(m.oom, name)
+		// An OOM kill reported after the previous exit was belongs to that run, not to this one.
+		delete(m.oom, id)
 		var recent []time.Time
 		for _, t := range m.starts[name] {
 			if now.Sub(t) < m.RestartWindow {
@@ -337,13 +370,13 @@ func (m *Monitor) handle(ctx context.Context, ev runtime.Event) {
 			return
 		}
 		m.mu.Lock()
-		oom := m.oom[name]
-		delete(m.oom, name)
-		prev := m.pending[name]
-		delete(m.pending, name)
+		_, oom := m.oom[id]
+		delete(m.oom, id)
+		prev := m.pending[id]
+		delete(m.pending, id)
 		m.mu.Unlock()
 		if prev != nil {
-			// It died again before the "oom" of the previous exit came.
+			// It died again before the OOM kill of the previous exit was reported.
 			prev.timer.Stop()
 			prev.emit(false)
 		}
@@ -362,38 +395,38 @@ func (m *Monitor) handle(ctx context.Context, ev runtime.Event) {
 		switch {
 		case oom || a["exitCode"] != "137":
 			emit(oom)
-		case m.oomKilled(ctx, name):
+		case m.oomKilled(ctx, id):
 			emit(true)
 		default:
-			// A SIGKILL: an OOM kill whose "oom" event has not come yet, or a plain kill. Wait
-			// for the event without holding up the events of other containers.
-			m.waitOOM(ctx, name, emit)
+			// A SIGKILL: an OOM kill not reported yet, or a plain kill. Wait for the report
+			// without holding up the events of other containers.
+			m.waitOOM(ctx, id, emit)
 		}
 	}
 }
 
-// waitOOM reports a 137 exit as an OOM kill if its "oom" event comes (or inspect shows
-// OOMKilled) within OOMGrace, and as a crash otherwise.
-func (m *Monitor) waitOOM(ctx context.Context, name string, emit func(oom bool)) {
+// waitOOM reports a 137 exit as an OOM kill if docker or the kernel log reports it (or inspect
+// shows OOMKilled) within OOMGrace, and as a crash otherwise.
+func (m *Monitor) waitOOM(ctx context.Context, id string, emit func(oom bool)) {
 	p := &pendingDie{emit: emit}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p.timer = time.AfterFunc(m.OOMGrace, func() {
 		m.mu.Lock()
-		mine := m.pending[name] == p
+		mine := m.pending[id] == p
 		if mine {
-			delete(m.pending, name)
+			delete(m.pending, id)
 		}
 		m.mu.Unlock()
 		if mine {
-			emit(m.oomKilled(ctx, name))
+			emit(m.oomKilled(ctx, id))
 		}
 	})
-	m.pending[name] = p
+	m.pending[id] = p
 }
 
-func (m *Monitor) oomKilled(ctx context.Context, name string) bool {
-	ci, err := m.Docker.ContainerInspect(ctx, name)
+func (m *Monitor) oomKilled(ctx context.Context, id string) bool {
+	ci, err := m.Docker.ContainerInspect(ctx, id)
 	return err == nil && ci.State.OOMKilled
 }
 

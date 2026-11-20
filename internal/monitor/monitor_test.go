@@ -77,6 +77,7 @@ type fixture struct {
 	m      *Monitor
 	d      *fakeDocker
 	p      *prober
+	kernel chan func(id string) // the found callback of OOMKills once Run starts it
 	mu     sync.Mutex
 	alerts []string
 }
@@ -107,11 +108,17 @@ func newFixture(t *testing.T) *fixture {
 		v.Spec = spec.Service{Name: "api", Port: 3000, Health: spec.Health{Path: "/health"}}
 		return nil
 	})
-	f := &fixture{d: &fakeDocker{events: make(chan runtime.Event), running: map[string]bool{"shop-api-r1-1": true}}, p: &prober{}}
+	f := &fixture{d: &fakeDocker{events: make(chan runtime.Event), running: map[string]bool{"shop-api-r1-1": true}}, p: &prober{},
+		kernel: make(chan func(string), 1)}
 	plat, _ := config.ParsePlatform(nil)
 	f.m = &Monitor{
 		Docker: f.d, Store: st, Logs: ls, Prober: f.p, Platform: func() *config.Platform { return plat },
 		Log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		OOMKills: func(ctx context.Context, found func(string)) error {
+			f.kernel <- found
+			<-ctx.Done()
+			return nil
+		},
 		Events: &Events{Logs: ls, Alert: func(_ context.Context, text string) {
 			f.mu.Lock()
 			f.alerts = append(f.alerts, text)
@@ -125,6 +132,7 @@ func newFixture(t *testing.T) *fixture {
 func ev(action, name string, rel uint64, attrs ...string) runtime.Event {
 	var e runtime.Event
 	e.Action = action
+	e.Actor.ID = name // docker gives the container id; any stable key will do here
 	e.Actor.Attributes = map[string]string{
 		"name": name, runtime.LabelProject: "shop", runtime.LabelService: "api", runtime.LabelRole: "service",
 		runtime.LabelRelease: fmt.Sprint(rel), runtime.LabelReplica: "1",
@@ -292,6 +300,38 @@ func TestOOMOrdering(t *testing.T) {
 		}
 	})
 
+	t.Run("only the kernel log reports the kill", func(t *testing.T) {
+		f := newFixture(t)
+		f.m.OOMGrace = time.Minute
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "137"))
+		f.m.sawOOM(name)
+		if got := f.sent(); len(got) != 1 || !strings.Contains(got[0], "out of memory") {
+			t.Fatalf("oom alert: %q", got)
+		}
+		// Docker's own report of the same kill, if it comes, does not label the next run.
+		f.m.handle(ctx, ev("oom", name, 1))
+		f.m.handle(ctx, ev("start", name, 1))
+		f.m.handle(ctx, ev("die", name, 1, "exitCode", "1"))
+		if got := kinds(f); got != "oom,crash" {
+			t.Fatal(got)
+		}
+	})
+
+	t.Run("kills in other containers are forgotten in time", func(t *testing.T) {
+		f := newFixture(t)
+		f.m.mu.Lock()
+		f.m.oom["other"] = time.Now().Add(-2 * time.Hour)
+		f.m.mu.Unlock()
+		f.m.sawOOM("another")
+		f.m.mu.Lock()
+		_, old := f.m.oom["other"]
+		_, recent := f.m.oom["another"]
+		f.m.mu.Unlock()
+		if old || !recent {
+			t.Fatalf("old kept %v, recent kept %v", old, recent)
+		}
+	})
+
 	t.Run("dies again before the oom event", func(t *testing.T) {
 		f := newFixture(t)
 		f.m.OOMGrace = time.Minute
@@ -433,15 +473,20 @@ func TestRunWatchers(t *testing.T) {
 	f.d.events <- ev("die", "shop-api-r1-1", 1, "exitCode", "1")
 	f.waitAlert(t, "exited with code 1")
 
+	// An OOM kill that only the kernel log reports.
+	f.m.mu.Lock()
+	f.m.OOMGrace = time.Hour
+	f.m.mu.Unlock()
+	f.d.events <- ev("die", "shop-api-r1-1", 1, "exitCode", "137")
+	(<-f.kernel)("shop-api-r1-1")
+	f.waitAlert(t, "out of memory")
+
 	f.p.mu.Lock()
 	f.p.down = true
 	f.p.mu.Unlock()
 	f.waitAlert(t, "does not answer /health")
 
-	// Still waiting for its "oom" event when the monitor stops: reported as a crash then.
-	f.m.mu.Lock()
-	f.m.OOMGrace = time.Hour
-	f.m.mu.Unlock()
+	// Still waiting for its OOM kill when the monitor stops: reported as a crash then.
 	f.d.events <- ev("die", "shop-api-r1-1", 1, "exitCode", "137")
 
 	for i := 0; i < 25; i++ {
@@ -518,5 +563,23 @@ func TestNginxDown(t *testing.T) {
 	f.m.handle(ctx, ev("destroy", "shop-api-r1-1", 1))
 	if len(f.sent()) != 2 {
 		t.Fatal(f.sent())
+	}
+}
+
+func TestOOMKilled(t *testing.T) {
+	id := strings.Repeat("ab12", 16)
+	inner := strings.Repeat("cd34", 16)
+	for _, c := range []struct{ record, want string }{
+		{"3,812,4361683816,-;oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=docker-" + id + ".scope,mems_allowed=0,oom_memcg=/system.slice/docker-" + id + ".scope,task_memcg=/system.slice/docker-" + id + ".scope,task=tail,pid=78938,uid=0\n", id},
+		{"3,9,1,-;oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null),cpuset=" + id + ",mems_allowed=0,oom_memcg=/docker/" + id + ",task_memcg=/docker/" + id + ",task=awk,pid=7,uid=0\n SUBSYSTEM=memory", id},
+		// A global OOM has no oom_memcg; a nested cgroup gives every id on its path.
+		{"3,10,2,-;oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=0,global_oom,task_memcg=/docker/" + id + "/system.slice/docker-" + inner + ".scope,task=java,pid=8,uid=0", id + "," + inner},
+		{"3,11,3,-;Memory cgroup out of memory: Killed process 78938 (tail) total-vm:67000kB", ""},
+		{"6,12,4,-;eth0: link up, task_memcg=/docker/" + id, ""},
+		{"no record", ""},
+	} {
+		if got := strings.Join(oomKilled(c.record), ","); got != c.want {
+			t.Errorf("%.40q: got %q, want %q", c.record, got, c.want)
+		}
 	}
 }
