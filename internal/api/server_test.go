@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -279,6 +280,36 @@ func TestPlatformStatus(t *testing.T) {
 }
 
 // A new project does not silently get the volumes of a removed one of the same name.
+func TestPlatformStatusFlagsADegradedNginx(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.projectClient(t, "shop", "example.com")
+	e.projectClient(t, "blog", "example.org")
+	if err := e.api.Engine.EnsureNginx(ctx); err != nil {
+		t.Fatal(err)
+	}
+	status := func() NginxStatus {
+		t.Helper()
+		var st PlatformStatus
+		if err := e.admin.Do(ctx, "GET", "/v1/platform/status", nil, &st); err != nil {
+			t.Fatal(err)
+		}
+		return st.Nginx
+	}
+	if n := status(); n.State != "running" || n.Image != n.Configured || n.Unpinned || len(n.MissingNetworks) != 0 {
+		t.Fatalf("a healthy nginx flagged: %+v", n)
+	}
+
+	// Out of a project network, on an image platform.yml no longer names, and that one moves.
+	e.d.NetworkDisconnect(ctx, deploy.NetworkName("blog"), deploy.NginxContainer)
+	old := e.api.Engine.Platform().Nginx.Image
+	e.api.Engine.Platform().Nginx.Image = "nginx:alpine"
+	n := status()
+	if n.Image != old || n.Configured != "nginx:alpine" || !n.Unpinned || !slices.Equal(n.MissingNetworks, []string{"blog"}) {
+		t.Fatalf("degraded nginx not flagged: %+v", n)
+	}
+}
+
 func TestProjectVolumesLeftover(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()

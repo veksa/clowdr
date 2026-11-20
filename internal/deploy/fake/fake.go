@@ -164,6 +164,14 @@ func (f *Docker) ContainerInspect(_ context.Context, id string) (runtime.Contain
 	ci.State.Running = c.Running
 	ci.State.Restarting = c.Restarting
 	ci.State.ExitCode = c.Exit
+	switch {
+	case c.Restarting:
+		ci.State.Status = "restarting"
+	case c.Running:
+		ci.State.Status = "running"
+	default:
+		ci.State.Status = "exited"
+	}
 	ci.NetworkSettings.Networks = map[string]struct {
 		IPAddress string
 		Aliases   []string

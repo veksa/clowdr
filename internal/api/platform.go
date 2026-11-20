@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/veksa/clowdr/internal/acme"
+	"github.com/veksa/clowdr/internal/config"
 	"github.com/veksa/clowdr/internal/deploy"
 	"github.com/veksa/clowdr/internal/ingress"
 	"github.com/veksa/clowdr/internal/monitor"
@@ -31,6 +32,14 @@ type NginxStatus struct {
 	Restarts int       `json:"restarts"`
 	// ConfigError is the `nginx -t` output when the config on disk does not load.
 	ConfigError string `json:"config_error,omitempty"`
+	// Configured is nginx.image in platform.yml; Image differs from it when the new image
+	// could not be pulled and the old container serves on.
+	Configured string `json:"configured,omitempty"`
+	// Unpinned: Configured names no version, so it never gets fixes (clowdrd pulls only a
+	// missing image).
+	Unpinned bool `json:"unpinned,omitempty"`
+	// MissingNetworks are the projects whose network nginx is not in: their sites fail.
+	MissingNetworks []string `json:"missing_networks,omitempty"`
 }
 
 type CertStatus struct {
@@ -57,10 +66,23 @@ func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 		st.Host = monitor.HostStats(s.StateDir)
 	}
 
+	ps, err := s.Store.Projects()
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+
 	st.Nginx.State = "missing"
+	st.Nginx.Configured = s.Engine.Platform().Nginx.Image
+	st.Nginx.Unpinned = !config.VersionedImage(st.Nginx.Configured)
 	if ci, err := s.Engine.Docker.ContainerInspect(ctx, deploy.NginxContainer); err == nil {
 		st.Nginx.Image, st.Nginx.State = ci.Config.Image, ci.State.Status
 		st.Nginx.Started, st.Nginx.Restarts = ci.State.StartedAt, ci.RestartCount
+		for _, p := range ps {
+			if _, in := ci.NetworkSettings.Networks[deploy.NetworkName(p.Name)]; !in {
+				st.Nginx.MissingNetworks = append(st.Nginx.MissingNetworks, p.Name)
+			}
+		}
 		if ci.State.Running {
 			if out, err := (deploy.NginxExec{Docker: s.Engine.Docker}).Test(ctx); err != nil {
 				st.Nginx.ConfigError = strings.TrimSpace(err.Error() + "\n" + out)
@@ -82,11 +104,6 @@ func (s *Server) platformStatus(w http.ResponseWriter, r *http.Request) {
 		st.Certs = append(st.Certs, c)
 	}
 
-	ps, err := s.Store.Projects()
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
 	for _, p := range ps {
 		svcs, err := s.Store.Services(p.Name)
 		if err != nil {

@@ -63,7 +63,8 @@ updating clowdrd does not change the image of an existing server; clowdrd logs a
 when the tag carries no version. To move nginx to a new release, edit `nginx.image` and run
 `systemctl restart clowdrd`: it pulls the new image first (a failed pull leaves the old nginx
 serving and is logged), then recreates the container, joined to every project network before it
-starts.
+starts. `clowctl platform status` flags an nginx that runs another image than `platform.yml` names,
+one that is not in some project's network, and an image with no version.
 
 ```sh
 clowctl context add prod https://deploy.example.com --token <admin token>

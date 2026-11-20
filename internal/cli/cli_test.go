@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/veksa/clowdr/internal/api"
 )
 
 func setup(t *testing.T) (dir string, a *app) {
@@ -90,5 +93,30 @@ func TestTargetResolution(t *testing.T) {
 func TestReplicaOf(t *testing.T) {
 	if replicaOf("shop-server-r12-2") != "#2" {
 		t.Fatal(replicaOf("shop-server-r12-2"))
+	}
+}
+
+func TestPlatformStatusFlagsADegradedNginx(t *testing.T) {
+	print := func(n api.NginxStatus) string {
+		var out bytes.Buffer
+		(&app{out: &out}).printPlatformStatus(api.PlatformStatus{Version: "test", Nginx: n})
+		return out.String()
+	}
+	healthy := print(api.NginxStatus{State: "running", Image: "nginx:1.31.9-alpine", Configured: "nginx:1.31.9-alpine"})
+	for _, flag := range []string{"platform.yml says", "not in the network", "has no version"} {
+		if strings.Contains(healthy, flag) {
+			t.Fatalf("a healthy nginx flagged %q:\n%s", flag, healthy)
+		}
+	}
+	got := print(api.NginxStatus{State: "running", Image: "nginx:1.31.9-alpine", Configured: "nginx:alpine",
+		Unpinned: true, MissingNetworks: []string{"blog", "shop"}})
+	for _, flag := range []string{
+		"runs nginx:1.31.9-alpine, platform.yml says nginx:alpine",
+		"not in the network of blog, shop",
+		"nginx.image nginx:alpine has no version",
+	} {
+		if !strings.Contains(got, flag) {
+			t.Errorf("missing %q:\n%s", flag, got)
+		}
 	}
 }

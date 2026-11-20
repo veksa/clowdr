@@ -1029,6 +1029,15 @@ func (a *app) printPlatformStatus(st api.PlatformStatus) {
 	if n.ConfigError != "" {
 		fmt.Fprintf(a.out, "        config does not load: %s\n", n.ConfigError)
 	}
+	if n.Image != "" && n.Configured != "" && n.Image != n.Configured {
+		fmt.Fprintf(a.out, "        runs %s, platform.yml says %s: the new image could not be used (clowdrd log, clowctl platform reconcile)\n", n.Image, n.Configured)
+	}
+	if len(n.MissingNetworks) > 0 {
+		fmt.Fprintf(a.out, "        not in the network of %s: those sites fail (clowctl platform reconcile)\n", strings.Join(n.MissingNetworks, ", "))
+	}
+	if n.Unpinned {
+		fmt.Fprintf(a.out, "        nginx.image %s has no version, so it never gets security fixes: pin one in platform.yml\n", n.Configured)
+	}
 	if len(st.Certs) > 0 {
 		fmt.Fprintln(a.out)
 		w := a.table("CERTIFICATE", "EXPIRES")
