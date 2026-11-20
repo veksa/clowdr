@@ -151,7 +151,8 @@ func (e *Engine) nginxUp(ctx context.Context) bool {
 }
 
 // ErrNginxDegraded marks an EnsureNginx error that left nginx serving, only not as configured
-// (an older image, a project network it could not join). Callers report it and go on: stopping clowdrd would not bring nginx closer.
+// (an older image, a project network it could not join). Callers report it and go on:
+// stopping clowdrd would not bring nginx closer.
 var ErrNginxDegraded = errors.New("nginx is serving, but not as configured")
 
 // EnsureNginx makes sure the nginx container runs the configured image with clowdr's config,
