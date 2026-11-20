@@ -16,6 +16,12 @@ func TestDefaultPlatformParses(t *testing.T) {
 	if p.DeployHost() != "" {
 		t.Fatal("no domain expected")
 	}
+	if p.Nginx.Image != DefaultNginxImage {
+		t.Fatalf("written default nginx image %q, want %q", p.Nginx.Image, DefaultNginxImage)
+	}
+	if p, _ := ParsePlatform(nil); p.Nginx.Image != DefaultNginxImage {
+		t.Fatalf("default nginx image %q, want %q", p.Nginx.Image, DefaultNginxImage)
+	}
 }
 
 func TestPlatform(t *testing.T) {

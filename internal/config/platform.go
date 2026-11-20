@@ -133,6 +133,11 @@ type NPMConf struct {
 	MaxPublish Bytes `yaml:"max_publish"`
 }
 
+// DefaultNginxImage is the ingress image when platform.yml names none. It carries a version:
+// clowdrd pulls the image only when it is missing and recreates the container only when the
+// name changes, so a moving tag (nginx:alpine) would stay on whatever was pulled first.
+const DefaultNginxImage = "nginx:1.31.9-alpine"
+
 type NginxConf struct {
 	Image                 string   `yaml:"image"`
 	WorkerShutdownTimeout Duration `yaml:"worker_shutdown_timeout"`
@@ -187,7 +192,7 @@ listen: 127.0.0.1:7070
 trusted_proxies: [cloudflare]
 
 nginx:
-  image: nginx:alpine
+  image: nginx:1.31.9-alpine   # pinned: clowdrd pulls only a missing image, so a moving tag never updates
   worker_shutdown_timeout: 30s
 
 # projects:
@@ -304,7 +309,7 @@ func (p *Platform) defaults() {
 		p.Listen = "127.0.0.1:7070"
 	}
 	if p.Nginx.Image == "" {
-		p.Nginx.Image = "nginx:alpine"
+		p.Nginx.Image = DefaultNginxImage
 	}
 	if p.Nginx.WorkerShutdownTimeout == 0 {
 		p.Nginx.WorkerShutdownTimeout = Duration(30e9)

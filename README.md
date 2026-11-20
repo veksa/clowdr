@@ -53,6 +53,14 @@ an ed25519 signature by the project's release key, which is built into `install.
 (`install.sh` verifies it with openssl 3). The signature covers the release tag too, so files of
 an older release cannot be passed off as a newer one.
 
+The ingress image is `nginx.image` in `platform.yml`. Keep it pinned to a version
+(`nginx:1.31.9-alpine`, not `nginx:alpine` or `latest`): clowdrd pulls the image only when it is
+missing and recreates nginx only when the name changes, so a moving tag stays on whatever was
+pulled first and never gets security fixes. `platform.yml` is written once, so updating clowdrd
+does not change the image of an existing server. To move nginx to a new release, edit
+`nginx.image` and run `systemctl restart clowdrd`: it pulls the image and recreates the
+container, joined to every project network before it starts.
+
 ```sh
 clowctl context add prod https://deploy.example.com --token <admin token>
 clowctl project create shop --domains example.com,*.example.com --platform redis --memory 600m
