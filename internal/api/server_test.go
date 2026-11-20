@@ -279,7 +279,6 @@ func TestPlatformStatus(t *testing.T) {
 	}
 }
 
-// A new project does not silently get the volumes of a removed one of the same name.
 func TestPlatformStatusFlagsADegradedNginx(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
@@ -310,6 +309,7 @@ func TestPlatformStatusFlagsADegradedNginx(t *testing.T) {
 	}
 }
 
+// A new project does not silently get the volumes of a removed one of the same name.
 func TestProjectVolumesLeftover(t *testing.T) {
 	e := newEnv(t)
 	ctx := context.Background()
