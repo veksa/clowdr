@@ -109,7 +109,14 @@ func (e *Engine) StartNginx(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := e.EnsureNginx(ctx); err != nil {
+	if err := e.EnsureNginx(ctx); errors.Is(err, ErrNginxDegraded) {
+		// nginx serves, so the daemon starts; a container that ran before takes the config
+		// with a checked reload like any running one.
+		e.Log.Error("nginx", "err", err)
+		if !running {
+			running = e.nginxUp(ctx)
+		}
+	} else if err != nil {
 		return err
 	}
 	err = e.renderAll(ctx, running)
@@ -137,8 +144,22 @@ func (e *Engine) nginxCurrent(ctx context.Context) (bool, error) {
 	return ci.State.Running && !ci.State.Restarting && ci.Config.Image == e.Platform().Nginx.Image, nil
 }
 
+// nginxUp tells whether the nginx container runs, whatever its image.
+func (e *Engine) nginxUp(ctx context.Context) bool {
+	ci, err := e.Docker.ContainerInspect(ctx, NginxContainer)
+	return err == nil && ci.State.Running && !ci.State.Restarting
+}
+
+// ErrNginxDegraded marks an EnsureNginx error that left nginx serving, only not as configured
+// (an older image). Callers report it and go on: stopping clowdrd would not bring nginx closer.
+var ErrNginxDegraded = errors.New("nginx is serving, but not as configured")
+
 // EnsureNginx makes sure the nginx container runs the configured image with clowdr's config,
 // and is connected to every project network.
+//
+// A new image is pulled before the old container is removed: a tag that does not exist, or a
+// registry that does not answer, leaves the old nginx serving (ErrNginxDegraded) rather than
+// no ingress at all.
 //
 // nginx resolves the upstream container names when it starts, through Docker's DNS, which
 // answers only for the networks the container is in at that moment. A name that does not
@@ -149,44 +170,35 @@ func (e *Engine) nginxCurrent(ctx context.Context) (bool, error) {
 func (e *Engine) EnsureNginx(ctx context.Context) error {
 	image := e.Platform().Nginx.Image
 	ci, err := e.Docker.ContainerInspect(ctx, NginxContainer)
+	exists := err == nil
+	if err != nil && !errors.Is(err, runtime.ErrNotFound) {
+		return err
+	}
+	var errs []error
 	start := ""
-	switch {
-	case err == nil && ci.Config.Image != image:
-		e.Log.Info("nginx image changed, recreating", "from", ci.Config.Image, "to", image)
-		if err := e.Docker.ContainerRemove(ctx, NginxContainer); err != nil {
-			return err
-		}
-		err = runtime.ErrNotFound
-	case err == nil && !ci.State.Running:
+	if exists && !ci.State.Running {
 		start = NginxContainer
 	}
-	if errors.Is(err, runtime.ErrNotFound) {
-		if _, ierr := e.Docker.ImageInspect(ctx, image); ierr != nil {
-			e.Log.Info("pulling nginx", "image", image)
-			if err := e.Docker.ImagePull(ctx, image); err != nil {
+	if !exists || ci.Config.Image != image {
+		if err := e.pullNginx(ctx, image); err != nil {
+			if !exists {
 				return err
 			}
+			e.Log.Error("nginx keeps its old image: the new one cannot be pulled", "image", image, "running", ci.Config.Image, "err", err)
+			errs = append(errs, fmt.Errorf("%w: it stays on %s: %w", ErrNginxDegraded, ci.Config.Image, err))
+		} else {
+			if exists {
+				e.Log.Info("nginx image changed, recreating", "from", ci.Config.Image, "to", image)
+				if err := e.Docker.ContainerRemove(ctx, NginxContainer); err != nil {
+					return err
+				}
+			}
+			id, err := e.createNginx(ctx, image)
+			if err != nil {
+				return err
+			}
+			start = id
 		}
-		id, err := e.Docker.ContainerCreate(ctx, runtime.ContainerConfig{
-			Name:    NginxContainer,
-			Image:   image,
-			Cmd:     []string{"nginx", "-c", ingress.MainConf, "-g", "daemon off;"},
-			Labels:  map[string]string{runtime.LabelManaged: "1", runtime.LabelRole: "nginx"},
-			Restart: "always",
-			Mounts: []runtime.Mount{
-				{Type: "bind", Source: ingress.ConfDir, Target: ingress.ConfDir, ReadOnly: true},
-				{Type: "bind", Source: ingress.CertDir, Target: ingress.CertDir, ReadOnly: true},
-				{Type: "bind", Source: ingress.RunDir, Target: ingress.RunDir},
-			},
-			Ports: []runtime.PortBinding{{HostPort: 80, ContainerPort: 80}, {HostPort: 443, ContainerPort: 443}},
-			Log:   &runtime.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "10m", "max-file": "2"}},
-		})
-		if err != nil {
-			return fmt.Errorf("create nginx: %w", err)
-		}
-		start = id
-	} else if err != nil {
-		return err
 	}
 	projects, err := e.Store.Projects()
 	if err != nil {
@@ -202,7 +214,40 @@ func (e *Engine) EnsureNginx(ctx context.Context) error {
 			return fmt.Errorf("start nginx: %w", err)
 		}
 	}
+	return errors.Join(errs...)
+}
+
+// pullNginx pulls the nginx image unless it is on the host already.
+func (e *Engine) pullNginx(ctx context.Context, image string) error {
+	if _, err := e.Docker.ImageInspect(ctx, image); err == nil {
+		return nil
+	}
+	e.Log.Info("pulling nginx", "image", image)
+	if err := e.Docker.ImagePull(ctx, image); err != nil {
+		return fmt.Errorf("pull %s: %w", image, err)
+	}
 	return nil
+}
+
+func (e *Engine) createNginx(ctx context.Context, image string) (string, error) {
+	id, err := e.Docker.ContainerCreate(ctx, runtime.ContainerConfig{
+		Name:    NginxContainer,
+		Image:   image,
+		Cmd:     []string{"nginx", "-c", ingress.MainConf, "-g", "daemon off;"},
+		Labels:  map[string]string{runtime.LabelManaged: "1", runtime.LabelRole: "nginx"},
+		Restart: "always",
+		Mounts: []runtime.Mount{
+			{Type: "bind", Source: ingress.ConfDir, Target: ingress.ConfDir, ReadOnly: true},
+			{Type: "bind", Source: ingress.CertDir, Target: ingress.CertDir, ReadOnly: true},
+			{Type: "bind", Source: ingress.RunDir, Target: ingress.RunDir},
+		},
+		Ports: []runtime.PortBinding{{HostPort: 80, ContainerPort: 80}, {HostPort: 443, ContainerPort: 443}},
+		Log:   &runtime.LogConfig{Type: "json-file", Config: map[string]string{"max-size": "10m", "max-file": "2"}},
+	})
+	if err != nil {
+		return "", fmt.Errorf("create nginx: %w", err)
+	}
+	return id, nil
 }
 
 func (e *Engine) connectNginx(ctx context.Context, project string) error {

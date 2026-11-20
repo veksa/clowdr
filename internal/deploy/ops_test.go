@@ -221,6 +221,39 @@ func TestEnsureNginx(t *testing.T) {
 	startedIn("blog", "shop")
 }
 
+func TestEnsureNginxKeepsTheOldOneWhenThePullFails(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	old := f.e.Platform().Nginx.Image
+	if err := f.e.EnsureNginx(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c := f.d.ByName[NginxContainer]
+
+	// A tag that does not exist (or a registry that does not answer): the old nginx serves on.
+	f.e.Platform().Nginx.Image = "nginx:9.9.9-missing"
+	f.d.NoPull["nginx:9.9.9-missing"] = true
+	err := f.e.EnsureNginx(ctx)
+	if !errors.Is(err, ErrNginxDegraded) || !strings.Contains(err.Error(), "nginx:9.9.9-missing") {
+		t.Fatalf("want a degraded error naming the image, got %v", err)
+	}
+	if f.d.ByName[NginxContainer] != c || !c.Running || c.Config.Image != old {
+		t.Fatalf("the old nginx was not left serving: %+v", f.d.ByName[NginxContainer])
+	}
+
+	// Stopped as well: the old one is started rather than left down.
+	c.Running = false
+	if err := f.e.EnsureNginx(ctx); !errors.Is(err, ErrNginxDegraded) || f.d.ByName[NginxContainer] != c || !c.Running {
+		t.Fatalf("the stopped old nginx was not started: %v", err)
+	}
+
+	// No container at all: nothing to fall back to, a plain error.
+	f.d.ContainerRemove(ctx, NginxContainer)
+	if err := f.e.EnsureNginx(ctx); err == nil || errors.Is(err, ErrNginxDegraded) {
+		t.Fatalf("want a hard error with no nginx to keep, got %v", err)
+	}
+}
+
 // liveNginx stands for `docker exec clowdr-nginx nginx ...`: it fails when the container
 // does not run or is restarting, the way exec into such a container does.
 type liveNginx struct {
@@ -299,6 +332,25 @@ func TestStartNginx(t *testing.T) {
 		// The fresh container read the files when it started: nothing to test or reload
 		// (and liveNginx fails any exec that runs before the container exists).
 		if ng.tests != 0 || ng.reloads != 0 {
+			t.Fatalf("tests=%d reloads=%d", ng.tests, ng.reloads)
+		}
+	})
+
+	t.Run("new image that cannot be pulled", func(t *testing.T) {
+		f, ng := setup(t)
+		started(t, f, ng, "# written by the previous version\n")
+		c := f.d.ByName[NginxContainer]
+		f.e.Platform().Nginx.Image = "nginx:9.9.9-missing"
+		f.d.NoPull["nginx:9.9.9-missing"] = true
+		// The daemon starts (no crash loop), and the old nginx takes the new config with a
+		// checked reload.
+		if err := f.e.StartNginx(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if f.d.ByName[NginxContainer] != c || !c.Running {
+			t.Fatal("the old nginx was not left serving")
+		}
+		if ng.tests != 1 || ng.reloads != 1 {
 			t.Fatalf("tests=%d reloads=%d", ng.tests, ng.reloads)
 		}
 	})

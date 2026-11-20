@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -220,6 +221,30 @@ func TestIngressOnly(t *testing.T) {
 	b.Memory = 1
 	if IngressOnly(a, b) {
 		t.Fatal("memory is not ingress")
+	}
+}
+
+func TestReconcileWithANewImageThatCannotBePulled(t *testing.T) {
+	e := newEnv(t)
+	ctx := context.Background()
+	e.projectClient(t, "shop", "example.com")
+	if err := e.admin.Do(ctx, "POST", "/v1/platform/reconcile", nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	conf := filepath.Join(e.dir, "nginx.conf")
+	os.Remove(conf)
+
+	e.api.Engine.Platform().Nginx.Image = "nginx:9.9.9-missing"
+	e.d.NoPull["nginx:9.9.9-missing"] = true
+	err := e.admin.Do(ctx, "POST", "/v1/platform/reconcile", nil, nil)
+	if err == nil || !strings.Contains(err.Error(), "nginx:9.9.9-missing") {
+		t.Fatalf("want the pull error reported, got %v", err)
+	}
+	if c := e.d.ByName[deploy.NginxContainer]; c == nil || !c.Running {
+		t.Fatal("the old nginx is gone")
+	}
+	if _, err := os.Stat(conf); err != nil {
+		t.Fatal("the serving nginx did not get its config:", err)
 	}
 }
 

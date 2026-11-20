@@ -436,12 +436,18 @@ func (s *Server) deleteToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
-	if err := s.Engine.EnsureNginx(r.Context()); err != nil {
-		writeErr(w, 500, err.Error())
+	// A degraded nginx still serves: it gets the config, and the error is reported after.
+	ensureErr := s.Engine.EnsureNginx(r.Context())
+	if ensureErr != nil && !errors.Is(ensureErr, deploy.ErrNginxDegraded) {
+		writeErr(w, 500, ensureErr.Error())
 		return
 	}
 	if err := s.Engine.RenderAll(r.Context()); err != nil {
-		writeErr(w, 500, err.Error())
+		writeErr(w, 500, errors.Join(ensureErr, err).Error())
+		return
+	}
+	if ensureErr != nil {
+		writeErr(w, 500, ensureErr.Error())
 		return
 	}
 	w.WriteHeader(204)
