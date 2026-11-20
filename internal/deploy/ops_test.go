@@ -256,6 +256,41 @@ func TestEnsureNginxStartsWhenANetworkFails(t *testing.T) {
 	}
 }
 
+func TestEnsureNginxReloadsWhenARunningOneJoinsANetwork(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	ng := &liveNginx{d: f.d}
+	f.e.Ingress.Nginx = ng
+	if err := f.e.EnsureNginx(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if ng.tests != 0 || ng.reloads != 0 {
+		t.Fatalf("a fresh nginx was reloaded: tests=%d reloads=%d", ng.tests, ng.reloads)
+	}
+
+	// A pass that failed left the running nginx out of a network: the pass that joins it
+	// reloads, checked.
+	f.d.NetworkDisconnect(ctx, NetworkName("shop"), NginxContainer)
+	if err := f.e.EnsureNginx(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(f.d.Networks[NetworkName("shop")], NginxContainer) || ng.tests != 1 || ng.reloads != 1 {
+		t.Fatalf("joined=%v tests=%d reloads=%d", slices.Contains(f.d.Networks[NetworkName("shop")], NginxContainer), ng.tests, ng.reloads)
+	}
+
+	// Already in every network: nothing to reload.
+	if err := f.e.EnsureNginx(ctx); err != nil || ng.tests != 1 || ng.reloads != 1 {
+		t.Fatalf("reloaded with nothing joined: %v tests=%d reloads=%d", err, ng.tests, ng.reloads)
+	}
+
+	// A config nginx rejects: it keeps serving, the error is a degraded one.
+	f.d.NetworkDisconnect(ctx, NetworkName("shop"), NginxContainer)
+	ng.testErr = errors.New("bad config")
+	if err := f.e.EnsureNginx(ctx); !errors.Is(err, ErrNginxDegraded) || ng.reloads != 1 {
+		t.Fatalf("want a degraded error and no reload, got %v reloads=%d", err, ng.reloads)
+	}
+}
+
 func TestEnsureNginxKeepsTheOldOneWhenThePullFails(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()

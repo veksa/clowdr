@@ -242,10 +242,25 @@ func (e *Engine) EnsureNginx(ctx context.Context) error {
 		e.Log.Error("nginx: cannot list the projects to join their networks", "err", err)
 		errs = append(errs, fmt.Errorf("%w: list projects: %w", ErrNginxDegraded, err))
 	}
+	// A running nginx that joins a network it was not in (a pass that failed before) is
+	// reloaded, checked, so its workers resolve that project's names now rather than whenever
+	// the resolver retries.
+	serving := exists && start == "" && ci.State.Running && !ci.State.Restarting
+	joined := false
 	for _, p := range projects {
 		if err := e.connectNginx(ctx, p.Name); err != nil {
 			e.Log.Error("nginx is not in a project network: the project's sites fail until it is", "project", p.Name, "err", err)
 			errs = append(errs, fmt.Errorf("%w: %w", ErrNginxDegraded, err))
+			continue
+		}
+		if _, in := ci.NetworkSettings.Networks[NetworkName(p.Name)]; serving && !in {
+			joined = true
+		}
+	}
+	if joined {
+		e.Log.Info("nginx joined project networks it was not in, reloading")
+		if err := e.Ingress.ApplyAndReload(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("%w: reload after joining project networks: %w", ErrNginxDegraded, err))
 		}
 	}
 	if start != "" {
