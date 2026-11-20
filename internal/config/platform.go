@@ -138,9 +138,12 @@ type NPMConf struct {
 // name changes, so a moving tag (nginx:alpine) would stay on whatever was pulled first.
 const DefaultNginxImage = "nginx:1.31.9-alpine"
 
-// VersionedImage tells whether an image reference names a version: a digest, or a tag with a
-// digit in it (nginx:1.31.9-alpine). No tag, latest, alpine, stable or mainline move with
-// upstream releases, which clowdrd never pulls again once the image is on the host.
+// VersionedImage is a heuristic for whether an image reference names a version: a digest, or
+// a tag with a digit in it (nginx:1.31.9-alpine). It catches the tags that plainly move (no
+// tag, latest, alpine, stable, mainline), which clowdrd never pulls again once the image is on
+// the host. Moving tags with digits in them (nginx:1-alpine, nginx:1.31-alpine,
+// nginx:alpine3.22) pass as versioned, and so does any x.y.z tag, which upstream rebuilds for
+// base image fixes: only a digest names one image.
 func VersionedImage(ref string) bool {
 	if strings.Contains(ref, "@") {
 		return true

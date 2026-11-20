@@ -55,7 +55,6 @@ addons:
 func TestVersionedImage(t *testing.T) {
 	for ref, want := range map[string]bool{
 		DefaultNginxImage:                         true,
-		"nginx:1.31-alpine":                       true,
 		"registry.example.test:5000/nginx:1.31.9": true,
 		"nginx@sha256:0123abcd":                   true,
 		"nginx":                                   false,
@@ -63,6 +62,10 @@ func TestVersionedImage(t *testing.T) {
 		"nginx:latest":                            false,
 		"nginx:stable-alpine":                     false,
 		"registry.example.test:5000/nginx":        false, // the port is not a tag
+		// A heuristic: moving tags with digits pass.
+		"nginx:1-alpine":    true,
+		"nginx:1.31-alpine": true,
+		"nginx:alpine3.22":  true,
 	} {
 		if got := VersionedImage(ref); got != want {
 			t.Errorf("VersionedImage(%q) = %v, want %v", ref, got, want)
